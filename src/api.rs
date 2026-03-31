@@ -5,11 +5,15 @@ use std::net::SocketAddr;
 #[allow(dead_code)]
 pub struct JoinResponse {
     pub address: String,
+    #[serde(default)]
+    pub address_v6: Option<String>,
     pub server_public_key: String,
     #[serde(default)]
     pub peers: Vec<serde_json::Value>,
     #[serde(default)]
     pub vpn_network: Option<String>,
+    #[serde(default)]
+    pub vpn_network_v6: Option<String>,
     #[serde(default)]
     pub exit_node: Option<bool>,
     #[serde(default)]

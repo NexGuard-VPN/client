@@ -42,6 +42,14 @@ fn main() {
 
     let tun_dev = tun::TunDevice::create(args.mtu);
     tun_dev.set_address(ip, prefix);
+
+    if let Some(ref v6) = join_resp.address_v6 {
+        if let Some((v6_ip, v6_prefix)) = parse_ipv6_cidr(v6) {
+            tun_dev.set_address_v6(&v6_ip.to_string(), v6_prefix);
+            eprintln!("[vpn-client] ipv6 address: {}", v6);
+        }
+    }
+
     tun_dev.set_up();
 
     if !args.internet {
@@ -79,9 +87,12 @@ fn main() {
         if control_ip != wg_ip {
             preserve_ips.push(&control_ip);
         }
-        match route::ExitRouteState::setup(&preserve_ips, tun_dev.name()) {
+        let vpn_net = join_resp.vpn_network.as_deref()
+            .or(args.vpn_network.as_deref());
+        let has_v6 = join_resp.vpn_network_v6.is_some();
+        match route::ExitRouteState::setup_dual(&preserve_ips, tun_dev.name(), vpn_net, has_v6) {
             Ok(state) => {
-                eprintln!("[vpn-client] internet routing enabled");
+                eprintln!("[vpn-client] internet routing enabled (v6={})", has_v6);
                 Some(state)
             }
             Err(e) => {
@@ -160,6 +171,14 @@ fn b64_decode(s: &str) -> [u8; 32] {
 fn parse_cidr(s: &str) -> (Ipv4Addr, u8) {
     let (ip, prefix) = s.split_once('/').expect("invalid CIDR");
     (ip.parse().expect("invalid IP"), prefix.parse().expect("invalid prefix"))
+}
+
+fn parse_ipv6_cidr(s: &str) -> Option<(std::net::Ipv6Addr, u8)> {
+    let (ip_str, prefix_str) = s.split_once('/')?;
+    let ip: std::net::Ipv6Addr = ip_str.parse().ok()?;
+    let prefix: u8 = prefix_str.parse().ok()?;
+    if prefix > 128 { return None; }
+    Some((ip, prefix))
 }
 
 fn setup_signal_handler() {

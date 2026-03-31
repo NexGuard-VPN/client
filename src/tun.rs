@@ -10,6 +10,21 @@ impl TunDevice {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    pub fn set_address_v6(&self, ip: &str, prefix: u8) {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("ip")
+                .args(["addr", "add", &format!("{}/{}", ip, prefix), "dev", &self.name])
+                .status();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("ifconfig")
+                .args([&self.name, "inet6", &format!("{}/{}", ip, prefix)])
+                .status();
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -146,7 +161,8 @@ mod platform {
     const AF_SYS_CONTROL: u16 = 2;
     const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control\0";
     const CTLIOCGINFO: u64 = 0xc0644e03;
-    const AF_INET_HDR: [u8; 4] = [0, 0, 0, 2];
+    const AF_INET: [u8; 4] = [0, 0, 0, 2];
+    const AF_INET6: [u8; 4] = [0, 0, 0, 30];
 
     #[repr(C)]
     struct CtlInfo {
@@ -253,8 +269,13 @@ mod platform {
         }
 
         pub fn write_packet(&self, buf: &[u8]) -> std::io::Result<usize> {
+            let af = if !buf.is_empty() && (buf[0] >> 4) == 6 {
+                AF_INET6
+            } else {
+                AF_INET
+            };
             let mut pkt = Vec::with_capacity(4 + buf.len());
-            pkt.extend_from_slice(&AF_INET_HDR);
+            pkt.extend_from_slice(&af);
             pkt.extend_from_slice(buf);
             let n = unsafe { libc::write(self.fd, pkt.as_ptr() as *const _, pkt.len()) };
             if n < 0 {
