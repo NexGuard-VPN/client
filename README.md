@@ -1,6 +1,6 @@
 # VPN Client
 
-WireGuard-based VPN client with exit-node support. Linux + macOS, single binary, ~742KB.
+WireGuard-based VPN client with internet routing. Linux + macOS, single binary, ~742KB.
 
 ## Quick Start
 
@@ -8,8 +8,8 @@ WireGuard-based VPN client with exit-node support. Linux + macOS, single binary,
 # Connect to VPN (mesh mode)
 vpn-client --server <SERVER_IP>:9190 --token <TOKEN> --name my-laptop
 
-# Connect with exit-node (all traffic through VPN)
-vpn-client --server <SERVER_IP>:9190 --token <TOKEN> --name my-laptop --exit-node
+# Connect with internet mode (all traffic through VPN)
+vpn-client --server <SERVER_IP>:9190 --token <TOKEN> --name my-laptop --internet
 ```
 
 ## Install (Linux)
@@ -25,7 +25,7 @@ chmod +x /usr/local/bin/vpn-client
 curl -fsSL https://github.com/gateway-a/vpn-client/releases/latest/download/vpn-client-darwin -o /usr/local/bin/vpn-client
 chmod +x /usr/local/bin/vpn-client
 # Requires sudo for TUN device
-sudo vpn-client --server <IP>:9190 --token <TOKEN> --exit-node
+sudo vpn-client --server <IP>:9190 --token <TOKEN> --internet
 ```
 
 ## Usage
@@ -41,7 +41,7 @@ Options:
   --listen-port PORT        Local UDP port (default: random)
   --mtu SIZE                TUN MTU (default: 1420)
   --vpn-network CIDR        Additional VPN network route
-  --exit-node               Route all internet traffic through VPN
+  --internet               Route all internet traffic through VPN
 
 Environment variables:
   VPN_SERVER                Server address (fallback for --server)
@@ -49,9 +49,9 @@ Environment variables:
   VPN_NAME                  Client name (fallback for --name)
 ```
 
-## Exit-Node Mode
+## Internet Mode
 
-When `--exit-node` is used:
+When `--internet` is used:
 
 1. Adds host routes for server IP via original gateway (preserves WireGuard UDP)
 2. Adds policy routing rule to preserve SSH/inbound connections
@@ -64,8 +64,8 @@ When `--exit-node` is used:
 # Before VPN
 curl https://ifconfig.me  # → your real IP
 
-# With exit-node
-sudo vpn-client -s 1.2.3.4:9190 -t mytoken --exit-node
+# With internet mode
+sudo vpn-client -s 1.2.3.4:9190 -t mytoken --internet
 curl https://ifconfig.me  # → 1.2.3.4 (VPN server IP)
 ```
 
@@ -80,7 +80,7 @@ After=network.target
 [Service]
 Environment=VPN_SERVER=<SERVER_IP>:9190
 Environment=VPN_TOKEN=<TOKEN>
-ExecStart=/usr/local/bin/vpn-client --server \${VPN_SERVER} --token \${VPN_TOKEN} --exit-node
+ExecStart=/usr/local/bin/vpn-client --server \${VPN_SERVER} --token \${VPN_TOKEN} --internet
 Restart=always
 RestartSec=5
 
@@ -94,7 +94,7 @@ systemctl enable --now vpn-client
 
 ## Platform Support
 
-| OS | TUN | Exit-Node | Status |
+| OS | TUN | Internet | Status |
 |----|-----|-----------|--------|
 | Linux x86_64 | ✅ | ✅ | Full support |
 | Linux ARM64 | ✅ | ✅ | Full support |
@@ -111,7 +111,7 @@ systemctl enable --now vpn-client
 3. Server assigns IP from VPN subnet, registers peer
 4. Client creates TUN device, configures routes
 5. WireGuard tunnel established over UDP
-6. If exit-node: all traffic routed through TUN → server NATs to internet
+6. If internet mode: all traffic routed through TUN → server NATs to internet
 
 ## Build
 

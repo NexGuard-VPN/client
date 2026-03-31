@@ -44,7 +44,7 @@ fn main() {
     tun_dev.set_address(ip, prefix);
     tun_dev.set_up();
 
-    if !args.exit_node {
+    if !args.internet {
         if prefix < 32 {
             let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
             let net = Ipv4Addr::from(u32::from(ip) & mask);
@@ -71,7 +71,7 @@ fn main() {
         }
     }
 
-    let exit_state = if args.exit_node {
+    let exit_state = if args.internet {
         let wg_ip = server_endpoint.ip().to_string();
         let control_addr: std::net::SocketAddr = args.server.parse().expect("invalid server");
         let control_ip = control_addr.ip().to_string();
@@ -81,11 +81,11 @@ fn main() {
         }
         match route::ExitRouteState::setup(&preserve_ips, tun_dev.name()) {
             Ok(state) => {
-                eprintln!("[vpn-client] exit-node routing enabled");
+                eprintln!("[vpn-client] internet routing enabled");
                 Some(state)
             }
             Err(e) => {
-                eprintln!("[vpn-client] exit-node setup failed: {}", e);
+                eprintln!("[vpn-client] internet setup failed: {}", e);
                 None
             }
         }
@@ -183,7 +183,7 @@ struct Args {
     listen_port: u16,
     mtu: usize,
     vpn_network: Option<String>,
-    exit_node: bool,
+    internet: bool,
 }
 
 fn parse_args() -> Args {
@@ -195,7 +195,7 @@ fn parse_args() -> Args {
     let mut listen_port = 0u16;
     let mut mtu = 1420usize;
     let mut vpn_network = None;
-    let mut exit_node = false;
+    let mut internet = false;
 
     let mut i = 1;
     while i < argv.len() {
@@ -207,7 +207,7 @@ fn parse_args() -> Args {
             "--listen-port" => { i += 1; if i < argv.len() { listen_port = argv[i].parse().unwrap_or(0); } }
             "--mtu" => { i += 1; if i < argv.len() { mtu = argv[i].parse().unwrap_or(1420); } }
             "--vpn-network" | "--network" => { i += 1; if i < argv.len() { vpn_network = Some(argv[i].clone()); } }
-            "--exit-node" | "--exit" => { exit_node = true; }
+            "--internet" | "--exit" => { internet = true; }
             "--help" | "-h" => {
                 eprintln!("Usage: vpn-client [OPTIONS]");
                 eprintln!("  -s, --server IP:PORT      VPN server");
@@ -215,7 +215,7 @@ fn parse_args() -> Args {
                 eprintln!("  -n, --name NAME           Client name");
                 eprintln!("  --control-port PORT        Control API port (default: 9190)");
                 eprintln!("  --vpn-network CIDR        Server VPN network route");
-                eprintln!("  --exit-node               Route all traffic through VPN");
+                eprintln!("  --internet               Route all traffic through VPN");
                 std::process::exit(0);
             }
             _ => {
@@ -235,7 +235,7 @@ fn parse_args() -> Args {
         std::process::exit(1);
     }
 
-    Args { server, token, name, control_port, listen_port, mtu, vpn_network, exit_node }
+    Args { server, token, name, control_port, listen_port, mtu, vpn_network, internet }
 }
 
 fn generate_client_name() -> String {
