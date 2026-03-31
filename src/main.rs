@@ -1,11 +1,12 @@
 mod api;
+pub mod mesh;
 mod route;
-mod tun;
+pub mod tun;
 mod wg;
 
 use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use boringtun::noise::Tunn;
 use boringtun::x25519::{PublicKey, StaticSecret};
@@ -124,10 +125,42 @@ fn main() {
     let tx = AtomicU64::new(0);
     let rx = AtomicU64::new(0);
 
+    let mesh_mgr = if join_resp.mesh.unwrap_or(false) {
+        let mesh_port = args.listen_port.wrapping_add(1);
+        let mgr = Arc::new(mesh::MeshManager::new(private_key, mesh_port));
+        if let Some(ref peers) = join_resp.mesh_peers {
+            let parsed = api::parse_mesh_peers(peers);
+            mgr.update_peers(&parsed, &pub_key_b64);
+        }
+        eprintln!("[vpn-client] mesh mode enabled, port={}, peers={}",
+            mesh_port,
+            join_resp.mesh_peers.as_ref().map_or(0, |p| p.len()));
+
+        let refresh_mgr = Arc::clone(&mgr);
+        let refresh_server = args.server.clone();
+        let refresh_port = args.control_port;
+        let refresh_token = args.token.clone();
+        let refresh_pub_key = pub_key_b64.clone();
+        std::thread::spawn(move || {
+            let interval = std::time::Duration::from_secs(30);
+            loop {
+                std::thread::sleep(interval);
+                if SHUTDOWN.load(Ordering::Relaxed) { break; }
+                let peers = api::get_mesh_peers(&refresh_server, refresh_port, &refresh_token);
+                refresh_mgr.update_peers(&peers, &refresh_pub_key);
+            }
+        });
+        Some(mgr)
+    } else {
+        None
+    };
+
     setup_signal_handler();
-    wg::run_data_plane(&tun_dev, &udp, &tunnel, &tx, &rx, &SHUTDOWN);
+    wg::run_data_plane(&tun_dev, &udp, &tunnel, &tx, &rx, &SHUTDOWN,
+        mesh_mgr.as_ref().map(|m| m.as_ref()));
 
     drop(exit_state);
+    drop(mesh_mgr);
 }
 
 fn generate_private_key() -> [u8; 32] {

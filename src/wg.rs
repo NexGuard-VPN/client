@@ -22,6 +22,7 @@ pub fn run_data_plane(
     tx: &AtomicU64,
     rx: &AtomicU64,
     shutdown: &AtomicBool,
+    mesh: Option<&crate::mesh::MeshManager>,
 ) {
     let mut tun_buf = vec![0u8; MAX_PACKET];
     let mut udp_buf = vec![0u8; MAX_PACKET];
@@ -40,12 +41,24 @@ pub fn run_data_plane(
         if let Ok(n) = tun.read_packet(&mut tun_buf) {
             if n > 0 {
                 did_work = true;
-                let mut wg = tunnel.lock().unwrap();
-                if let TunnResult::WriteToNetwork(data) =
-                    wg.tunn.encapsulate(&tun_buf[..n], &mut enc_buf)
-                {
-                    let _ = udp.send_to(data, wg.endpoint);
-                    tx.fetch_add(data.len() as u64, Ordering::Relaxed);
+                let sent_via_mesh = if let Some(ref m) = mesh {
+                    if n >= 20 {
+                        let dst_ip = u32::from_be_bytes([tun_buf[16], tun_buf[17], tun_buf[18], tun_buf[19]]);
+                        m.try_send(&tun_buf[..n], dst_ip)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !sent_via_mesh {
+                    let mut wg = tunnel.lock().unwrap();
+                    if let TunnResult::WriteToNetwork(data) =
+                        wg.tunn.encapsulate(&tun_buf[..n], &mut enc_buf)
+                    {
+                        let _ = udp.send_to(data, wg.endpoint);
+                        tx.fetch_add(data.len() as u64, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -60,11 +73,18 @@ pub fn run_data_plane(
             Err(_) => {}
         }
 
+        if let Some(ref m) = mesh {
+            m.recv_and_process(tun);
+        }
+
         if last_tick.elapsed().as_millis() >= TIMER_TICK_MS {
             last_tick = std::time::Instant::now();
             let mut wg = tunnel.lock().unwrap();
             if let TunnResult::WriteToNetwork(data) = wg.tunn.update_timers(&mut enc_buf) {
                 let _ = udp.send_to(data, wg.endpoint);
+            }
+            if let Some(ref m) = mesh {
+                m.tick();
             }
         }
 
