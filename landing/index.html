@@ -3,388 +3,643 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NexGuard VPN — Your Server. Your IP. Your Rules.</title>
-<meta name="description" content="Deploy your own VPN server in 30 seconds. Dedicated IP, WireGuard speed, open-source client. From $9/mo.">
+<title>NexGuard — Secure Infrastructure Access</title>
+<meta name="description" content="Your own VPN server in 30 seconds. Dedicated IP, WireGuard encryption, native apps. From $5/mo.">
+<meta name="theme-color" content="#06b6d4">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><rect width='48' height='48' rx='12' fill='%230F172A'/><path d='M24 8L34 16L31 30L24 38L17 30L14 16Z' fill='%2306B6D4'/><rect x='20' y='23' width='8' height='7' rx='1.5' fill='%230F172A'/><path d='M21.5 23C21.5 23 21.5 18.5 24 18.5C26.5 18.5 26.5 23 26.5 23' stroke='%230F172A' stroke-width='2.5' fill='none'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#08090d;--surface:#0f1117;--border:rgba(255,255,255,.06);--cyan:#06b6d4;--cg:rgba(6,182,212,.15);--purple:#8b5cf6;--green:#22c55e;--yellow:#facc15;--text:#e2e8f0;--muted:#64748b;--dim:rgba(255,255,255,.3)}
+:root{
+  --bg:#050507;--surface:#0a0b10;--card:#0d0f16;--border:rgba(255,255,255,.05);
+  --cyan:#06b6d4;--cyan-dim:rgba(6,182,212,.08);--cyan-glow:rgba(6,182,212,.12);
+  --purple:#8b5cf6;--green:#22c55e;--amber:#f59e0b;
+  --text:#c8cdd5;--heading:#f0f2f5;--muted:#5a6272;
+  --radius:16px;--radius-sm:10px;
+}
 html{scroll-behavior:smooth}
-body{background:var(--bg);color:var(--text);font-family:Inter,-apple-system,sans-serif;line-height:1.6;overflow-x:hidden}
-a{color:var(--cyan);text-decoration:none}a:hover{text-decoration:underline}
-.container{max-width:1100px;margin:0 auto;padding:0 24px}
+body{background:var(--bg);color:var(--text);font-family:Inter,-apple-system,sans-serif;line-height:1.7;-webkit-font-smoothing:antialiased}
+a{color:var(--cyan);text-decoration:none;transition:color .2s}
+a:hover{color:#22d3ee}
+::selection{background:rgba(6,182,212,.25);color:#fff}
+.container{max-width:1140px;margin:0 auto;padding:0 28px}
 
-nav{position:fixed;top:0;left:0;right:0;z-index:100;backdrop-filter:blur(20px);background:rgba(8,9,13,.8);border-bottom:1px solid var(--border)}
-nav .inner{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;max-width:1100px;margin:0 auto}
-.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;color:#fff}
-.logo svg{width:32px;height:32px}
-nav .links{display:flex;gap:24px;font-size:14px}
-nav .links a{color:var(--muted);transition:color .2s}nav .links a:hover{color:#fff;text-decoration:none}
-.nav-cta{background:var(--cyan);color:#000;padding:8px 20px;border-radius:8px;font-weight:600;font-size:13px;transition:all .2s}
-.nav-cta:hover{background:#0ea5e9;text-decoration:none}
+/* Animations */
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+@keyframes pulse-glow{0%,100%{opacity:.4}50%{opacity:.8}}
+@keyframes fade-up{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+.fade-in{animation:fade-up .7s ease both}
+.delay-1{animation-delay:.1s}.delay-2{animation-delay:.2s}.delay-3{animation-delay:.3s}.delay-4{animation-delay:.4s}
 
-.hero{padding:130px 0 60px;text-align:center;position:relative}
-.hero::before{content:'';position:absolute;top:60px;left:50%;transform:translateX(-50%);width:600px;height:600px;background:radial-gradient(circle,var(--cg) 0%,transparent 70%);pointer-events:none}
-.hero h1{font-size:clamp(34px,5.5vw,60px);font-weight:800;letter-spacing:-.03em;line-height:1.1;margin-bottom:18px;position:relative}
-.hero h1 span{background:linear-gradient(135deg,var(--cyan),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-.hero p{font-size:clamp(15px,2vw,19px);color:var(--muted);max-width:520px;margin:0 auto 32px;position:relative}
-.hero-buttons{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;position:relative}
-.btn{padding:13px 28px;border-radius:10px;font-weight:600;font-size:15px;display:inline-flex;align-items:center;gap:8px;transition:all .2s;border:none;cursor:pointer}
-.btn-primary{background:var(--cyan);color:#000}.btn-primary:hover{background:#0ea5e9;transform:translateY(-1px);box-shadow:0 8px 30px var(--cg);text-decoration:none}
-.btn-ghost{background:rgba(255,255,255,.06);color:#fff;border:1px solid var(--border)}.btn-ghost:hover{background:rgba(255,255,255,.1);text-decoration:none}
+/* Nav */
+nav{position:fixed;top:0;left:0;right:0;z-index:100;transition:all .3s}
+nav.scrolled{backdrop-filter:blur(24px) saturate(1.4);background:rgba(5,5,7,.85);border-bottom:1px solid var(--border);box-shadow:0 1px 20px rgba(0,0,0,.3)}
+nav .inner{display:flex;align-items:center;justify-content:space-between;padding:18px 28px;max-width:1140px;margin:0 auto}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;color:var(--heading);letter-spacing:-.02em}
+.logo svg{width:30px;height:30px}
+nav .links{display:flex;gap:28px;font-size:13.5px;font-weight:500}
+nav .links a{color:var(--muted);transition:color .2s}
+nav .links a:hover{color:var(--heading)}
+.nav-cta{background:linear-gradient(135deg,var(--cyan),#0891b2);color:#000;padding:9px 22px;border-radius:var(--radius-sm);font-weight:600;font-size:13px;transition:all .25s;box-shadow:0 0 20px rgba(6,182,212,.15)}
+.nav-cta:hover{box-shadow:0 4px 30px rgba(6,182,212,.3);transform:translateY(-1px);color:#000}
 
-.terminal{background:#0d1117;border:1px solid var(--border);border-radius:14px;max-width:580px;margin:36px auto 0;overflow:hidden;text-align:left}
-.terminal-bar{background:rgba(255,255,255,.03);padding:10px 16px;display:flex;gap:6px;border-bottom:1px solid var(--border)}
-.dot{width:10px;height:10px;border-radius:50%}.dot.r{background:#ff5f57}.dot.y{background:#febc2e}.dot.g{background:#28c840}
-.tc{padding:18px;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.8;color:var(--muted)}
-.tc .c{color:var(--green)}.tc .f{color:var(--cyan)}.tc .v{color:var(--yellow)}.tc .ok{color:var(--green)}
+/* Hero */
+.hero{padding:160px 0 80px;text-align:center;position:relative;overflow:hidden}
+.hero-bg{position:absolute;inset:0;pointer-events:none}
+.hero-bg .orb{position:absolute;border-radius:50%;filter:blur(100px);animation:pulse-glow 6s ease infinite}
+.hero-bg .orb-1{width:500px;height:500px;background:rgba(6,182,212,.08);top:-100px;left:50%;transform:translateX(-50%)}
+.hero-bg .orb-2{width:300px;height:300px;background:rgba(139,92,246,.06);bottom:0;right:10%}
+.hero-bg .orb-3{width:200px;height:200px;background:rgba(6,182,212,.04);top:40%;left:5%;animation-delay:3s}
+.hero .badge{display:inline-flex;align-items:center;gap:6px;padding:6px 16px;border-radius:20px;font-size:12px;font-weight:600;color:var(--cyan);background:var(--cyan-dim);border:1px solid rgba(6,182,212,.12);margin-bottom:24px}
+.hero .badge .dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);animation:pulse-glow 2s ease infinite}
+.hero h1{font-size:clamp(38px,6vw,68px);font-weight:900;letter-spacing:-.04em;line-height:1.05;margin-bottom:20px;color:var(--heading);position:relative}
+.hero h1 span{background:linear-gradient(135deg,var(--cyan) 0%,var(--purple) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero p{font-size:clamp(16px,1.8vw,19px);color:var(--muted);max-width:540px;margin:0 auto 36px;line-height:1.7;position:relative}
+.hero-buttons{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;position:relative}
+.btn{padding:14px 30px;border-radius:var(--radius-sm);font-weight:600;font-size:15px;display:inline-flex;align-items:center;gap:8px;transition:all .25s;border:none;cursor:pointer;letter-spacing:-.01em}
+.btn-primary{background:linear-gradient(135deg,var(--cyan),#0891b2);color:#000;box-shadow:0 4px 20px rgba(6,182,212,.2)}
+.btn-primary:hover{box-shadow:0 8px 40px rgba(6,182,212,.35);transform:translateY(-2px);color:#000}
+.btn-ghost{background:rgba(255,255,255,.04);color:var(--heading);border:1px solid rgba(255,255,255,.08)}
+.btn-ghost:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.12);color:#fff}
 
-.stats{display:flex;justify-content:center;gap:48px;padding:36px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:60px}
-.stat-item{text-align:center}
-.stat-num{font-size:30px;font-weight:800;color:#fff}
-.stat-num.c{color:var(--cyan)}.stat-num.g{color:var(--green)}.stat-num.p{color:var(--purple)}
-.stat-label{font-size:12px;color:var(--muted);margin-top:4px}
+/* Terminal */
+.terminal{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);max-width:600px;margin:44px auto 0;overflow:hidden;text-align:left;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+.terminal-bar{background:rgba(255,255,255,.02);padding:12px 18px;display:flex;gap:7px;align-items:center;border-bottom:1px solid var(--border)}
+.dot{width:11px;height:11px;border-radius:50%}.dot.r{background:#ff5f57}.dot.y{background:#febc2e}.dot.g{background:#28c840}
+.tc{padding:20px;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.9;color:var(--muted)}
+.tc .c{color:var(--green)}.tc .f{color:var(--cyan)}.tc .v{color:var(--amber)}.tc .ok{color:var(--green)}
 
-.section{padding:50px 0}
-.section-title{font-size:clamp(26px,4vw,38px);font-weight:700;text-align:center;margin-bottom:10px;letter-spacing:-.02em}
-.section-sub{font-size:15px;color:var(--muted);text-align:center;max-width:480px;margin:0 auto 40px}
+/* Trust Bar */
+.trust{padding:48px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.trust-row{display:flex;justify-content:center;gap:56px;flex-wrap:wrap}
+.trust-item{text-align:center}
+.trust-num{font-size:34px;font-weight:800;letter-spacing:-.03em}
+.trust-num.c{color:var(--cyan)}.trust-num.g{color:var(--green)}.trust-num.p{color:var(--purple)}.trust-num.a{color:var(--amber)}
+.trust-label{font-size:12px;color:var(--muted);margin-top:4px;font-weight:500;text-transform:uppercase;letter-spacing:.5px}
 
-.features-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
-.feature{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px;transition:all .3s}
-.feature:hover{border-color:rgba(6,182,212,.2);transform:translateY(-2px)}
-.fi{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;margin-bottom:14px}
-.fi.c{background:rgba(6,182,212,.1);color:var(--cyan)}.fi.p{background:rgba(139,92,246,.1);color:var(--purple)}.fi.g{background:rgba(34,197,94,.1);color:var(--green)}.fi.y{background:rgba(250,204,21,.1);color:var(--yellow)}
-.feature h3{font-size:15px;font-weight:600;margin-bottom:6px;color:#fff}
-.feature p{font-size:13px;color:var(--muted);line-height:1.6}
+/* Section */
+.section{padding:80px 0}
+.section-label{text-align:center;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:var(--cyan);margin-bottom:12px}
+.section-title{font-size:clamp(28px,4vw,42px);font-weight:800;text-align:center;margin-bottom:14px;letter-spacing:-.03em;color:var(--heading)}
+.section-sub{font-size:16px;color:var(--muted);text-align:center;max-width:500px;margin:0 auto 52px;line-height:1.7}
+
+/* Features */
+.features-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.feature{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:30px;transition:all .35s;position:relative;overflow:hidden}
+.feature::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--cyan-glow),transparent);opacity:0;transition:opacity .35s}
+.feature:hover{border-color:rgba(6,182,212,.15);transform:translateY(-3px);box-shadow:0 16px 48px rgba(0,0,0,.3)}
+.feature:hover::before{opacity:1}
+.fi{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:18px}
+.fi.c{background:rgba(6,182,212,.08);color:var(--cyan)}
+.fi.p{background:rgba(139,92,246,.08);color:var(--purple)}
+.fi.g{background:rgba(34,197,94,.08);color:var(--green)}
+.fi.a{background:rgba(245,158,11,.08);color:var(--amber)}
+.feature h3{font-size:16px;font-weight:700;margin-bottom:8px;color:var(--heading);letter-spacing:-.01em}
+.feature p{font-size:14px;color:var(--muted);line-height:1.65}
 
 /* Pricing */
-.pricing-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;max-width:1000px;margin:0 auto}
-.price-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:28px;position:relative;transition:all .3s}
-.price-card:hover{transform:translateY(-2px)}
-.price-card.popular{border-color:var(--cyan);box-shadow:0 0 40px var(--cg)}
-.popular-tag{position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:var(--cyan);color:#000;font-size:11px;font-weight:700;padding:3px 14px;border-radius:20px;text-transform:uppercase;letter-spacing:.5px}
-.price-name{font-size:18px;font-weight:700;color:#fff;margin-bottom:4px}
-.price-amount{font-size:36px;font-weight:800;color:#fff;margin:12px 0 4px}
+.pricing-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;max-width:1060px;margin:0 auto}
+.price-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:32px 26px;position:relative;transition:all .35s}
+.price-card:hover{transform:translateY(-3px);box-shadow:0 16px 48px rgba(0,0,0,.3)}
+.price-card.pop{border-color:rgba(6,182,212,.3);background:linear-gradient(180deg,rgba(6,182,212,.04) 0%,var(--card) 40%)}
+.price-card.pop::before{content:'';position:absolute;top:0;left:20%;right:20%;height:1px;background:linear-gradient(90deg,transparent,var(--cyan),transparent)}
+.pop-tag{position:absolute;top:-11px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,var(--cyan),#0891b2);color:#000;font-size:10px;font-weight:700;padding:4px 16px;border-radius:20px;text-transform:uppercase;letter-spacing:.8px}
+.price-name{font-size:15px;font-weight:700;color:var(--heading);margin-bottom:2px}
+.price-amount{font-size:40px;font-weight:900;color:var(--heading);margin:14px 0 2px;letter-spacing:-.03em}
 .price-amount span{font-size:15px;font-weight:400;color:var(--muted)}
-.price-annual{font-size:12px;color:var(--cyan);margin-bottom:16px}
-.price-desc{font-size:13px;color:var(--muted);margin-bottom:20px;min-height:40px}
-.price-features{list-style:none;margin-bottom:24px}
-.price-features li{font-size:13px;padding:6px 0;color:var(--text);display:flex;align-items:center;gap:8px}
-.price-features li::before{content:'✓';color:var(--green);font-weight:700;font-size:14px}
-.price-features li.no::before{content:'—';color:var(--muted)}
-.price-btn{display:block;text-align:center;padding:12px;border-radius:10px;font-weight:600;font-size:14px;transition:all .2s;width:100%}
-.price-btn.primary{background:var(--cyan);color:#000}.price-btn.primary:hover{background:#0ea5e9;text-decoration:none}
-.price-btn.ghost{background:rgba(255,255,255,.06);color:#fff;border:1px solid var(--border)}.price-btn.ghost:hover{background:rgba(255,255,255,.1);text-decoration:none}
-
-.price-toggle{display:flex;justify-content:center;gap:12px;align-items:center;margin-bottom:36px;font-size:14px;color:var(--muted)}
-.price-toggle .save{background:rgba(34,197,94,.15);color:var(--green);font-size:11px;padding:2px 8px;border-radius:10px;font-weight:600}
+.price-annual{font-size:12px;color:var(--cyan);margin-bottom:18px;min-height:16px}
+.price-desc{font-size:13px;color:var(--muted);margin-bottom:22px;line-height:1.6;min-height:42px}
+.price-features{list-style:none;margin-bottom:26px}
+.price-features li{font-size:13px;padding:5px 0;color:var(--text);display:flex;align-items:center;gap:8px}
+.price-features li::before{content:'';width:16px;height:16px;border-radius:50%;background:rgba(34,197,94,.1);display:flex;align-items:center;justify-content:center;flex-shrink:0;background-image:url("data:image/svg+xml,%3Csvg width='10' height='10' viewBox='0 0 10 10' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M2 5L4 7L8 3' stroke='%2322c55e' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:center}
+.price-features li.no::before{background-image:url("data:image/svg+xml,%3Csvg width='10' height='10' viewBox='0 0 10 10' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3 5H7' stroke='%235a6272' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");background-color:rgba(255,255,255,.03)}
+.price-btn{display:block;text-align:center;padding:13px;border-radius:var(--radius-sm);font-weight:600;font-size:14px;transition:all .25s;width:100%;letter-spacing:-.01em}
+.price-btn.primary{background:linear-gradient(135deg,var(--cyan),#0891b2);color:#000;box-shadow:0 4px 16px rgba(6,182,212,.2)}
+.price-btn.primary:hover{box-shadow:0 8px 30px rgba(6,182,212,.35);transform:translateY(-1px);color:#000}
+.price-btn.ghost{background:rgba(255,255,255,.04);color:var(--heading);border:1px solid rgba(255,255,255,.08)}
+.price-btn.ghost:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.12);color:#fff}
+.price-note{text-align:center;margin-top:28px;font-size:13px;color:var(--muted)}
 
 /* Download */
-.download{text-align:center;padding:60px 0}
-.dl-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;max-width:640px;margin:0 auto}
-.dl-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;text-align:center;transition:all .3s}
-.dl-card:hover{border-color:rgba(6,182,212,.3);transform:translateY(-2px)}
-.dl-card .os{font-size:26px;margin-bottom:6px}.dl-card .name{font-weight:600;font-size:14px;color:#fff;margin-bottom:2px}
-.dl-card .arch{font-size:11px;color:var(--muted);margin-bottom:12px}
-.dl-btn{display:inline-block;padding:7px 18px;background:var(--cyan);color:#000;border-radius:8px;font-weight:600;font-size:12px;transition:all .2s}
-.dl-btn:hover{background:#0ea5e9;text-decoration:none}
+.download{text-align:center;padding:80px 0}
+.dl-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:660px;margin:0 auto}
+.dl-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:28px;text-align:center;transition:all .35s}
+.dl-card:hover{border-color:rgba(6,182,212,.15);transform:translateY(-3px);box-shadow:0 12px 40px rgba(0,0,0,.3)}
+.dl-card .os{font-size:32px;margin-bottom:10px}
+.dl-card .name{font-weight:700;font-size:15px;color:var(--heading);margin-bottom:3px}
+.dl-card .arch{font-size:12px;color:var(--muted);margin-bottom:16px}
+.dl-btn{display:inline-block;padding:9px 22px;background:linear-gradient(135deg,var(--cyan),#0891b2);color:#000;border-radius:var(--radius-sm);font-weight:600;font-size:13px;transition:all .25s}
+.dl-btn:hover{box-shadow:0 4px 20px rgba(6,182,212,.3);transform:translateY(-1px);color:#000}
 
 /* Legal */
-.legal{padding:60px 0}
-.legal h2{font-size:24px;font-weight:700;margin-bottom:24px;color:#fff}
-.legal h3{font-size:16px;font-weight:600;margin:20px 0 8px;color:#fff}
-.legal p,.legal li{font-size:14px;color:var(--muted);line-height:1.7;margin-bottom:8px}
+.legal{padding:80px 0;border-top:1px solid var(--border)}
+.legal h2{font-size:26px;font-weight:800;margin-bottom:24px;color:var(--heading);letter-spacing:-.02em}
+.legal h3{font-size:15px;font-weight:700;margin:24px 0 8px;color:var(--heading)}
+.legal p,.legal li{font-size:14px;color:var(--muted);line-height:1.75;margin-bottom:8px}
 .legal ul{padding-left:20px}
-.legal-nav{display:flex;gap:16px;margin-bottom:30px;flex-wrap:wrap}
-.legal-nav a{padding:8px 16px;border-radius:8px;font-size:13px;font-weight:600;background:rgba(255,255,255,.06);color:var(--muted);border:1px solid var(--border)}
-.legal-nav a:hover,.legal-nav a.active{color:#fff;border-color:var(--cyan);text-decoration:none}
+.legal-tabs{display:flex;gap:8px;margin-bottom:36px;flex-wrap:wrap}
+.legal-tabs a{padding:10px 20px;border-radius:var(--radius-sm);font-size:13px;font-weight:600;background:rgba(255,255,255,.03);color:var(--muted);border:1px solid var(--border);transition:all .2s}
+.legal-tabs a{cursor:pointer}
+.legal-tabs a:hover,.legal-tabs a.active{color:var(--heading);border-color:rgba(6,182,212,.3);background:var(--cyan-dim)}
 
-footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color:var(--muted);font-size:12px}
-footer .fl{display:flex;justify-content:center;gap:20px;margin-bottom:12px;flex-wrap:wrap}
+/* Footer */
+footer{border-top:1px solid var(--border);padding:40px 0;background:var(--surface)}
+.footer-inner{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:20px}
+.footer-links{display:flex;gap:24px;flex-wrap:wrap}
+.footer-links a{font-size:13px;color:var(--muted);font-weight:500;transition:color .2s}
+.footer-links a:hover{color:var(--heading)}
+.footer-copy{font-size:12px;color:var(--muted)}
 
-@media(max-width:768px){nav .links{display:none}.stats{flex-wrap:wrap;gap:20px}.features-grid,.pricing-grid{grid-template-columns:1fr}}
+/* Responsive */
+/* Deploy Wizard */
+.wizard-overlay{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.7);backdrop-filter:blur(8px);align-items:center;justify-content:center}
+.wizard-overlay.open{display:flex}
+.wizard{background:var(--card);border:1px solid var(--border);border-radius:20px;width:520px;max-width:92vw;max-height:90vh;overflow-y:auto;position:relative}
+.wizard-header{padding:24px 28px 0;display:flex;justify-content:space-between;align-items:center}
+.wizard-header h2{font-size:18px;font-weight:700;color:var(--heading)}
+.wizard-close{background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:all .2s}
+.wizard-close:hover{color:#fff;background:rgba(255,255,255,.06)}
+.wizard-body{padding:20px 28px 28px}
+.wizard-steps{display:flex;gap:4px;margin-bottom:24px}
+.wizard-step{flex:1;height:3px;border-radius:2px;background:rgba(255,255,255,.06);transition:background .3s}
+.wizard-step.active{background:var(--cyan)}
+.wizard-step.done{background:var(--green)}
+.loc-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.loc-card{background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:12px;padding:16px;text-align:center;cursor:pointer;transition:all .25s}
+.loc-card:hover{border-color:rgba(6,182,212,.2);background:rgba(6,182,212,.04)}
+.loc-card.selected{border-color:var(--cyan);background:rgba(6,182,212,.08);box-shadow:0 0 20px rgba(6,182,212,.1)}
+.loc-flag{font-size:28px;margin-bottom:6px}
+.loc-name{font-size:13px;font-weight:600;color:var(--heading)}
+.loc-city{font-size:11px;color:var(--muted)}
+.plan-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.plan-card{background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:12px;padding:18px;text-align:center;cursor:pointer;transition:all .25s}
+.plan-card:hover{border-color:rgba(6,182,212,.2)}
+.plan-card.selected{border-color:var(--cyan);background:rgba(6,182,212,.08)}
+.plan-card.best{border-color:rgba(139,92,246,.3)}
+.plan-card.best.selected{border-color:var(--cyan)}
+.plan-price{font-size:28px;font-weight:800;color:var(--heading);letter-spacing:-.02em}
+.plan-price span{font-size:13px;font-weight:400;color:var(--muted)}
+.plan-label{font-size:14px;font-weight:600;color:var(--heading);margin-bottom:4px}
+.plan-desc{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5}
+.plan-tag{font-size:9px;font-weight:700;color:var(--purple);background:rgba(139,92,246,.1);padding:2px 8px;border-radius:8px;display:inline-block;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+.wz-input{width:100%;padding:12px 16px;border-radius:var(--radius-sm);border:1px solid var(--border);background:rgba(255,255,255,.03);color:var(--heading);font-size:15px;font-family:Inter,sans-serif;outline:none;transition:border .2s}
+.wz-input:focus{border-color:var(--cyan)}
+.wz-input::placeholder{color:var(--muted)}
+.wz-label{font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:500}
+.wz-btn{width:100%;padding:14px;border-radius:var(--radius-sm);font-weight:600;font-size:15px;border:none;cursor:pointer;transition:all .25s;margin-top:16px}
+.wz-btn-primary{background:linear-gradient(135deg,var(--cyan),#0891b2);color:#000}
+.wz-btn-primary:hover{box-shadow:0 8px 30px rgba(6,182,212,.3);transform:translateY(-1px)}
+.wz-btn-primary:disabled{opacity:.4;cursor:default;transform:none;box-shadow:none}
+.wz-btn-ghost{background:rgba(255,255,255,.04);color:var(--heading);border:1px solid var(--border);margin-top:8px}
+.wz-btn-ghost:hover{background:rgba(255,255,255,.08)}
+.wz-summary{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+.wz-summary-row{display:flex;justify-content:space-between;padding:6px 0;font-size:13px}
+.wz-summary-row .label{color:var(--muted)}.wz-summary-row .value{color:var(--heading);font-weight:600}
+.wz-success{text-align:center;padding:20px 0}
+.wz-success-icon{font-size:48px;margin-bottom:16px}
+.wz-note{font-size:12px;color:var(--muted);margin-top:12px;text-align:center;line-height:1.5}
+
+@media(max-width:900px){.pricing-grid{grid-template-columns:repeat(2,1fr)}.features-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:640px){nav .links{display:none}.features-grid,.pricing-grid,.dl-grid,.loc-grid,.plan-grid{grid-template-columns:1fr 1fr}.trust-row{gap:28px}.footer-inner{flex-direction:column;text-align:center}}
 </style>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
 </head>
 <body>
 
-<nav>
+<nav id="nav">
   <div class="inner">
-    <div class="logo">
+    <a href="#" class="logo">
       <svg viewBox="0 0 48 48" fill="none"><rect width="48" height="48" rx="12" fill="#0F172A"/><rect x=".75" y=".75" width="46.5" height="46.5" rx="11.25" stroke="#06B6D4" stroke-width="1.5"/><path d="M24 8L34 16L31 30L24 38L17 30L14 16Z" fill="#06B6D4"/><rect x="20" y="23" width="8" height="7" rx="1.5" fill="#0F172A"/><path d="M21.5 23C21.5 23 21.5 18.5 24 18.5C26.5 18.5 26.5 23 26.5 23" stroke="#0F172A" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>
       NexGuard
-    </div>
+    </a>
     <div class="links">
-      <a href="#features">Features</a>
+      <a href="#features">How It Works</a>
       <a href="#pricing">Pricing</a>
       <a href="#download">Download</a>
-      <a href="#legal">Legal</a>
-      <a href="https://github.com/nexguard">GitHub</a>
+      <a href="https://app.nexguard.sh">Dashboard</a>
     </div>
-    <a href="#pricing" class="nav-cta">Get Started</a>
+    <a href="#pricing" class="nav-cta">Deploy Server</a>
   </div>
 </nav>
 
-<!-- Hero -->
 <section class="hero">
+  <div class="hero-bg"><div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div></div>
   <div class="container">
-    <h1>Your server.<br><span>Your IP. Your rules.</span></h1>
-    <p>Deploy a dedicated VPN server in 30 seconds. WireGuard speed, open-source client, no shared infrastructure.</p>
-    <div class="hero-buttons">
-      <a href="#pricing" class="btn btn-primary">Start Free</a>
-      <a href="https://github.com/nexguard" class="btn btn-ghost">
-        <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-        Source Code
+    <div class="badge fade-in"><span class="dot"></span> WireGuard Encryption &middot; Dedicated IP &middot; Zero Logs</div>
+    <h1 class="fade-in delay-1">Your own VPN server<br><span>in 30 seconds.</span></h1>
+    <p class="fade-in delay-2">Pick a location. Click deploy. Your dedicated VPN server with a clean IP is live — no SSH, no config, no waiting. From $5/mo.</p>
+    <div class="hero-buttons fade-in delay-3">
+      <a href="#pricing" class="btn btn-primary">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        Deploy Your Server
+      </a>
+      <a href="#pricing" class="btn btn-ghost">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        See Pricing
       </a>
     </div>
-    <div class="terminal">
+    <div class="terminal fade-in delay-4">
       <div class="terminal-bar"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
       <div class="tc">
-        <span class="c">$</span> nexguard <span class="f">--server</span> <span class="v">178.104.143.227</span> <span class="f">--token</span> <span class="v">sk_live_...</span> <span class="f">--internet</span><br>
-        [nexguard] assigned: <span class="v">10.8.0.4/32</span> endpoint=<span class="v">178.104.143.227:51820</span><br>
-        [nexguard] internet routing enabled <span class="ok">&#10003;</span>
+        <span class="c">$</span> nexguard connect<br>
+        <span class="ok">&#10003;</span> Server: <span class="v">Frankfurt, DE</span> &middot; IP: <span class="v">95.216.xx.xx</span><br>
+        <span class="ok">&#10003;</span> Connected &middot; WireGuard &middot; <span class="f">All traffic encrypted</span>
       </div>
     </div>
   </div>
 </section>
 
 <div class="container">
-  <div class="stats">
-    <div class="stat-item"><div class="stat-num c">3.5 MB</div><div class="stat-label">Binary size</div></div>
-    <div class="stat-item"><div class="stat-num g">144k</div><div class="stat-label">RPS throughput</div></div>
-    <div class="stat-item"><div class="stat-num p">&lt;1ms</div><div class="stat-label">Handshake</div></div>
-    <div class="stat-item"><div class="stat-num c">3</div><div class="stat-label">Platforms</div></div>
+  <div class="trust">
+    <div class="trust-row">
+      <div class="trust-item"><div class="trust-num c">3.5 MB</div><div class="trust-label">Client Size</div></div>
+      <div class="trust-item"><div class="trust-num g">30 sec</div><div class="trust-label">Server Deploy</div></div>
+      <div class="trust-item"><div class="trust-num p">6</div><div class="trust-label">Global Locations</div></div>
+      <div class="trust-item"><div class="trust-num a">$5</div><div class="trust-label">Starting Price</div></div>
+    </div>
   </div>
 </div>
 
-<!-- Features -->
 <section id="features" class="section">
   <div class="container">
-    <div class="section-title">Why NexGuard?</div>
-    <div class="section-sub">Not another shared VPN. Your own server with a dedicated IP that only you control.</div>
-    <div class="features-grid">
-      <div class="feature"><div class="fi c">&#9889;</div><h3>Dedicated Server & IP</h3><p>Your own VPS in Frankfurt, Helsinki, Ashburn, or Singapore. Not shared with anyone. Clean IP reputation.</p></div>
-      <div class="feature"><div class="fi p">&#127912;</div><h3>1-Click Deploy</h3><p>Pick a location, click deploy. Server is ready in 30 seconds with WireGuard pre-configured.</p></div>
-      <div class="feature"><div class="fi g">&#127758;</div><h3>WireGuard Protocol</h3><p>State-of-the-art cryptography. Faster than OpenVPN and IPsec. Battery-friendly, roaming-ready.</p></div>
-      <div class="feature"><div class="fi y">&#128274;</div><h3>Open Source Client</h3><p>Fully auditable. Native GUI for macOS, Windows, Linux. No telemetry, no tracking, no bloat.</p></div>
-      <div class="feature"><div class="fi c">&#128640;</div><h3>Mesh Networking</h3><p>Connect your devices directly. Peer-to-peer tunnels with STUN NAT traversal. Zero-config office VPN.</p></div>
-      <div class="feature"><div class="fi p">&#128187;</div><h3>Self-Host Option</h3><p>Don't want managed servers? Run your own. Server binary is open source too. Forever free.</p></div>
+    <div class="section-label">How It Works</div>
+    <div class="section-title">Three steps to<br>your own VPN server.</div>
+    <div class="section-sub">No terminal skills needed. No server configuration. Just install, deploy, connect.</div>
+    <div class="features-grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="feature" style="border-color:rgba(6,182,212,.15)">
+        <div class="fi c" style="font-size:22px;font-weight:800;color:var(--cyan)">1</div>
+        <h3>Download the App</h3>
+        <p>Native app for macOS, Windows, and Linux. One file, 3.5 MB. Install in seconds, no dependencies.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(139,92,246,.15)">
+        <div class="fi p" style="font-size:22px;font-weight:800;color:var(--purple)">2</div>
+        <h3>Deploy a Server</h3>
+        <p>Pick Frankfurt, Helsinki, Ashburn, or Singapore. Click deploy. Your dedicated VPN server with a clean IP is ready in 30 seconds.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(34,197,94,.15)">
+        <div class="fi g" style="font-size:22px;font-weight:800;color:var(--green)">3</div>
+        <h3>Connect</h3>
+        <p>Paste your token, hit connect. All traffic encrypted with WireGuard. Your public IP changes instantly. Done.</p>
+      </div>
+    </div>
+
+    <div style="margin-top:48px">
+      <div class="section-label">Also Included</div>
+    </div>
+    <div class="features-grid" style="margin-top:20px">
+      <div class="feature"><div class="fi g"><svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div><h3>WireGuard Protocol</h3><p>ChaCha20-Poly1305 encryption. Faster than OpenVPN, lighter than IPsec. Battery-friendly.</p></div>
+      <div class="feature"><div class="fi a"><svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M15 3h6v6M14 10l6.1-6.1M9 21H3v-6M10 14l-6.1 6.1"/></svg></div><h3>Mesh Networking</h3><p>Connect devices directly. Peer-to-peer tunnels with STUN NAT traversal. Zero-config team VPN.</p></div>
+      <div class="feature"><div class="fi c"><svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2zM22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg></div><h3>Open Source</h3><p>MIT license. Fully auditable client and server. No telemetry, no tracking.</p></div>
+      <div class="feature"><div class="fi p"><svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 15V3m0 12l-4-4m4 4l4-4M2 17l.62 2.48A2 2 0 004.56 21h14.88a2 2 0 001.94-1.52L22 17"/></svg></div><h3>Auto-Updates</h3><p>App checks for updates on startup. One-click update from the GUI. Always the latest version.</p></div>
+      <div class="feature"><div class="fi g"><svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2a10 10 0 110 20 10 10 0 010-20zM12 6v6l4 2"/></svg></div><h3>Geo-IP Detection</h3><p>See your new public IP, country, city, and ISP instantly after connecting. Know where you exit.</p></div>
+      <div class="feature"><div class="fi a"><svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 4h16v16H4zM4 9h16M9 4v16"/></svg></div><h3>Web Dashboard</h3><p>Manage servers, monitor peers, track bandwidth. Full control from your browser.</p></div>
     </div>
   </div>
 </section>
 
-<!-- Pricing -->
-<section id="pricing" class="section">
+<section id="pricing" class="section" style="background:var(--surface)">
   <div class="container">
-    <div class="section-title">Simple, honest pricing.</div>
-    <div class="section-sub">No tricks. No bandwidth caps on client. Cancel anytime.</div>
-
-    <div class="price-toggle">
-      Monthly
-      <span class="save">Save 20% annually</span>
-    </div>
-
+    <div class="section-label">Pricing</div>
+    <div class="section-title">Start free. Scale when ready.</div>
+    <div class="section-sub">Self-host for free or let us manage your servers. No credit card for Free plan.</div>
     <div class="pricing-grid">
       <div class="price-card">
         <div class="price-name">Free</div>
-        <div class="price-amount">$0<span>/forever</span></div>
+        <div class="price-amount">$0<span> /forever</span></div>
         <div class="price-annual">&nbsp;</div>
-        <div class="price-desc">Self-hosted. Full features. No limits on the client.</div>
+        <div class="price-desc">Self-hosted server. Limited devices. Full encryption.</div>
         <ul class="price-features">
           <li>Client app (all platforms)</li>
           <li>Self-hosted server</li>
-          <li>Unlimited devices</li>
-          <li>Full WireGuard speed</li>
+          <li>2 connected devices</li>
+          <li>WireGuard encryption</li>
           <li>Community support</li>
           <li class="no">Managed servers</li>
-          <li class="no">Mesh networking</li>
+          <li class="no">Web dashboard</li>
+          <li class="no">Priority support</li>
         </ul>
-        <a href="#download" class="price-btn ghost">Download</a>
+        <a href="#download" class="price-btn ghost">Download Free</a>
       </div>
-
       <div class="price-card">
-        <div class="price-name">Personal</div>
-        <div class="price-amount">$9<span>/mo</span></div>
-        <div class="price-annual">$7/mo billed annually ($84/yr)</div>
-        <div class="price-desc">Your own dedicated VPN server with a clean IP.</div>
+        <div class="price-name">Starter</div>
+        <div class="price-amount">$5<span> /mo</span></div>
+        <div class="price-annual">$4/mo billed annually</div>
+        <div class="price-desc">Your own VPN server. Dedicated IP. Ready in 30 seconds.</div>
         <ul class="price-features">
-          <li>Everything in Free</li>
+          <li>Client app (all platforms)</li>
           <li>1 managed server</li>
           <li>Dedicated IPv4 + IPv6</li>
-          <li>5 connected devices</li>
-          <li>2 TB bandwidth/mo</li>
+          <li>3 connected devices</li>
+          <li>1 TB bandwidth/mo</li>
           <li>2 locations (EU)</li>
+          <li>Web dashboard</li>
           <li>Email support</li>
         </ul>
-        <a href="#" class="price-btn ghost" data-paddle="personal">Get Personal</a>
+        <a href="#" class="price-btn ghost">Get Starter</a>
       </div>
-
-      <div class="price-card popular">
-        <div class="popular-tag">Most Popular</div>
-        <div class="price-name">Team</div>
-        <div class="price-amount">$29<span>/mo</span></div>
-        <div class="price-annual">$24/mo billed annually ($288/yr)</div>
-        <div class="price-desc">Multiple servers for your team. Mesh VPN included.</div>
+      <div class="price-card pop">
+        <div class="pop-tag">Best Value</div>
+        <div class="price-name">Pro</div>
+        <div class="price-amount">$15<span> /mo</span></div>
+        <div class="price-annual">$12/mo billed annually</div>
+        <div class="price-desc">Multiple servers for your team. Full global coverage.</div>
         <ul class="price-features">
-          <li>Everything in Personal</li>
+          <li>Everything in Starter</li>
           <li>3 managed servers</li>
-          <li>25 connected devices</li>
-          <li>10 TB bandwidth/mo</li>
-          <li>6 locations (global)</li>
-          <li>Mesh networking</li>
-          <li>Audit log</li>
+          <li>15 connected devices</li>
+          <li>5 TB bandwidth/mo</li>
+          <li>6 global locations</li>
+          <li>Geo-IP detection</li>
+          <li>Auto-updates</li>
           <li>Priority support</li>
         </ul>
-        <a href="#" class="price-btn primary" data-paddle="team">Get Team</a>
+        <a href="#" class="price-btn primary">Get Pro</a>
       </div>
-
       <div class="price-card">
-        <div class="price-name">Business</div>
-        <div class="price-amount">$79<span>/mo</span></div>
-        <div class="price-annual">$65/mo billed annually ($780/yr)</div>
-        <div class="price-desc">For companies needing full control and compliance.</div>
+        <div class="price-name">Team</div>
+        <div class="price-amount">$39<span> /mo</span></div>
+        <div class="price-annual">$32/mo billed annually</div>
+        <div class="price-desc">Full infrastructure access for your entire team.</div>
         <ul class="price-features">
-          <li>Everything in Team</li>
+          <li>Everything in Pro</li>
           <li>10 managed servers</li>
           <li>Unlimited devices</li>
           <li>Unlimited bandwidth</li>
           <li>SSO / SAML</li>
+          <li>Audit log</li>
           <li>Custom locations</li>
           <li>Dedicated support</li>
-          <li>SLA 99.9%</li>
+          <li>99.9% SLA</li>
         </ul>
-        <a href="#" class="price-btn ghost" data-paddle="business">Contact Sales</a>
+        <a href="#" class="price-btn ghost">Contact Sales</a>
+      </div>
+    </div>
+    <p class="price-note">All plans include 7-day money-back guarantee. No credit card required for Free plan.</p>
+  </div>
+</section>
+
+<section id="download" class="download">
+  <div class="container">
+    <div class="section-label">Download</div>
+    <div class="section-title">Download the Client.</div>
+    <div class="section-sub">Free client app. Connect to your managed server or any NexGuard server.</div>
+    <div class="dl-grid">
+      <div class="dl-card"><div class="os">&#63743;</div><div class="name">macOS</div><div class="arch">Apple Silicon & Intel</div><a href="/download/NexGuard.dmg" class="dl-btn">Download .dmg</a></div>
+      <div class="dl-card" style="opacity:.6"><div class="os">&#11042;</div><div class="name">Windows</div><div class="arch">x86_64</div><span class="dl-btn" style="background:rgba(255,255,255,.08);color:var(--muted)">Coming Soon</span></div>
+      <div class="dl-card"><div class="os">&#9881;</div><div class="name">Linux</div><div class="arch">amd64 & arm64</div><a href="/download/NexGuard-linux" class="dl-btn">Download binary</a></div>
+    </div>
+    <div class="terminal" style="margin-top:36px">
+      <div class="terminal-bar"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
+      <div class="tc"><span class="c">$</span> nexguard connect<br><span class="ok">&#10003;</span> Server: <span class="v">Helsinki, FI</span> &middot; Latency: <span class="f">12ms</span><br><span class="ok">&#10003;</span> Your IP: <span class="v">95.216.xx.xx</span> &middot; <span class="f">Encrypted</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="legal" class="legal">
+  <div class="container">
+    <div class="legal-tabs">
+      <a onclick="showTab('terms')" class="active" id="tab-terms">Terms</a>
+      <a onclick="showTab('privacy')" id="tab-privacy">Privacy</a>
+      <a onclick="showTab('refund')" id="tab-refund">Refunds</a>
+    </div>
+    <div id="terms" class="legal-content">
+      <h2>Terms of Service</h2>
+      <p>Last updated: April 2026</p>
+      <h3>1. Service</h3><p>NexGuard provides VPN client software and managed VPN server infrastructure ("Service"). By using the Service, you agree to these terms.</p>
+      <h3>2. Accounts</h3><p>Paid plans require a valid email and payment method via Paddle. You are responsible for account security.</p>
+      <h3>3. Acceptable Use</h3><p>You may not use the Service for illegal activities, spam, DDoS, malware distribution, IP infringement, or unauthorized access. Violations result in immediate termination.</p>
+      <h3>4. Resources</h3><p>Managed servers are dedicated. Bandwidth limits are per calendar month. Exceeding limits may result in throttling.</p>
+      <h3>5. Termination</h3><p>Cancel anytime. Servers deleted within 24 hours.</p>
+      <h3>6. Liability</h3><p>Service provided "as is". Maximum liability limited to fees paid in last 12 months.</p>
+    </div>
+    <div id="privacy" class="legal-content" style="display:none">
+      <h2>Privacy Policy</h2>
+      <p>Last updated: April 2026</p>
+      <h3>We Collect</h3><p>Email (billing), aggregate bytes transferred (billing), server metadata (IP, location).</p>
+      <h3>We Never Collect</h3><p>Browsing history, DNS queries, traffic content, connection timestamps, source IPs.</p>
+      <h3>Storage</h3><p>Encrypted EU databases. VPN servers write zero traffic logs. Third parties: Paddle (payments), Hetzner (hosting) — both GDPR compliant.</p>
+      <h3>GDPR</h3><p>Data export, correction, deletion: privacy@nexguard.sh</p>
+    </div>
+    <div id="refund" class="legal-content" style="display:none">
+      <h2>Refund Policy</h2>
+      <p>Last updated: April 2026</p>
+      <p><strong>7-day money-back guarantee.</strong> Not satisfied? Full refund, no questions. Email billing@nexguard.sh.</p>
+      <p>After 7 days: non-refundable. Cancel anytime to stop future charges. Service continues until period ends.</p>
+    </div>
+  </div>
+</section>
+
+<div class="wizard-overlay" id="wizard">
+  <div class="wizard">
+    <div class="wizard-header">
+      <h2 id="wz-title">Choose a Location</h2>
+      <button class="wizard-close" onclick="closeWizard()">&times;</button>
+    </div>
+    <div class="wizard-body">
+      <div class="wizard-steps">
+        <div class="wizard-step active" id="ws-1"></div>
+        <div class="wizard-step" id="ws-2"></div>
+        <div class="wizard-step" id="ws-3"></div>
+        <div class="wizard-step" id="ws-4"></div>
+      </div>
+
+      <div id="wz-step-1">
+        <div class="loc-grid">
+          <div class="loc-card" onclick="pickLoc(this,'frankfurt','Frankfurt')"><div class="loc-flag">🇩🇪</div><div class="loc-name">Frankfurt</div><div class="loc-city">Germany</div></div>
+          <div class="loc-card" onclick="pickLoc(this,'nuremberg','Nuremberg')"><div class="loc-flag">🇩🇪</div><div class="loc-name">Nuremberg</div><div class="loc-city">Germany</div></div>
+          <div class="loc-card" onclick="pickLoc(this,'helsinki','Helsinki')"><div class="loc-flag">🇫🇮</div><div class="loc-name">Helsinki</div><div class="loc-city">Finland</div></div>
+          <div class="loc-card" onclick="pickLoc(this,'ashburn','Ashburn')"><div class="loc-flag">🇺🇸</div><div class="loc-name">Ashburn</div><div class="loc-city">Virginia, USA</div></div>
+          <div class="loc-card" onclick="pickLoc(this,'hillsboro','Hillsboro')"><div class="loc-flag">🇺🇸</div><div class="loc-name">Hillsboro</div><div class="loc-city">Oregon, USA</div></div>
+          <div class="loc-card" onclick="pickLoc(this,'singapore','Singapore')"><div class="loc-flag">🇸🇬</div><div class="loc-name">Singapore</div><div class="loc-city">Asia Pacific</div></div>
+        </div>
+        <button class="wz-btn wz-btn-primary" id="wz-next-1" disabled onclick="goStep(2)">Continue</button>
+      </div>
+
+      <div id="wz-step-2" style="display:none">
+        <div class="plan-grid" style="grid-template-columns:repeat(4,1fr)">
+          <div class="plan-card" onclick="pickPlan(this,'free',0)">
+            <div class="plan-label">Free</div>
+            <div class="plan-price">$0</div>
+            <div class="plan-desc">Self-hosted &middot; 2 devices<br>Community support</div>
+          </div>
+          <div class="plan-card" onclick="pickPlan(this,'starter',5)">
+            <div class="plan-label">Starter</div>
+            <div class="plan-price">$5<span>/mo</span></div>
+            <div class="plan-desc">1 server &middot; 3 devices<br>1 TB &middot; Dedicated IP</div>
+          </div>
+          <div class="plan-card best" onclick="pickPlan(this,'pro',15)">
+            <div class="plan-tag">Best Value</div>
+            <div class="plan-label">Pro</div>
+            <div class="plan-price">$15<span>/mo</span></div>
+            <div class="plan-desc">3 servers &middot; 15 devices<br>5 TB &middot; 6 locations</div>
+          </div>
+          <div class="plan-card" onclick="pickPlan(this,'team',39)">
+            <div class="plan-label">Team</div>
+            <div class="plan-price">$39<span>/mo</span></div>
+            <div class="plan-desc">10 servers &middot; Unlimited<br>SSO &middot; SLA 99.9%</div>
+          </div>
+        </div>
+        <button class="wz-btn wz-btn-primary" id="wz-next-2" disabled onclick="goStep(3)">Continue</button>
+        <button class="wz-btn wz-btn-ghost" onclick="goStep(1)">Back</button>
+      </div>
+
+      <div id="wz-step-3" style="display:none">
+        <div class="wz-label">Email address</div>
+        <input type="email" class="wz-input" id="wz-email" placeholder="you@company.com" oninput="checkEmail()">
+        <div class="wz-label" style="margin-top:14px">Name (optional)</div>
+        <input type="text" class="wz-input" id="wz-name" placeholder="Your name">
+        <div class="wz-summary" style="margin-top:16px">
+          <div class="wz-summary-row"><span class="label">Location</span><span class="value" id="wz-sum-loc">—</span></div>
+          <div class="wz-summary-row"><span class="label">Plan</span><span class="value" id="wz-sum-plan">—</span></div>
+          <div class="wz-summary-row"><span class="label">Price</span><span class="value" id="wz-sum-price">—</span></div>
+        </div>
+        <button class="wz-btn wz-btn-primary" id="wz-next-3" disabled onclick="submitOrder()">Create My Server</button>
+        <button class="wz-btn wz-btn-ghost" onclick="goStep(2)">Back</button>
+        <div class="wz-note">No payment required now. We'll send setup instructions to your email.</div>
+      </div>
+
+      <div id="wz-step-4" style="display:none">
+        <div class="wz-success">
+          <div class="wz-success-icon">🎉</div>
+          <h2 style="color:var(--heading);font-size:20px;margin-bottom:8px">Server is being deployed!</h2>
+          <p style="color:var(--muted);font-size:14px;margin-bottom:20px">Check your email for connection details. Your server will be ready in about 30 seconds.</p>
+          <div class="wz-summary">
+            <div class="wz-summary-row"><span class="label">Location</span><span class="value" id="wz-done-loc">—</span></div>
+            <div class="wz-summary-row"><span class="label">Plan</span><span class="value" id="wz-done-plan">—</span></div>
+            <div class="wz-summary-row"><span class="label">Status</span><span class="value" style="color:var(--green)">Provisioning...</span></div>
+          </div>
+          <a href="/download/NexGuard.dmg" class="wz-btn wz-btn-primary" style="display:inline-block;text-align:center;text-decoration:none">Download Client App</a>
+          <div class="wz-note">While your server deploys, download the client app to connect.</div>
+        </div>
       </div>
     </div>
   </div>
-</section>
-
-<!-- Download -->
-<section id="download" class="download">
-  <div class="container">
-    <div class="section-title">Download NexGuard.</div>
-    <div class="section-sub">Free client. Works with self-hosted or managed servers.</div>
-    <div class="dl-cards">
-      <div class="dl-card"><div class="os">&#63743;</div><div class="name">macOS</div><div class="arch">Apple Silicon & Intel</div><a href="#" class="dl-btn">Download .dmg</a></div>
-      <div class="dl-card"><div class="os">&#129430;</div><div class="name">Windows</div><div class="arch">x86_64</div><a href="#" class="dl-btn">Download .exe</a></div>
-      <div class="dl-card"><div class="os">&#128039;</div><div class="name">Linux</div><div class="arch">amd64 & arm64</div><a href="#" class="dl-btn">Download binary</a></div>
-    </div>
-    <div class="terminal">
-      <div class="terminal-bar"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
-      <div class="tc"><span class="c">#</span> one-liner install<br><span class="c">$</span> curl <span class="f">-fsSL</span> <span class="v">https://nexguard.io/install.sh</span> | sudo bash</div>
-    </div>
-  </div>
-</section>
-
-<!-- Legal -->
-<section id="legal" class="legal">
-  <div class="container">
-    <div class="legal-nav">
-      <a href="#terms" class="active">Terms of Service</a>
-      <a href="#privacy">Privacy Policy</a>
-      <a href="#refund">Refund Policy</a>
-    </div>
-
-    <div id="terms">
-      <h2>Terms of Service</h2>
-      <p>Last updated: April 2026</p>
-
-      <h3>1. Service</h3>
-      <p>NexGuard provides VPN client software (open source, MIT license) and optional managed VPN server infrastructure ("Service"). By using the Service, you agree to these terms.</p>
-
-      <h3>2. Accounts</h3>
-      <p>Paid plans require a valid email and payment method via Paddle (our payment processor). You are responsible for maintaining the security of your account credentials and VPN tokens.</p>
-
-      <h3>3. Acceptable Use</h3>
-      <p>You may not use the Service to:</p>
-      <ul>
-        <li>Conduct illegal activities in your jurisdiction or the server's jurisdiction</li>
-        <li>Send spam, launch DDoS attacks, or distribute malware</li>
-        <li>Infringe intellectual property rights</li>
-        <li>Attempt to gain unauthorized access to other systems</li>
-        <li>Resell the Service without authorization</li>
-      </ul>
-      <p>Violations may result in immediate termination without refund.</p>
-
-      <h3>4. Server Resources</h3>
-      <p>Managed servers are dedicated to your account. Bandwidth limits are per calendar month and do not roll over. Exceeding limits may result in throttling until the next billing cycle.</p>
-
-      <h3>5. Uptime</h3>
-      <p>We target 99.9% uptime for Business plans. Free and Personal/Team plans are provided as-is. Scheduled maintenance windows are announced 24 hours in advance.</p>
-
-      <h3>6. Termination</h3>
-      <p>You may cancel your subscription at any time. Upon cancellation, managed servers are deleted within 24 hours. The client software remains yours under MIT license.</p>
-
-      <h3>7. Limitation of Liability</h3>
-      <p>The Service is provided "as is". NexGuard is not liable for any data loss, service interruption, or consequential damages. Maximum liability is limited to fees paid in the last 12 months.</p>
-    </div>
-
-    <div id="privacy" style="margin-top:48px">
-      <h2>Privacy Policy</h2>
-      <p>Last updated: April 2026</p>
-
-      <h3>What We Collect</h3>
-      <ul>
-        <li><strong>Account data:</strong> Email address, name (for billing only)</li>
-        <li><strong>Payment data:</strong> Processed by Paddle. We never see your card number.</li>
-        <li><strong>Server metadata:</strong> Server IP, location, creation time</li>
-        <li><strong>Connection metadata:</strong> Bytes transferred (aggregate, for billing), last handshake time</li>
-      </ul>
-
-      <h3>What We Do NOT Collect</h3>
-      <ul>
-        <li>Browsing history or DNS queries</li>
-        <li>Traffic content or packet inspection</li>
-        <li>Connection timestamps or source IPs</li>
-        <li>Any personally identifiable traffic data</li>
-      </ul>
-
-      <h3>Data Storage</h3>
-      <p>Account data is stored in encrypted databases in EU (Germany). VPN servers do not write any traffic logs to disk. Server logs are limited to process health (uptime, memory).</p>
-
-      <h3>Third Parties</h3>
-      <p>We share data only with: Paddle (payment processing), Hetzner (server hosting). Both are GDPR compliant.</p>
-
-      <h3>Your Rights (GDPR)</h3>
-      <p>You may request data export, correction, or deletion at any time by emailing privacy@nexguard.io.</p>
-    </div>
-
-    <div id="refund" style="margin-top:48px">
-      <h2>Refund Policy</h2>
-      <p>Last updated: April 2026</p>
-
-      <h3>7-Day Money-Back Guarantee</h3>
-      <p>If you're not satisfied with NexGuard, request a full refund within 7 days of your first payment. No questions asked.</p>
-
-      <h3>How to Request</h3>
-      <p>Email billing@nexguard.io with your account email. Refunds are processed within 5 business days via Paddle.</p>
-
-      <h3>After 7 Days</h3>
-      <p>Subscriptions are non-refundable after the 7-day window. You may cancel at any time to prevent future charges. Your service continues until the end of the current billing period.</p>
-
-      <h3>Annual Plans</h3>
-      <p>Annual plans are refundable within 7 days of purchase. After 7 days, you may cancel but the remaining balance is not refunded. We recommend starting with monthly to test the service.</p>
-
-      <h3>Abuse</h3>
-      <p>Accounts terminated for Terms of Service violations are not eligible for refunds.</p>
-    </div>
-  </div>
-</section>
+</div>
 
 <footer>
   <div class="container">
-    <div class="fl">
-      <a href="https://github.com/nexguard">GitHub</a>
-      <a href="https://github.com/nexguard/client/releases">Releases</a>
-      <a href="#terms">Terms</a>
-      <a href="#privacy">Privacy</a>
-      <a href="#refund">Refunds</a>
-      <a href="mailto:hello@nexguard.io">Contact</a>
+    <div class="footer-inner">
+      <div class="footer-links">
+        <a href="#download">Download</a>
+        <a href="#pricing">Pricing</a>
+        <a href="#legal">Legal</a>
+        <a href="https://app.nexguard.sh">Dashboard</a>
+        <a href="mailto:hello@nexguard.sh">Contact</a>
+      </div>
+      <div class="footer-copy">Encrypted by WireGuard. Powered by Hetzner Cloud.</div>
     </div>
-    <p>NexGuard is open-source software. Built with Rust and WireGuard.<br>Payment processing by Paddle. Servers powered by Hetzner Cloud.</p>
   </div>
 </footer>
 
+<script>
+const nav=document.getElementById('nav');
+window.addEventListener('scroll',()=>nav.classList.toggle('scrolled',window.scrollY>40));
+
+function showTab(id){
+  document.querySelectorAll('.legal-content').forEach(d=>d.style.display='none');
+  document.querySelectorAll('.legal-tabs a').forEach(a=>a.classList.remove('active'));
+  document.getElementById(id).style.display='block';
+  document.getElementById('tab-'+id).classList.add('active');
+}
+
+let wzData={loc:'',locName:'',plan:'',price:0};
+
+function openWizard(){
+  document.getElementById('wizard').classList.add('open');
+  document.body.style.overflow='hidden';
+}
+function closeWizard(){
+  document.getElementById('wizard').classList.remove('open');
+  document.body.style.overflow='';
+}
+document.getElementById('wizard').addEventListener('click',e=>{if(e.target.classList.contains('wizard-overlay'))closeWizard()});
+
+document.querySelectorAll('[href="#pricing"]').forEach(a=>{
+  a.addEventListener('click',e=>{e.preventDefault();openWizard();goStep(1)});
+});
+document.querySelectorAll('.price-btn').forEach(a=>{
+  a.addEventListener('click',e=>{
+    const card=a.closest('.price-card');
+    if(!card)return;
+    const name=card.querySelector('.price-name');
+    if(name&&name.textContent==='Free'){
+      e.preventDefault();openWizard();
+      wzData.plan='free';wzData.price=0;wzData.loc='self-hosted';wzData.locName='Self-Hosted';
+      goStep(3);
+    }
+  });
+});
+
+function goStep(n){
+  for(let i=1;i<=4;i++)document.getElementById('wz-step-'+i).style.display=i===n?'block':'none';
+  for(let i=1;i<=4;i++){
+    const s=document.getElementById('ws-'+i);
+    s.className='wizard-step'+(i<n?' done':i===n?' active':'');
+  }
+  const titles=['','Choose a Location','Choose a Plan','Confirm Order','Server Deployed'];
+  document.getElementById('wz-title').textContent=titles[n];
+  if(n===3){
+    document.getElementById('wz-sum-loc').textContent=wzData.locName;
+    document.getElementById('wz-sum-plan').textContent=wzData.plan.charAt(0).toUpperCase()+wzData.plan.slice(1);
+    document.getElementById('wz-sum-price').textContent='$'+wzData.price+'/mo';
+  }
+}
+
+function pickLoc(el,id,name){
+  document.querySelectorAll('.loc-card').forEach(c=>c.classList.remove('selected'));
+  el.classList.add('selected');
+  wzData.loc=id;wzData.locName=name;
+  document.getElementById('wz-next-1').disabled=false;
+}
+
+function pickPlan(el,id,price){
+  document.querySelectorAll('.plan-card').forEach(c=>c.classList.remove('selected'));
+  el.classList.add('selected');
+  wzData.plan=id;wzData.price=price;
+  if(id==='free'){
+    wzData.loc='self-hosted';wzData.locName='Self-Hosted';
+  }
+  document.getElementById('wz-next-2').disabled=false;
+}
+
+function checkEmail(){
+  const v=document.getElementById('wz-email').value;
+  document.getElementById('wz-next-3').disabled=!v.includes('@')||v.length<5;
+}
+
+async function submitOrder(){
+  const btn=document.getElementById('wz-next-3');
+  btn.disabled=true;btn.textContent='Creating...';
+  const email=document.getElementById('wz-email').value;
+  const name=document.getElementById('wz-name').value;
+  try{
+    const res=await fetch('https://api.nexguard.sh/api/billing/customers',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({email,name,tier:wzData.plan})
+    });
+    if(res.ok && wzData.plan!=='free'){
+      const data=await res.json();
+      await fetch('https://api.nexguard.sh/api/vpn/servers',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({customer_id:data.customer_id,location:wzData.loc})
+      });
+    }
+  }catch(e){}
+  document.getElementById('wz-done-loc').textContent=wzData.locName;
+  const planLabel=wzData.plan.charAt(0).toUpperCase()+wzData.plan.slice(1);
+  document.getElementById('wz-done-plan').textContent=wzData.price>0?planLabel+' ($'+wzData.price+'/mo)':planLabel;
+  const statusEl=document.querySelector('#wz-step-4 .wz-summary .value[style]');
+  if(wzData.plan==='free'){
+    document.querySelector('#wz-step-4 h2').textContent='You\'re all set!';
+    document.querySelector('#wz-step-4 h2+p').textContent='Download the client app and connect to your own server. Limited to 2 devices on the free plan.';
+    if(statusEl)statusEl.textContent='Free (2 devices)';
+  }else{
+    document.querySelector('#wz-step-4 h2').textContent='Server is being deployed!';
+    document.querySelector('#wz-step-4 h2+p').textContent='Check your email for connection details. Your server will be ready in about 30 seconds.';
+    if(statusEl)statusEl.textContent='Provisioning...';
+  }
+  goStep(4);
+}
+</script>
 </body>
 </html>
