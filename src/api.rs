@@ -162,12 +162,61 @@ fn try_http_request(host: &str, request: &str) -> Result<String, String> {
 
 fn http_get(host: &str, path: &str) -> Option<String> {
     let req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: vpn-client\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: nexguard\r\n\r\n",
         path, host
     );
     let resp = try_http_request(&format!("{}:80", host), &req).ok()?;
-    let body_start = resp.find("\r\n\r\n")? + 4;
-    Some(resp[body_start..].to_string())
+    let header_end = resp.find("\r\n\r\n")?;
+    let headers = &resp[..header_end];
+
+    if headers.contains("301") || headers.contains("302") || headers.contains("307") || headers.contains("308") {
+        for line in headers.lines() {
+            let lower = line.to_ascii_lowercase();
+            if lower.starts_with("location:") {
+                let url = line[9..].trim();
+                if url.starts_with("https://") {
+                    let stripped = &url[8..];
+                    let (h, p) = stripped.split_once('/').unwrap_or((stripped, "/"));
+                    return http_get_tls(h, &format!("/{}", p));
+                }
+            }
+        }
+    }
+
+    Some(resp[header_end + 4..].to_string())
+}
+
+fn http_get_tls(host: &str, path: &str) -> Option<String> {
+    use std::io::{Read, Write};
+
+    let addr = {
+        use std::net::ToSocketAddrs;
+        format!("{}:443", host).to_socket_addrs().ok()?.next()?
+    };
+    let mut tcp = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)).ok()?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = std::sync::Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
+    );
+    let server_name: rustls::pki_types::ServerName = host.to_string().try_into().ok()?;
+    let mut conn = rustls::ClientConnection::new(config, server_name).ok()?;
+    let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
+
+    let req = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: nexguard\r\n\r\n",
+        path, host
+    );
+    tls.write_all(req.as_bytes()).ok()?;
+    let mut resp = Vec::new();
+    let _ = tls.read_to_end(&mut resp);
+    let text = String::from_utf8_lossy(&resp);
+    let body_start = text.find("\r\n\r\n")? + 4;
+    Some(text[body_start..].to_string())
 }
 
 #[derive(Clone, Default)]
