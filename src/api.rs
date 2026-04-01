@@ -186,8 +186,13 @@ fn http_get(host: &str, path: &str) -> Option<String> {
     Some(resp[header_end + 4..].to_string())
 }
 
+fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 fn http_get_tls(host: &str, path: &str) -> Option<String> {
     use std::io::{Read, Write};
+    ensure_crypto_provider();
 
     let addr = {
         use std::net::ToSocketAddrs;
@@ -283,6 +288,7 @@ pub fn download_update(url: &str) -> Result<Vec<u8>, String> {
 
 fn download_tls(host: &str, path: &str) -> Result<Vec<u8>, String> {
     use std::io::{Read, Write};
+    ensure_crypto_provider();
     let addr = {
         use std::net::ToSocketAddrs;
         format!("{}:443", host).to_socket_addrs()
