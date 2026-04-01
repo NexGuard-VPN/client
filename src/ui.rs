@@ -146,8 +146,8 @@ pub fn run_gui() {
     let icon = generate_app_icon();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 540.0])
-            .with_min_inner_size([380.0, 460.0])
+            .with_inner_size([420.0, 620.0])
+            .with_min_inner_size([400.0, 560.0])
             .with_title(APP_NAME)
             .with_icon(std::sync::Arc::new(icon)),
         ..Default::default()
@@ -203,6 +203,7 @@ impl eframe::App for VpnApp {
         let status = self.status.lock().unwrap().clone();
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
             match state {
                 ConnectionState::Connected => {
                     draw_header_connected(ui, self);
@@ -236,6 +237,7 @@ impl eframe::App for VpnApp {
                 }
             }
             draw_update_banner(ui, self);
+            });
         });
 
         if matches!(state, ConnectionState::Connected) {
@@ -293,7 +295,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Servers").size(13.0).strong().color(egui::Color32::WHITE));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("+ Add").clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new("+ Add Server").size(12.0)).min_size(egui::vec2(90.0, 28.0))).clicked() {
                 app.view = View::AddServer;
             }
         });
