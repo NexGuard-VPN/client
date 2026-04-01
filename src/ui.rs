@@ -465,14 +465,21 @@ fn draw_update_banner(ui: &mut egui::Ui, app: &mut VpnApp) {
     let info = app.update_info.lock().unwrap().clone();
     if let Some(ref info) = info {
         if !info.has_update { return; }
-        ui.add_space(4.0);
-        egui::Frame::default().fill(egui::Color32::from_rgba_premultiplied(56, 189, 248, 20)).corner_radius(cr(8)).inner_margin(8.0)
+        ui.add_space(6.0);
+        egui::Frame::default()
+            .fill(egui::Color32::from_rgb(30, 58, 75))
+            .corner_radius(cr(10))
+            .inner_margin(12.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("v{} available", info.version)).size(12.0).color(egui::Color32::from_rgb(56, 189, 248)));
+                    ui.label(egui::RichText::new(format!("New version v{} available", info.version))
+                        .size(13.0).strong().color(egui::Color32::WHITE));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let url = info.download_url.clone();
-                        if ui.small_button("Update").clicked() { app.start_update(url); }
+                        let btn = egui::Button::new(
+                            egui::RichText::new("Update Now").size(12.0).color(egui::Color32::WHITE),
+                        ).fill(egui::Color32::from_rgb(56, 189, 248)).min_size(egui::vec2(90.0, 28.0));
+                        if ui.add(btn).clicked() { app.start_update(url); }
                     });
                 });
             });
