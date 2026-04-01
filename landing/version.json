@@ -3,20 +3,20 @@
     "version": "0.4.0",
     "platforms": {
       "macos-arm64": {
-        "url": "https://nexguard.sh/download/NexGuard-macos",
-        "dmg": "https://nexguard.sh/download/NexGuard.dmg"
+        "url": "https://nexguard.sh/download/nexguard-macos-0.4.0",
+        "dmg": "https://nexguard.sh/download/NexGuard-0.4.0.dmg"
       },
       "macos-amd64": {
-        "url": "https://nexguard.sh/download/NexGuard-macos"
+        "url": "https://nexguard.sh/download/nexguard-macos-0.4.0"
       },
       "linux-amd64": {
-        "url": "https://nexguard.sh/download/NexGuard-linux"
+        "url": "https://nexguard.sh/download/nexguard-linux-0.4.0"
       },
       "linux-arm64": {
-        "url": "https://nexguard.sh/download/NexGuard-linux"
+        "url": "https://nexguard.sh/download/nexguard-linux-0.4.0"
       },
       "windows-amd64": {
-        "url": "https://nexguard.sh/download/NexGuard.exe"
+        "url": "https://nexguard.sh/download/nexguard-windows-0.4.0.exe"
       }
     }
   },
@@ -24,10 +24,10 @@
     "version": "0.3.0",
     "platforms": {
       "linux-amd64": {
-        "url": "https://nexguard.sh/download/nexguard-server-linux"
+        "url": "https://nexguard.sh/download/nexguard-server-linux-0.3.0"
       },
       "linux-arm64": {
-        "url": "https://nexguard.sh/download/nexguard-server-linux-arm64"
+        "url": "https://nexguard.sh/download/nexguard-server-linux-arm64-0.3.0"
       }
     }
   }

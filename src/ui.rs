@@ -301,15 +301,8 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
     ui.add_space(4.0);
 
     if app.profiles.is_empty() {
-        card(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(12.0);
-                ui.label(egui::RichText::new("No servers yet").size(13.0).color(egui::Color32::from_rgb(100, 116, 139)));
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Add a server to get started").size(11.0).color(egui::Color32::from_rgb(75, 85, 99)));
-                ui.add_space(12.0);
-            });
-        });
+        draw_add_server(ui, app);
+        return;
     } else {
         for (i, profile) in app.profiles.iter().enumerate() {
             let is_selected = app.selected == Some(i);
