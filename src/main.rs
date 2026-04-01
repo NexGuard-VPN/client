@@ -1,5 +1,6 @@
 mod api;
 pub mod mesh;
+mod profiles;
 mod route;
 pub mod tun;
 mod ui;
