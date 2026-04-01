@@ -274,15 +274,48 @@ pub fn check_update() -> Option<UpdateInfo> {
 
 pub fn download_update(url: &str) -> Result<Vec<u8>, String> {
     let (host, path) = parse_url(url)?;
+    let body = download_tls(&host, &path)?;
+    if body.len() < 1000 || body.starts_with(b"<html") || body.starts_with(b"<!DOCTYPE") {
+        return Err("download returned HTML, not a binary".into());
+    }
+    Ok(body)
+}
+
+fn download_tls(host: &str, path: &str) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Write};
+    let addr = {
+        use std::net::ToSocketAddrs;
+        format!("{}:443", host).to_socket_addrs()
+            .map_err(|e| format!("resolve: {}", e))?
+            .next().ok_or("no address")?
+    };
+    let mut tcp = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(30))
+        .map_err(|e| format!("connect: {}", e))?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(60))).ok();
+
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = std::sync::Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
+    );
+    let server_name: rustls::pki_types::ServerName = host.to_string().try_into()
+        .map_err(|_| "invalid hostname")?;
+    let mut conn = rustls::ClientConnection::new(config, server_name)
+        .map_err(|e| format!("tls: {}", e))?;
+    let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
+
     let req = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: nexguard-updater\r\n\r\n",
         path, host
     );
-    let resp_str = try_http_request(&format!("{}:443", host), &req)
-        .or_else(|_| try_http_request(&format!("{}:80", host), &req))?;
-    let body_start = resp_str.find("\r\n\r\n")
-        .ok_or("invalid response")? + 4;
-    Ok(resp_str[body_start..].as_bytes().to_vec())
+    tls.write_all(req.as_bytes()).map_err(|e| format!("write: {}", e))?;
+    let mut resp = Vec::new();
+    let _ = tls.read_to_end(&mut resp);
+    let text = String::from_utf8_lossy(&resp);
+    let body_start = text.find("\r\n\r\n").ok_or("no headers")? + 4;
+    Ok(resp[body_start..].to_vec())
 }
 
 pub fn self_update(url: &str) -> Result<(), String> {
