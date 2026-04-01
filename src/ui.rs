@@ -449,13 +449,13 @@ fn draw_connected(ui: &mut egui::Ui, status: &Option<VpnStatus>) {
 
 fn draw_update_banner(ui: &mut egui::Ui, app: &mut VpnApp) {
     if let Some(ref result) = app.update_result.lock().unwrap().clone() {
-        ui.add_space(4.0);
-        let (msg, color) = match result {
-            Ok(()) => ("Updated! Restart the app.", egui::Color32::from_rgb(34, 197, 94)),
-            Err(e) => (e.as_str(), egui::Color32::from_rgb(248, 113, 113)),
+        ui.add_space(6.0);
+        let (msg, bg, text_color) = match result {
+            Ok(()) => ("Updated! Restart the app to use the new version.", egui::Color32::from_rgb(20, 55, 35), egui::Color32::WHITE),
+            Err(e) => (e.as_str(), egui::Color32::from_rgb(65, 25, 25), egui::Color32::from_rgb(255, 180, 180)),
         };
-        egui::Frame::default().fill(egui::Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 25)).corner_radius(cr(8)).inner_margin(8.0)
-            .show(ui, |ui| { ui.label(egui::RichText::new(msg).size(11.0).color(color)); });
+        egui::Frame::default().fill(bg).corner_radius(cr(10)).inner_margin(12.0)
+            .show(ui, |ui| { ui.label(egui::RichText::new(msg).size(13.0).strong().color(text_color)); });
         return;
     }
     if app.updating.load(Ordering::Relaxed) {
