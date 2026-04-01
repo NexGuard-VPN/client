@@ -250,7 +250,7 @@ fn draw_header(ui: &mut egui::Ui) {
         draw_logo(ui);
         ui.add_space(4.0);
         ui.label(egui::RichText::new("NexGuard").size(20.0).strong().color(egui::Color32::WHITE));
-        ui.label(egui::RichText::new("Secure Tunnel").size(10.0).color(egui::Color32::from_rgb(100, 116, 139)));
+        ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(10.0).color(egui::Color32::from_rgb(100, 116, 139)));
         ui.add_space(8.0);
     });
 }
@@ -262,7 +262,10 @@ fn draw_header_connected(ui: &mut egui::Ui, app: &mut VpnApp) {
         draw_logo(ui);
         ui.add_space(4.0);
         ui.vertical(|ui| {
-            ui.label(egui::RichText::new("NexGuard").size(16.0).strong().color(egui::Color32::WHITE));
+        ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("NexGuard").size(16.0).strong().color(egui::Color32::WHITE));
+                ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(10.0).color(egui::Color32::from_rgb(100, 116, 139)));
+            });
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("●").size(11.0).color(egui::Color32::from_rgb(34, 197, 94)));
                 ui.label(egui::RichText::new("Connected").size(11.0).strong().color(egui::Color32::from_rgb(34, 197, 94)));
