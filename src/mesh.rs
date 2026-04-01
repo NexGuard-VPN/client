@@ -31,7 +31,8 @@ pub struct MeshManager {
 impl MeshManager {
     pub fn new(private_key: [u8; 32], udp_port: u16) -> Self {
         let udp = UdpSocket::bind(format!("0.0.0.0:{}", udp_port))
-            .expect("mesh UDP bind failed");
+            .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
+            .expect("UDP bind failed");
         udp.set_nonblocking(true).ok();
         Self {
             peers: Mutex::new(Vec::new()),

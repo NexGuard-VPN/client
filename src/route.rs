@@ -94,8 +94,11 @@ fn add_route_v6_os(network: &str, prefix: u8, tun: &str) -> std::io::Result<()> 
 }
 
 #[cfg(target_os = "windows")]
-fn add_route_v6_os(_network: &str, _prefix: u8, _tun: &str) -> std::io::Result<()> {
-    Err(std::io::Error::other("unsupported"))
+fn add_route_v6_os(network: &str, prefix: u8, tun: &str) -> std::io::Result<()> {
+    let idx = get_interface_index(tun).unwrap_or_default();
+    run_cmd("netsh", &["interface", "ipv6", "add", "route",
+        &format!("{}/{}", network, prefix), &format!("interface={}", idx)])
+        .map_err(|e| std::io::Error::other(e))
 }
 
 #[cfg(target_os = "linux")]
@@ -154,7 +157,18 @@ fn detect_default_gateway() -> Result<(String, String), String> {
 
 #[cfg(target_os = "windows")]
 fn detect_default_gateway() -> Result<(String, String), String> {
-    Err("Windows routing not supported".into())
+    let out = std::process::Command::new("route")
+        .args(["print", "0.0.0.0"])
+        .output()
+        .map_err(|e| format!("route print: {}", e))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 5 && parts[0] == "0.0.0.0" && parts[1] == "0.0.0.0" {
+            return Ok((parts[2].to_owned(), parts[3].to_owned()));
+        }
+    }
+    Err("could not detect default gateway".into())
 }
 
 #[cfg(target_os = "linux")]
@@ -168,8 +182,8 @@ fn add_host_route(ip: &str, gw: &str, _iface: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn add_host_route(_ip: &str, _gw: &str, _iface: &str) -> Result<(), String> {
-    Err("unsupported".into())
+fn add_host_route(ip: &str, gw: &str, _iface: &str) -> Result<(), String> {
+    run_cmd("route", &["add", ip, "mask", "255.255.255.255", gw, "metric", "1"])
 }
 
 #[cfg(target_os = "linux")]
@@ -185,8 +199,10 @@ fn add_default_via_tun(tun: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn add_default_via_tun(_tun: &str) -> Result<(), String> {
-    Err("unsupported".into())
+fn add_default_via_tun(tun: &str) -> Result<(), String> {
+    let idx = get_interface_index(tun).unwrap_or_default();
+    run_cmd("route", &["add", "0.0.0.0", "mask", "128.0.0.0", "0.0.0.0", "if", &idx, "metric", "1"])?;
+    run_cmd("route", &["add", "128.0.0.0", "mask", "128.0.0.0", "0.0.0.0", "if", &idx, "metric", "1"])
 }
 
 #[cfg(target_os = "linux")]
@@ -202,7 +218,10 @@ fn remove_default_via_tun(_tun: &str) {
 }
 
 #[cfg(target_os = "windows")]
-fn remove_default_via_tun(_tun: &str) {}
+fn remove_default_via_tun(_tun: &str) {
+    let _ = run_cmd("route", &["delete", "0.0.0.0", "mask", "128.0.0.0"]);
+    let _ = run_cmd("route", &["delete", "128.0.0.0", "mask", "128.0.0.0"]);
+}
 
 #[cfg(target_os = "linux")]
 fn add_default_v6_via_tun(tun: &str) -> Result<(), String> {
@@ -217,8 +236,10 @@ fn add_default_v6_via_tun(tun: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn add_default_v6_via_tun(_tun: &str) -> Result<(), String> {
-    Err("unsupported".into())
+fn add_default_v6_via_tun(tun: &str) -> Result<(), String> {
+    let idx = get_interface_index(tun).unwrap_or_default();
+    run_cmd("netsh", &["interface", "ipv6", "add", "route", "::/1", &format!("interface={}", idx), "metric=1"])?;
+    run_cmd("netsh", &["interface", "ipv6", "add", "route", "8000::/1", &format!("interface={}", idx), "metric=1"])
 }
 
 #[cfg(target_os = "linux")]
@@ -234,7 +255,11 @@ fn remove_default_v6_via_tun(_tun: &str) {
 }
 
 #[cfg(target_os = "windows")]
-fn remove_default_v6_via_tun(_tun: &str) {}
+fn remove_default_v6_via_tun(tun: &str) {
+    let idx = get_interface_index(tun).unwrap_or_default();
+    let _ = run_cmd("netsh", &["interface", "ipv6", "delete", "route", "::/1", &format!("interface={}", idx)]);
+    let _ = run_cmd("netsh", &["interface", "ipv6", "delete", "route", "8000::/1", &format!("interface={}", idx)]);
+}
 
 #[cfg(target_os = "linux")]
 fn remove_host_route(ip: &str, gw: &str, _iface: &str) {
@@ -247,7 +272,9 @@ fn remove_host_route(ip: &str, _gw: &str, _iface: &str) {
 }
 
 #[cfg(target_os = "windows")]
-fn remove_host_route(_ip: &str, _gw: &str, _iface: &str) {}
+fn remove_host_route(ip: &str, _gw: &str, _iface: &str) {
+    let _ = run_cmd("route", &["delete", ip]);
+}
 
 #[cfg(target_os = "linux")]
 fn add_route_os(net: Ipv4Addr, prefix: u8, tun: &str) -> std::io::Result<()> {
@@ -267,8 +294,12 @@ fn add_route_os(net: Ipv4Addr, prefix: u8, tun: &str) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn add_route_os(_net: Ipv4Addr, _prefix: u8, _tun: &str) -> std::io::Result<()> {
-    Err(std::io::Error::other("unsupported"))
+fn add_route_os(net: Ipv4Addr, prefix: u8, tun: &str) -> std::io::Result<()> {
+    let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
+    let mask_ip = Ipv4Addr::from(mask);
+    let idx = get_interface_index(tun).unwrap_or_default();
+    run_cmd("route", &["add", &net.to_string(), "mask", &mask_ip.to_string(), "0.0.0.0", "if", &idx])
+        .map_err(|e| std::io::Error::other(e))
 }
 
 #[cfg(target_os = "linux")]
@@ -284,6 +315,20 @@ fn setup_policy_routing(_gw: &str, _iface: &str) {}
 
 #[cfg(target_os = "windows")]
 fn setup_policy_routing(_gw: &str, _iface: &str) {}
+
+#[cfg(target_os = "windows")]
+fn get_interface_index(name: &str) -> Option<String> {
+    let out = std::process::Command::new("netsh")
+        .args(["interface", "ipv4", "show", "interfaces"])
+        .output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if line.contains(name) {
+            return line.split_whitespace().next().map(|s| s.to_owned());
+        }
+    }
+    None
+}
 
 #[cfg(target_os = "linux")]
 fn cleanup_policy_routing() {
@@ -366,10 +411,16 @@ fn restore_dns() {
 }
 
 #[cfg(target_os = "windows")]
-fn set_vpn_dns(_vpn_server_ip: &str) {}
+fn set_vpn_dns(vpn_server_ip: &str) {
+    let _ = run_cmd("netsh", &["interface", "ipv4", "set", "dnsservers",
+        "name=NexGuard", "static", vpn_server_ip, "primary"]);
+}
 
 #[cfg(target_os = "windows")]
-fn restore_dns() {}
+fn restore_dns() {
+    let _ = run_cmd("netsh", &["interface", "ipv4", "set", "dnsservers",
+        "name=NexGuard", "dhcp"]);
+}
 
 fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), String> {
     let status = std::process::Command::new(cmd)

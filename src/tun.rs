@@ -11,6 +11,15 @@ impl TunDevice {
         &self.name
     }
 
+    pub fn try_create(mtu: usize) -> Result<Self, String> {
+        std::panic::catch_unwind(|| Self::create(mtu))
+            .map_err(|e| {
+                if let Some(s) = e.downcast_ref::<&str>() { s.to_string() }
+                else if let Some(s) = e.downcast_ref::<String>() { s.clone() }
+                else { "TUN device creation failed".to_string() }
+            })
+    }
+
     pub fn set_address_v6(&self, ip: &str, prefix: u8) {
         #[cfg(target_os = "linux")]
         {
@@ -295,23 +304,84 @@ mod platform {
 #[cfg(target_os = "windows")]
 mod platform {
     use super::*;
+    use std::sync::Arc;
+
+    static WINTUN_ADAPTER: std::sync::OnceLock<Arc<wintun::Adapter>> = std::sync::OnceLock::new();
+    static WINTUN_SESSION: std::sync::OnceLock<Arc<wintun::Session>> = std::sync::OnceLock::new();
 
     impl TunDevice {
-        pub fn create(_mtu: usize) -> Self {
-            eprintln!("Windows native TUN support coming soon. Please use WSL2.");
-            std::process::exit(1);
+        pub fn create(mtu: usize) -> Self {
+            let wintun = unsafe { wintun::load() }.unwrap_or_else(|e| {
+                panic!("wintun.dll not found: {}. Download from https://www.wintun.net/", e);
+            });
+
+            let adapter = match wintun::Adapter::open(&wintun, "NexGuard") {
+                Ok(a) => a,
+                Err(_) => wintun::Adapter::create(&wintun, "NexGuard", "NexGuard VPN", None)
+                    .unwrap_or_else(|e| panic!("failed to create adapter: {}", e)),
+            };
+
+            let session = adapter.start_session(wintun::MAX_RING_CAPACITY)
+                .unwrap_or_else(|e| panic!("failed to start session: {}", e));
+
+            let name = adapter.get_name().unwrap_or_else(|_| "NexGuard".to_string());
+
+            let adapter = Arc::new(adapter);
+            let session = Arc::new(session);
+            let _ = WINTUN_ADAPTER.set(Arc::clone(&adapter));
+            let _ = WINTUN_SESSION.set(Arc::clone(&session));
+
+            let _ = std::process::Command::new("netsh")
+                .args(["interface", "ipv4", "set", "interface", &name,
+                       &format!("mtu={}", mtu)])
+                .status();
+
+            Self { name }
         }
 
-        pub fn set_address(&self, _ip: Ipv4Addr, _prefix: u8) {}
+        pub fn set_address(&self, ip: Ipv4Addr, prefix: u8) {
+            let mask = prefix_to_mask(prefix);
+            let mask_ip = Ipv4Addr::from(mask);
+            let _ = std::process::Command::new("netsh")
+                .args(["interface", "ipv4", "set", "address",
+                       &format!("name={}", self.name), "static",
+                       &ip.to_string(), &mask_ip.to_string()])
+                .status();
+        }
+
         pub fn set_up(&self) {}
 
-        pub fn read_packet(&self, _buf: &mut [u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::other("unsupported"))
+        pub fn read_packet(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let session = WINTUN_SESSION.get()
+                .ok_or_else(|| std::io::Error::other("no session"))?;
+            match session.try_receive() {
+                Ok(Some(packet)) => {
+                    let data = packet.bytes();
+                    let len = data.len().min(buf.len());
+                    buf[..len].copy_from_slice(&data[..len]);
+                    Ok(len)
+                }
+                Ok(None) => Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "")),
+                Err(e) => Err(std::io::Error::other(format!("recv: {}", e))),
+            }
         }
 
-        pub fn write_packet(&self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::other("unsupported"))
+        pub fn write_packet(&self, buf: &[u8]) -> std::io::Result<usize> {
+            let session = WINTUN_SESSION.get()
+                .ok_or_else(|| std::io::Error::other("no session"))?;
+            let mut packet = session.allocate_send_packet(buf.len() as u16)
+                .map_err(|e| std::io::Error::other(format!("alloc: {}", e)))?;
+            packet.bytes_mut().copy_from_slice(buf);
+            session.send_packet(packet);
+            Ok(buf.len())
         }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for TunDevice {
+    fn drop(&mut self) {
+        // Session and adapter dropped via OnceLock statics
     }
 }
 

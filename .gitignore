@@ -1,3 +1,7 @@
 target/
 *.log
+*.dmg
 .DS_Store
+.claude/
+.black-box.log
+CLAUDE.md

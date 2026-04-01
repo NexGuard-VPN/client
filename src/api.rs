@@ -37,7 +37,10 @@ pub fn get_mesh_peers(server: &str, control_port: u16, token: &str) -> Vec<MeshP
         "GET /api/v1/mesh/peers HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
         host, token
     );
-    let resp = http_request(&host, &req);
+    let resp = match try_http_request(&host, &req) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
     let body_start = match resp.find("\r\n\r\n") {
         Some(pos) => pos + 4,
         None => return Vec::new(),
@@ -53,7 +56,7 @@ pub fn report_endpoint(server: &str, control_port: u16, token: &str, pubkey: &st
         "POST /api/v1/peers/{}/endpoint HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         encoded, host, token, body.len(), body
     );
-    let _ = http_request(&host, &req);
+    let _ = try_http_request(&host, &req);
 }
 
 pub fn parse_mesh_peers(values: &[serde_json::Value]) -> Vec<MeshPeerInfo> {
@@ -97,13 +100,13 @@ fn urlencode(s: &str) -> String {
 
 const HEX: [u8; 16] = *b"0123456789ABCDEF";
 
-pub fn join_server(
+pub fn try_join_server(
     server: &str,
     control_port: u16,
     token: &str,
     pub_key: &str,
     name: &str,
-) -> JoinResponse {
+) -> Result<JoinResponse, String> {
     let host = control_host(server, control_port);
     let body = format!(r#"{{"public_key":"{}","name":"{}"}}"#, pub_key, name);
     let req = format!(
@@ -111,40 +114,112 @@ pub fn join_server(
         host, token, body.len(), body
     );
 
-    let resp = http_request(&host, &req);
-    let body_start = resp.find("\r\n\r\n").expect("invalid response") + 4;
+    let resp = try_http_request(&host, &req)?;
+    let body_start = resp.find("\r\n\r\n")
+        .ok_or_else(|| "invalid response: no header terminator".to_string())? + 4;
 
-    serde_json::from_str(&resp[body_start..]).unwrap_or_else(|e| {
-        eprintln!("[vpn-client] join failed: {} — {}", e, &resp[body_start..]);
-        std::process::exit(1);
-    })
+    serde_json::from_str(&resp[body_start..])
+        .map_err(|e| format!("join failed: {} — {}", e, &resp[body_start..]))
 }
 
-fn http_request(host: &str, request: &str) -> String {
-    let addr: SocketAddr = host.parse().expect("invalid addr");
+pub fn join_server(
+    server: &str,
+    control_port: u16,
+    token: &str,
+    pub_key: &str,
+    name: &str,
+) -> JoinResponse {
+    match try_join_server(server, control_port, token, pub_key, name) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[vpn-client] {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn try_http_request(host: &str, request: &str) -> Result<String, String> {
+    use std::net::ToSocketAddrs;
+    let addr = host.to_socket_addrs()
+        .map_err(|e| format!("resolve {}: {}", host, e))?
+        .next()
+        .ok_or_else(|| format!("no address for {}", host))?;
+
     let mut stream = std::net::TcpStream::connect_timeout(
-        &addr.into(),
+        &addr,
         std::time::Duration::from_secs(10),
     )
-    .unwrap_or_else(|e| {
-        eprintln!("[vpn-client] connect {}: {}", host, e);
-        std::process::exit(1);
-    });
+    .map_err(|e| format!("connect {}: {}", host, e))?;
 
-    stream.write_all(request.as_bytes()).expect("write failed");
+    stream.write_all(request.as_bytes())
+        .map_err(|e| format!("write {}: {}", host, e))?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
 
     let mut response = String::new();
     stream.read_to_string(&mut response).ok();
-    response
+    Ok(response)
+}
+
+fn http_get(host: &str, path: &str) -> Option<String> {
+    let req = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: vpn-client\r\n\r\n",
+        path, host
+    );
+    let resp = try_http_request(&format!("{}:80", host), &req).ok()?;
+    let body_start = resp.find("\r\n\r\n")? + 4;
+    Some(resp[body_start..].to_string())
+}
+
+#[derive(Clone, Default)]
+pub struct GeoInfo {
+    pub ip: String,
+    pub country: String,
+    pub city: String,
+    pub region: String,
+    pub isp: String,
+}
+
+pub fn fetch_geo_info() -> Option<GeoInfo> {
+    let body = http_get("ip-api.com", "/json/?fields=query,country,city,regionName,isp")?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    Some(GeoInfo {
+        ip: v.get("query")?.as_str()?.to_string(),
+        country: v.get("country")?.as_str()?.to_string(),
+        city: v.get("city")?.as_str()?.to_string(),
+        region: v.get("regionName").and_then(|r| r.as_str()).unwrap_or("").to_string(),
+        isp: v.get("isp").and_then(|r| r.as_str()).unwrap_or("").to_string(),
+    })
 }
 
 fn control_host(server: &str, control_port: u16) -> String {
-    let addr: SocketAddr = server.parse().expect("invalid server");
-    format!("{}:{}", addr.ip(), control_port)
+    if let Ok(addr) = server.parse::<SocketAddr>() {
+        return format!("{}:{}", addr.ip(), control_port);
+    }
+    if let Some((host, _)) = server.rsplit_once(':') {
+        return format!("{}:{}", host, control_port);
+    }
+    format!("{}:{}", server, control_port)
+}
+
+pub fn try_parse_endpoint(server: &str) -> Result<SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+    if let Ok(addr) = server.parse::<SocketAddr>() {
+        return Ok(SocketAddr::new(addr.ip(), 51820));
+    }
+    let resolve_target = if server.contains(':') { server.to_string() } else { format!("{}:51820", server) };
+    let addr = resolve_target.to_socket_addrs()
+        .map_err(|e| format!("resolve {}: {}", server, e))?
+        .next()
+        .ok_or_else(|| format!("no address for {}", server))?;
+    Ok(SocketAddr::new(addr.ip(), 51820))
 }
 
 pub fn parse_endpoint(server: &str) -> SocketAddr {
-    let addr: SocketAddr = server.parse().expect("invalid server");
-    SocketAddr::new(addr.ip(), 51820)
+    match try_parse_endpoint(server) {
+        Ok(addr) => addr,
+        Err(e) => {
+            eprintln!("[vpn-client] {}", e);
+            std::process::exit(1);
+        }
+    }
 }

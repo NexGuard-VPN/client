@@ -2,6 +2,8 @@ mod api;
 pub mod mesh;
 mod route;
 pub mod tun;
+mod ui;
+mod vpn;
 mod wg;
 
 use std::net::{Ipv4Addr, UdpSocket};
@@ -14,6 +16,16 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    let gui_mode = args.iter().any(|a| a == "--gui")
+        || (args.len() == 1 && std::env::var("VPN_SERVER").is_err());
+
+    if gui_mode {
+        ui::run_gui();
+        return;
+    }
+
     let args = parse_args();
 
     eprintln!("[vpn-client] joining server {}...", args.server);
@@ -39,7 +51,11 @@ fn main() {
     eprintln!("[vpn-client] assigned address: {}", assigned_addr);
 
     let (ip, prefix) = parse_cidr(&assigned_addr);
-    let server_endpoint = api::parse_endpoint(&args.server);
+    let server_endpoint = if let Some(ref ep) = join_resp.server_endpoint {
+        ep.parse().unwrap_or_else(|_| api::parse_endpoint(&args.server))
+    } else {
+        api::parse_endpoint(&args.server)
+    };
 
     let tun_dev = tun::TunDevice::create(args.mtu);
     tun_dev.set_address(ip, prefix);
@@ -82,8 +98,11 @@ fn main() {
 
     let exit_state = if args.internet {
         let wg_ip = server_endpoint.ip().to_string();
-        let control_addr: std::net::SocketAddr = args.server.parse().expect("invalid server");
-        let control_ip = control_addr.ip().to_string();
+        let control_ip = {
+            use std::net::ToSocketAddrs;
+            let target = if args.server.contains(':') { args.server.clone() } else { format!("{}:9190", args.server) };
+            target.to_socket_addrs().ok().and_then(|mut a| a.next()).map(|a| a.ip().to_string()).unwrap_or_else(|| wg_ip.clone())
+        };
         let mut preserve_ips: Vec<&str> = vec![&wg_ip];
         if control_ip != wg_ip {
             preserve_ips.push(&control_ip);
@@ -163,7 +182,7 @@ fn main() {
     drop(mesh_mgr);
 }
 
-fn generate_private_key() -> [u8; 32] {
+pub fn generate_private_key() -> [u8; 32] {
     let mut key = [0u8; 32];
     #[cfg(unix)]
     {
@@ -175,22 +194,27 @@ fn generate_private_key() -> [u8; 32] {
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "windows")]
     {
-        use std::io::Read;
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            let _ = f.read_exact(&mut key);
+        use windows_sys::Win32::Security::Cryptography::*;
+        unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                key.as_mut_ptr(),
+                key.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            );
         }
     }
     key
 }
 
-fn b64_encode(d: &[u8]) -> String {
+pub fn b64_encode(d: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(d)
 }
 
-fn b64_decode(s: &str) -> [u8; 32] {
+pub fn b64_decode(s: &str) -> [u8; 32] {
     use base64::Engine;
     let b = base64::engine::general_purpose::STANDARD
         .decode(s.trim())
@@ -201,12 +225,12 @@ fn b64_decode(s: &str) -> [u8; 32] {
     k
 }
 
-fn parse_cidr(s: &str) -> (Ipv4Addr, u8) {
+pub fn parse_cidr(s: &str) -> (Ipv4Addr, u8) {
     let (ip, prefix) = s.split_once('/').expect("invalid CIDR");
     (ip.parse().expect("invalid IP"), prefix.parse().expect("invalid prefix"))
 }
 
-fn parse_ipv6_cidr(s: &str) -> Option<(std::net::Ipv6Addr, u8)> {
+pub fn parse_ipv6_cidr(s: &str) -> Option<(std::net::Ipv6Addr, u8)> {
     let (ip_str, prefix_str) = s.split_once('/')?;
     let ip: std::net::Ipv6Addr = ip_str.parse().ok()?;
     let prefix: u8 = prefix_str.parse().ok()?;
@@ -260,6 +284,7 @@ fn parse_args() -> Args {
             "--mtu" => { i += 1; if i < argv.len() { mtu = argv[i].parse().unwrap_or(1420); } }
             "--vpn-network" | "--network" => { i += 1; if i < argv.len() { vpn_network = Some(argv[i].clone()); } }
             "--internet" | "--exit" => { internet = true; }
+            "--gui" => {}
             "--help" | "-h" => {
                 eprintln!("Usage: vpn-client [OPTIONS]");
                 eprintln!("  -s, --server IP:PORT      VPN server");
@@ -268,6 +293,7 @@ fn parse_args() -> Args {
                 eprintln!("  --control-port PORT        Control API port (default: 9190)");
                 eprintln!("  --vpn-network CIDR        Server VPN network route");
                 eprintln!("  --internet               Route all traffic through VPN");
+                eprintln!("  --gui                    Launch native GUI");
                 std::process::exit(0);
             }
             _ => {
@@ -290,7 +316,7 @@ fn parse_args() -> Args {
     Args { server, token, name, control_port, listen_port, mtu, vpn_network, internet }
 }
 
-fn generate_client_name() -> String {
+pub fn generate_client_name() -> String {
     std::env::var("VPN_NAME").unwrap_or_else(|_| {
         let mut b = [0u8; 4];
         #[cfg(unix)]
@@ -303,11 +329,16 @@ fn generate_client_name() -> String {
                 }
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(target_os = "windows")]
         {
-            use std::io::Read;
-            if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-                let _ = f.read_exact(&mut b);
+            use windows_sys::Win32::Security::Cryptography::*;
+            unsafe {
+                BCryptGenRandom(
+                    std::ptr::null_mut(),
+                    b.as_mut_ptr(),
+                    b.len() as u32,
+                    BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+                );
             }
         }
         format!("client-{:02x}{:02x}", b[0], b[1])

@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: nexguard-linux-amd64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: nexguard-linux-arm64
+            cross: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: nexguard-macos-arm64
+            dmg: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: nexguard-macos-amd64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: nexguard-windows-amd64.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux ARM64)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+        shell: bash
+
+      - name: Download wintun.dll (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile wintun.zip
+          Expand-Archive wintun.zip -DestinationPath wintun
+          Copy-Item wintun/wintun/bin/amd64/wintun.dll target/${{ matrix.target }}/release/
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/${{ matrix.target }}/release/nexguard.exe ${{ matrix.artifact }}
+          else
+            cp target/${{ matrix.target }}/release/nexguard ${{ matrix.artifact }}
+            chmod +x ${{ matrix.artifact }}
+          fi
+
+      - name: Build DMG (macOS ARM64)
+        if: matrix.dmg
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          cp target/${{ matrix.target }}/release/nexguard target/release/nexguard
+          bash scripts/build-dmg.sh "$TAG"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+      - name: Upload DMG
+        if: matrix.dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexGuard-macOS.dmg
+          path: NexGuard-*.dmg
+
+      - name: Upload wintun.dll
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wintun.dll
+          path: target/${{ matrix.target }}/release/wintun.dll
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
