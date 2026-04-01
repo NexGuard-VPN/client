@@ -26,6 +26,14 @@ fn main() {
         return;
     }
 
+    std::thread::spawn(|| {
+        if let Some(info) = api::check_update() {
+            if info.has_update {
+                eprintln!("[nexguard] update available: v{} — {}", info.version, info.download_url);
+            }
+        }
+    });
+
     let args = parse_args();
 
     eprintln!("[vpn-client] joining server {}...", args.server);

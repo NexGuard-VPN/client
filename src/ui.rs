@@ -22,10 +22,22 @@ struct VpnApp {
     status: Arc<Mutex<Option<VpnStatus>>>,
     shutdown: Arc<AtomicBool>,
     show_token: bool,
+    update_info: Arc<Mutex<Option<crate::api::UpdateInfo>>>,
+    updating: Arc<AtomicBool>,
+    update_result: Arc<Mutex<Option<Result<(), String>>>>,
 }
 
 impl Default for VpnApp {
     fn default() -> Self {
+        let update_info: Arc<Mutex<Option<crate::api::UpdateInfo>>> = Arc::new(Mutex::new(None));
+        {
+            let slot = Arc::clone(&update_info);
+            std::thread::spawn(move || {
+                if let Some(info) = crate::api::check_update() {
+                    *slot.lock().unwrap() = Some(info);
+                }
+            });
+        }
         Self {
             server: std::env::var("VPN_SERVER").unwrap_or_default(),
             token: std::env::var("VPN_TOKEN").unwrap_or_default(),
@@ -35,6 +47,9 @@ impl Default for VpnApp {
             status: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
             show_token: false,
+            update_info,
+            updating: Arc::new(AtomicBool::new(false)),
+            update_result: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -81,6 +96,18 @@ impl VpnApp {
         std::thread::sleep(std::time::Duration::from_millis(500));
         *self.state.lock().unwrap() = ConnectionState::Disconnected;
         *self.status.lock().unwrap() = None;
+    }
+
+    fn start_update(&mut self, url: String) {
+        if self.updating.load(Ordering::Relaxed) { return; }
+        self.updating.store(true, Ordering::Relaxed);
+        let updating = Arc::clone(&self.updating);
+        let result = Arc::clone(&self.update_result);
+        std::thread::spawn(move || {
+            let r = crate::api::self_update(&url);
+            *result.lock().unwrap() = Some(r);
+            updating.store(false, Ordering::Relaxed);
+        });
     }
 }
 
@@ -312,11 +339,72 @@ impl eframe::App for VpnApp {
                     draw_form(ui, self);
                 }
             }
+
+            draw_update_banner(ui, self);
         });
 
         if matches!(state, ConnectionState::Connected) {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
+    }
+}
+
+fn draw_update_banner(ui: &mut egui::Ui, app: &mut VpnApp) {
+    if let Some(ref result) = app.update_result.lock().unwrap().clone() {
+        ui.add_space(4.0);
+        match result {
+            Ok(()) => {
+                egui::Frame::default()
+                    .fill(egui::Color32::from_rgba_premultiplied(34, 197, 94, 25))
+                    .corner_radius(cr(8)).inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Updated! Restart the app to use the new version.")
+                            .size(12.0).color(egui::Color32::from_rgb(34, 197, 94)));
+                    });
+            }
+            Err(e) => {
+                egui::Frame::default()
+                    .fill(egui::Color32::from_rgba_premultiplied(220, 38, 38, 25))
+                    .corner_radius(cr(8)).inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(format!("Update failed: {}", e))
+                            .size(11.0).color(egui::Color32::from_rgb(248, 113, 113)));
+                    });
+            }
+        }
+        return;
+    }
+
+    if app.updating.load(Ordering::Relaxed) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(egui::RichText::new("Updating...").size(12.0)
+                .color(egui::Color32::from_rgb(250, 204, 21)));
+        });
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+        return;
+    }
+
+    let info = app.update_info.lock().unwrap().clone();
+    if let Some(ref info) = info {
+        if !info.has_update { return; }
+        ui.add_space(4.0);
+        egui::Frame::default()
+            .fill(egui::Color32::from_rgba_premultiplied(6, 182, 212, 20))
+            .corner_radius(cr(8)).inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("v{} available", info.version))
+                        .size(12.0).color(egui::Color32::from_rgb(6, 182, 212)));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let url = info.download_url.clone();
+                        if ui.small_button("Update").clicked() {
+                            app.start_update(url);
+                        }
+                    });
+                });
+            });
     }
 }
 
