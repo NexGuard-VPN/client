@@ -244,11 +244,13 @@ mod platform {
         pub fn set_address(&self, ip: Ipv4Addr, prefix: u8) {
             let mask = prefix_to_mask(prefix);
             let mask_ip = Ipv4Addr::from(mask);
+            let octets = ip.octets();
+            let gateway = Ipv4Addr::new(octets[0], octets[1], octets[2], 1);
             let _ = std::process::Command::new("ifconfig")
                 .args([
                     &self.name,
                     &ip.to_string(),
-                    &ip.to_string(),
+                    &gateway.to_string(),
                     "netmask",
                     &mask_ip.to_string(),
                     "up",
