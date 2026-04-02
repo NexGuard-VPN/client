@@ -16,6 +16,7 @@ eframe = "0.31"
 egui = "0.31"
 rustls = { version = "0.23", features = ["ring"] }
 webpki-roots = "0.26"
+open = "5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

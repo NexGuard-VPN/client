@@ -400,6 +400,19 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
             app.save_new_server();
         }
     });
+
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
+    ui.vertical_centered(|ui| {
+        ui.label(egui::RichText::new("Don't have a server?").size(12.0).color(egui::Color32::from_rgb(120, 130, 145)));
+        ui.add_space(4.0);
+        if ui.add(egui::Button::new(egui::RichText::new("Deploy VPN Server — 30 days free").size(12.0).color(egui::Color32::WHITE))
+            .fill(egui::Color32::from_rgb(30, 58, 75))
+            .min_size(egui::vec2(260.0, 32.0))).clicked() {
+            let _ = open::that("https://nexguard.sh/deploy");
+        }
+    });
 }
 
 fn draw_connected(ui: &mut egui::Ui, status: &Option<VpnStatus>) {
