@@ -19,11 +19,14 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let gui_mode = args.iter().any(|a| a == "--gui")
-        || (args.len() == 1 && std::env::var("VPN_SERVER").is_err());
+    let cli_mode = args.iter().any(|a| a == "--cli" || a == "--no-gui");
+    let gui_mode = !cli_mode;
 
     if gui_mode {
-        ui::run_gui();
+        let init_server = arg_value(&args, "--server").or_else(|| arg_value(&args, "-s"));
+        let init_token = arg_value(&args, "--token").or_else(|| arg_value(&args, "-t"));
+        let init_internet = args.iter().any(|a| a == "--internet" || a == "--exit");
+        ui::run_gui_with(init_server, init_token, init_internet);
         return;
     }
 
@@ -39,7 +42,7 @@ fn main() {
 
     eprintln!("[vpn-client] joining server {}...", args.server);
 
-    let private_key = generate_private_key();
+    let private_key = load_or_generate_key();
     let secret = StaticSecret::from(private_key);
     let public_key = PublicKey::from(&secret);
     let pub_key_b64 = b64_encode(public_key.as_bytes());
@@ -184,11 +187,105 @@ fn main() {
     };
 
     setup_signal_handler();
-    wg::run_data_plane(&tun_dev, &udp, &tunnel, &tx, &rx, &SHUTDOWN,
-        mesh_mgr.as_ref().map(|m| m.as_ref()));
+
+    if args.tls {
+        let tls_addr = format!("{}:{}", server_endpoint.ip(), server_endpoint.port());
+        eprintln!("[vpn-client] connecting TLS to {}...", tls_addr);
+        match connect_tls(&tls_addr) {
+            Ok(mut tls_stream) => {
+                eprintln!("[vpn-client] TLS connected (obfs mode)");
+                wg::run_data_plane_tls(&tun_dev, &mut tls_stream, &tunnel, &tx, &rx, &SHUTDOWN);
+            }
+            Err(e) => {
+                eprintln!("[vpn-client] TLS connection failed: {}", e);
+            }
+        }
+    } else {
+        wg::run_data_plane(&tun_dev, &udp, &tunnel, &tx, &rx, &SHUTDOWN,
+            mesh_mgr.as_ref().map(|m| m.as_ref()));
+    }
 
     drop(exit_state);
     drop(mesh_mgr);
+}
+
+fn connect_tls(addr: &str) -> Result<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>, String> {
+    use std::sync::Arc;
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
+        .with_no_client_auth();
+
+    let sni = rustls::pki_types::ServerName::try_from("nexguard.local")
+        .map_err(|e| format!("sni: {}", e))?;
+    let conn = rustls::ClientConnection::new(Arc::new(config), sni)
+        .map_err(|e| format!("tls: {}", e))?;
+
+    let tcp = std::net::TcpStream::connect_timeout(
+        &addr.parse().map_err(|e| format!("parse: {}", e))?,
+        std::time::Duration::from_secs(10),
+    ).map_err(|e| format!("connect: {}", e))?;
+    tcp.set_nodelay(true).ok();
+    tcp.set_read_timeout(Some(std::time::Duration::from_millis(1))).ok();
+
+    Ok(rustls::StreamOwned::new(conn, tcp))
+}
+
+#[derive(Debug)]
+struct InsecureVerifier;
+impl rustls::client::danger::ServerCertVerifier for InsecureVerifier {
+    fn verify_server_cert(&self, _: &rustls::pki_types::CertificateDer, _: &[rustls::pki_types::CertificateDer], _: &rustls::pki_types::ServerName, _: &[u8], _: rustls::pki_types::UnixTime) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(&self, _: &[u8], _: &rustls::pki_types::CertificateDer, _: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(&self, _: &[u8], _: &rustls::pki_types::CertificateDer, _: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
+    }
+}
+
+fn key_path() -> std::path::PathBuf {
+    let dir = dirs_next().unwrap_or_else(|| std::path::PathBuf::from("."));
+    dir.join("client.key")
+}
+
+fn dirs_next() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())?;
+    let dir = std::path::PathBuf::from(home).join(".nexguard");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+pub fn load_or_generate_key() -> [u8; 32] {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let path = key_path();
+
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        if let Ok(bytes) = b64.decode(data.trim()) {
+            if bytes.len() == 32 {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&bytes);
+                return key;
+            }
+        }
+    }
+
+    let key = generate_private_key();
+    let _ = std::fs::write(&path, b64.encode(key));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    key
 }
 
 pub fn generate_private_key() -> [u8; 32] {
@@ -269,6 +366,7 @@ struct Args {
     mtu: usize,
     vpn_network: Option<String>,
     internet: bool,
+    tls: bool,
 }
 
 fn parse_args() -> Args {
@@ -281,6 +379,7 @@ fn parse_args() -> Args {
     let mut mtu = 1420usize;
     let mut vpn_network = None;
     let mut internet = false;
+    let mut tls = false;
 
     let mut i = 1;
     while i < argv.len() {
@@ -293,16 +392,27 @@ fn parse_args() -> Args {
             "--mtu" => { i += 1; if i < argv.len() { mtu = argv[i].parse().unwrap_or(1420); } }
             "--vpn-network" | "--network" => { i += 1; if i < argv.len() { vpn_network = Some(argv[i].clone()); } }
             "--internet" | "--exit" => { internet = true; }
-            "--gui" => {}
+            "--tls" | "--obfs" => { tls = true; }
+            "--gui" | "--cli" | "--no-gui" => {}
+            "--version" | "-v" => {
+                eprintln!("nexguard {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "--help" | "-h" => {
-                eprintln!("Usage: vpn-client [OPTIONS]");
-                eprintln!("  -s, --server IP:PORT      VPN server");
+                eprintln!("Usage: nexguard [OPTIONS]");
+                eprintln!("");
+                eprintln!("  nexguard                              Open GUI (default)");
+                eprintln!("  nexguard --server IP --token TOKEN    Open GUI with server pre-filled");
+                eprintln!("  nexguard --cli --server IP --token T  CLI mode (no GUI)");
+                eprintln!("");
+                eprintln!("Options:");
+                eprintln!("  -s, --server IP:PORT      VPN server address");
                 eprintln!("  -t, --token TOKEN         Auth token");
                 eprintln!("  -n, --name NAME           Client name");
-                eprintln!("  --control-port PORT        Control API port (default: 9190)");
-                eprintln!("  --vpn-network CIDR        Server VPN network route");
-                eprintln!("  --internet               Route all traffic through VPN");
-                eprintln!("  --gui                    Launch native GUI");
+                eprintln!("  --internet                Route all traffic through VPN");
+                eprintln!("  --tls                     TLS obfuscation (bypass DPI)");
+                eprintln!("  --cli, --no-gui           Force CLI mode");
+                eprintln!("  --gui                     Force GUI mode");
                 std::process::exit(0);
             }
             _ => {
@@ -322,7 +432,11 @@ fn parse_args() -> Args {
         std::process::exit(1);
     }
 
-    Args { server, token, name, control_port, listen_port, mtu, vpn_network, internet }
+    Args { server, token, name, control_port, listen_port, mtu, vpn_network, internet, tls }
+}
+
+fn arg_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
 }
 
 pub fn generate_client_name() -> String {

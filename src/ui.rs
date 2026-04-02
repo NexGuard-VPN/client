@@ -143,6 +143,10 @@ impl VpnApp {
 const APP_NAME: &str = "NexGuard VPN";
 
 pub fn run_gui() {
+    run_gui_with(None, None, false);
+}
+
+pub fn run_gui_with(server: Option<String>, token: Option<String>, internet: bool) {
     let icon = generate_app_icon();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -152,9 +156,16 @@ pub fn run_gui() {
             .with_icon(std::sync::Arc::new(icon)),
         ..Default::default()
     };
-    eframe::run_native(APP_NAME, options, Box::new(|cc| {
+    eframe::run_native(APP_NAME, options, Box::new(move |cc| {
         setup_style(&cc.egui_ctx);
-        Ok(Box::new(VpnApp::default()))
+        let mut app = VpnApp::default();
+        if server.is_some() || token.is_some() {
+            app.view = View::AddServer;
+            if let Some(s) = server { app.new_server = s; }
+            if let Some(t) = token { app.new_token = t; }
+            app.new_internet = internet;
+        }
+        Ok(Box::new(app))
     })).ok();
 }
 
