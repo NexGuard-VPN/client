@@ -1,3 +1,4 @@
+use std::io::{Read, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -159,29 +160,45 @@ pub fn run_data_plane_tls<S: Read + Write>(
     shutdown: &AtomicBool,
 ) {
     let mut tun_buf = vec![0u8; MAX_PACKET];
-    let mut tls_buf = [0u8; 4096];
+    let mut tls_buf = [0u8; MAX_PACKET];
     let mut enc_buf = vec![0u8; MAX_PACKET];
     let mut dec_buf = vec![0u8; MAX_PACKET];
-    let mut pending = Vec::new();
+    let mut pending = Vec::with_capacity(MAX_PACKET);
+    let mut write_buf = Vec::with_capacity(MAX_PACKET);
     let mut last_tick = std::time::Instant::now();
     let mut last_stats = std::time::Instant::now();
 
     loop {
         if shutdown.load(Ordering::Relaxed) { break; }
         let mut did_work = false;
+        write_buf.clear();
 
-        // TUN → WireGuard encrypt → TLS
-        if let Ok(n) = tun.read_packet(&mut tun_buf) {
-            if n > 0 {
-                did_work = true;
-                let mut wg = tunnel.lock().unwrap();
-                if let TunnResult::WriteToNetwork(data) = wg.tunn.encapsulate(&tun_buf[..n], &mut enc_buf) {
-                    let len = (data.len() as u16).to_be_bytes();
-                    let _ = tls.write_all(&len);
-                    let _ = tls.write_all(data);
-                    let _ = tls.flush();
-                    tx.fetch_add(data.len() as u64, Ordering::Relaxed);
+        // TUN → WireGuard encrypt → batch to write_buf
+        for _ in 0..64 {
+            match tun.read_packet(&mut tun_buf) {
+                Ok(n) if n > 0 => {
+                    did_work = true;
+                    let mut wg = tunnel.lock().unwrap();
+                    if let TunnResult::WriteToNetwork(data) = wg.tunn.encapsulate(&tun_buf[..n], &mut enc_buf) {
+                        write_buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
+                        write_buf.extend_from_slice(data);
+                        tx.fetch_add(data.len() as u64, Ordering::Relaxed);
+                    }
                 }
+                Ok(_) => break,
+                Err(_) => break,
+            }
+        }
+
+        // Flush batched TLS writes
+        if !write_buf.is_empty() {
+            if let Err(e) = tls.write_all(&write_buf) {
+                eprintln!("[vpn-client] tls write error: {}", e);
+                break;
+            }
+            if let Err(e) = tls.flush() {
+                eprintln!("[vpn-client] tls flush error: {}", e);
+                break;
             }
         }
 
@@ -191,59 +208,61 @@ pub fn run_data_plane_tls<S: Read + Write>(
             Ok(n) => {
                 did_work = true;
                 pending.extend_from_slice(&tls_buf[..n]);
+                write_buf.clear();
                 while pending.len() >= 2 {
                     let pkt_len = u16::from_be_bytes([pending[0], pending[1]]) as usize;
                     if pkt_len == 0 || pkt_len > 65535 { pending.clear(); break; }
                     if pending.len() < 2 + pkt_len { break; }
-                    let pkt = pending[2..2 + pkt_len].to_vec();
-                    pending.drain(..2 + pkt_len);
 
                     let mut wg = tunnel.lock().unwrap();
-                    match wg.tunn.decapsulate(None, &pkt, &mut dec_buf) {
+                    match wg.tunn.decapsulate(None, &pending[2..2 + pkt_len], &mut dec_buf) {
                         TunnResult::WriteToTunnelV4(payload, _) => {
                             let _ = tun.write_packet(payload);
-                            rx.fetch_add(pkt.len() as u64, Ordering::Relaxed);
+                            rx.fetch_add(pkt_len as u64, Ordering::Relaxed);
                         }
                         TunnResult::WriteToNetwork(resp) => {
-                            let len = (resp.len() as u16).to_be_bytes();
-                            let _ = tls.write_all(&len);
-                            let _ = tls.write_all(resp);
-                            let _ = tls.flush();
-                            // drain pending WG packets
+                            write_buf.extend_from_slice(&(resp.len() as u16).to_be_bytes());
+                            write_buf.extend_from_slice(resp);
                             loop {
                                 match wg.tunn.decapsulate(None, &[], &mut dec_buf) {
                                     TunnResult::WriteToNetwork(d) => {
-                                        let l = (d.len() as u16).to_be_bytes();
-                                        let _ = tls.write_all(&l);
-                                        let _ = tls.write_all(d);
+                                        write_buf.extend_from_slice(&(d.len() as u16).to_be_bytes());
+                                        write_buf.extend_from_slice(d);
                                     }
                                     TunnResult::WriteToTunnelV4(d, _) => {
                                         let _ = tun.write_packet(d);
-                                        rx.fetch_add(pkt.len() as u64, Ordering::Relaxed);
+                                        rx.fetch_add(pkt_len as u64, Ordering::Relaxed);
                                         break;
                                     }
                                     _ => break,
                                 }
                             }
-                            let _ = tls.flush();
                         }
                         _ => {}
                     }
+                    pending.drain(..2 + pkt_len);
+                }
+                if !write_buf.is_empty() {
+                    if tls.write_all(&write_buf).is_err() { break; }
+                    let _ = tls.flush();
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
                 || e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(_) => break,
+            Err(e) => {
+                eprintln!("[vpn-client] tls read error: {}", e);
+                break;
+            }
         }
 
-        // Timer tick
         if last_tick.elapsed().as_millis() >= TIMER_TICK_MS {
             last_tick = std::time::Instant::now();
             let mut wg = tunnel.lock().unwrap();
             if let TunnResult::WriteToNetwork(data) = wg.tunn.update_timers(&mut enc_buf) {
-                let len = (data.len() as u16).to_be_bytes();
-                let _ = tls.write_all(&len);
-                let _ = tls.write_all(data);
+                let mut buf = Vec::with_capacity(2 + data.len());
+                buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
+                buf.extend_from_slice(data);
+                let _ = tls.write_all(&buf);
                 let _ = tls.flush();
             }
         }
@@ -254,13 +273,11 @@ pub fn run_data_plane_tls<S: Read + Write>(
         }
 
         if !did_work {
-            std::thread::sleep(std::time::Duration::from_micros(100));
+            std::thread::sleep(std::time::Duration::from_micros(50));
         }
     }
     eprintln!("[vpn-client] shutdown (tls)");
 }
-
-use std::io::{Read, Write};
 
 fn fmt_bytes(b: u64) -> String {
     const KB: u64 = 1024;

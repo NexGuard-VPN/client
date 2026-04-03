@@ -30,13 +30,24 @@ fn main() {
         return;
     }
 
-    std::thread::spawn(|| {
-        if let Some(info) = api::check_update() {
-            if info.has_update {
-                eprintln!("[nexguard] update available: v{} — {}", info.version, info.download_url);
+    if let Some(info) = api::check_update() {
+        if info.force_update {
+            eprintln!("[nexguard] mandatory update required: v{}", info.version);
+            eprintln!("[nexguard] updating...");
+            match api::self_update(&info.download_url) {
+                Ok(()) => {
+                    eprintln!("[nexguard] updated to v{}", info.version);
+                    api::restart_self();
+                }
+                Err(e) => {
+                    eprintln!("[nexguard] update failed: {}", e);
+                    std::process::exit(1);
+                }
             }
+        } else if info.has_update {
+            eprintln!("[nexguard] update available: v{}", info.version);
         }
-    });
+    }
 
     let args = parse_args();
 
@@ -186,6 +197,16 @@ fn main() {
         None
     };
 
+    let tun_name_for_cleanup = tun_dev.name().to_string();
+    let has_internet = args.internet;
+    std::panic::set_hook({
+        let tun = tun_name_for_cleanup.clone();
+        let internet = has_internet;
+        Box::new(move |_| {
+            if internet { route::emergency_cleanup(&tun); }
+        })
+    });
+
     setup_signal_handler();
 
     if args.tls {
@@ -205,8 +226,12 @@ fn main() {
             mesh_mgr.as_ref().map(|m| m.as_ref()));
     }
 
+    eprintln!("[vpn-client] cleaning up routes...");
     drop(exit_state);
     drop(mesh_mgr);
+    if has_internet {
+        route::emergency_cleanup(&tun_name_for_cleanup);
+    }
 }
 
 fn connect_tls(addr: &str) -> Result<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>, String> {
@@ -228,7 +253,7 @@ fn connect_tls(addr: &str) -> Result<rustls::StreamOwned<rustls::ClientConnectio
         std::time::Duration::from_secs(10),
     ).map_err(|e| format!("connect: {}", e))?;
     tcp.set_nodelay(true).ok();
-    tcp.set_read_timeout(Some(std::time::Duration::from_millis(1))).ok();
+    tcp.set_read_timeout(Some(std::time::Duration::from_micros(500))).ok();
 
     Ok(rustls::StreamOwned::new(conn, tcp))
 }
@@ -256,7 +281,20 @@ fn key_path() -> std::path::PathBuf {
 }
 
 fn dirs_next() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()
+    let home = std::env::var("SUDO_USER").ok()
+        .and_then(|u| {
+            #[cfg(unix)]
+            {
+                let out = std::process::Command::new("sh")
+                    .args(["-c", &format!("eval echo ~{}", u)])
+                    .output().ok()?;
+                let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if h.is_empty() || h.starts_with('~') { None } else { Some(h) }
+            }
+            #[cfg(not(unix))]
+            { None }
+        })
+        .or_else(|| std::env::var("HOME").ok())
         .or_else(|| std::env::var("USERPROFILE").ok())?;
     let dir = std::path::PathBuf::from(home).join(".nexguard");
     std::fs::create_dir_all(&dir).ok()?;
@@ -268,11 +306,26 @@ pub fn load_or_generate_key() -> [u8; 32] {
     let b64 = base64::engine::general_purpose::STANDARD;
     let path = key_path();
 
-    if let Ok(data) = std::fs::read_to_string(&path) {
-        if let Ok(bytes) = b64.decode(data.trim()) {
-            if bytes.len() == 32 {
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&bytes);
+    let try_load = |p: &std::path::Path| -> Option<[u8; 32]> {
+        let data = std::fs::read_to_string(p).ok()?;
+        let bytes = b64.decode(data.trim()).ok()?;
+        if bytes.len() != 32 { return None; }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        Some(key)
+    };
+
+    if let Some(key) = try_load(&path) {
+        return key;
+    }
+
+    #[cfg(unix)]
+    {
+        let root_path = std::path::PathBuf::from("/var/root/.nexguard/client.key");
+        if root_path != path {
+            if let Some(key) = try_load(&root_path) {
+                let _ = std::fs::write(&path, b64.encode(key));
+                let _ = std::fs::remove_file(&root_path);
                 return key;
             }
         }
@@ -283,9 +336,24 @@ pub fn load_or_generate_key() -> [u8; 32] {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666));
+        fix_ownership(&path);
     }
     key
+}
+
+#[cfg(unix)]
+fn fix_ownership(path: &std::path::Path) {
+    if let Ok(user) = std::env::var("SUDO_USER") {
+        let _ = std::process::Command::new("chown")
+            .args([&user, &path.to_string_lossy().to_string()])
+            .status();
+        if let Some(dir) = path.parent() {
+            let _ = std::process::Command::new("chown")
+                .args([&user, &dir.to_string_lossy().to_string()])
+                .status();
+        }
+    }
 }
 
 pub fn generate_private_key() -> [u8; 32] {
@@ -325,15 +393,26 @@ pub fn b64_decode(s: &str) -> [u8; 32] {
     let b = base64::engine::general_purpose::STANDARD
         .decode(s.trim())
         .expect("invalid base64");
+    assert!(b.len() == 32, "key must be 32 bytes, got {}", b.len());
     let mut k = [0u8; 32];
-    let len = b.len().min(32);
-    k[..len].copy_from_slice(&b[..len]);
+    k.copy_from_slice(&b);
     k
 }
 
 pub fn parse_cidr(s: &str) -> (Ipv4Addr, u8) {
-    let (ip, prefix) = s.split_once('/').expect("invalid CIDR");
-    (ip.parse().expect("invalid IP"), prefix.parse().expect("invalid prefix"))
+    let (ip, prefix) = s.split_once('/').unwrap_or_else(|| {
+        eprintln!("[vpn-client] invalid CIDR: {}", s);
+        std::process::exit(1);
+    });
+    let ip: Ipv4Addr = ip.parse().unwrap_or_else(|_| {
+        eprintln!("[vpn-client] invalid IP in CIDR: {}", s);
+        std::process::exit(1);
+    });
+    let prefix: u8 = prefix.parse().unwrap_or_else(|_| {
+        eprintln!("[vpn-client] invalid prefix in CIDR: {}", s);
+        std::process::exit(1);
+    });
+    (ip, prefix)
 }
 
 pub fn parse_ipv6_cidr(s: &str) -> Option<(std::net::Ipv6Addr, u8)> {
@@ -441,29 +520,71 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
 
 pub fn generate_client_name() -> String {
     std::env::var("VPN_NAME").unwrap_or_else(|_| {
-        let mut b = [0u8; 4];
+        let id_path = dirs_next()
+            .map(|d| d.join("device-id"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".nexguard-device-id"));
+
+        if let Ok(id) = std::fs::read_to_string(&id_path) {
+            let id = id.trim().to_string();
+            if !id.is_empty() { return id; }
+        }
+
+        #[cfg(unix)]
+        {
+            let root_id = std::path::PathBuf::from("/var/root/.nexguard/device-id");
+            if root_id != id_path {
+                if let Ok(id) = std::fs::read_to_string(&root_id) {
+                    let id = id.trim().to_string();
+                    if !id.is_empty() {
+                        let _ = std::fs::write(&id_path, &id);
+                        let _ = std::fs::remove_file(&root_id);
+                        return id;
+                    }
+                }
+            }
+        }
+
+        let hostname = get_hostname();
+        let os_name = if cfg!(target_os = "macos") { "mac" }
+            else if cfg!(target_os = "windows") { "win" }
+            else { "linux" };
+
+        let mut seed = [0u8; 4];
         #[cfg(unix)]
         {
             let fd = unsafe { libc::open(b"/dev/urandom\0".as_ptr() as *const _, libc::O_RDONLY) };
             if fd >= 0 {
-                unsafe {
-                    libc::read(fd, b.as_mut_ptr() as *mut _, 4);
-                    libc::close(fd);
-                }
+                unsafe { libc::read(fd, seed.as_mut_ptr() as *mut _, 4); libc::close(fd); }
             }
         }
         #[cfg(target_os = "windows")]
         {
             use windows_sys::Win32::Security::Cryptography::*;
-            unsafe {
-                BCryptGenRandom(
-                    std::ptr::null_mut(),
-                    b.as_mut_ptr(),
-                    b.len() as u32,
-                    BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-                );
-            }
+            unsafe { BCryptGenRandom(std::ptr::null_mut(), seed.as_mut_ptr(), 4, BCRYPT_USE_SYSTEM_PREFERRED_RNG); }
         }
-        format!("client-{:02x}{:02x}", b[0], b[1])
+
+        let name = format!("{}-{}-{:02x}{:02x}", hostname, os_name, seed[0], seed[1]);
+        let _ = std::fs::write(&id_path, &name);
+        #[cfg(unix)]
+        fix_ownership(&id_path);
+        name
     })
+}
+
+fn get_hostname() -> String {
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
+        if ret == 0 {
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            let h = String::from_utf8_lossy(&buf[..end]).to_string();
+            if !h.is_empty() { return h; }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(h) = std::env::var("COMPUTERNAME") { return h; }
+    }
+    "device".to_string()
 }

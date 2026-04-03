@@ -73,6 +73,20 @@ impl Drop for ExitRouteState {
     }
 }
 
+pub fn emergency_cleanup(tun_name: &str) {
+    eprintln!("[vpn-client] emergency route cleanup for {}", tun_name);
+    restore_dns();
+    remove_default_via_tun(tun_name);
+    remove_default_v6_via_tun(tun_name);
+    cleanup_policy_routing();
+    if let Ok((gw, _iface)) = detect_default_gateway() {
+        if !gw.is_empty() {
+            let _ = run_cmd("route", &["delete", "default"]);
+            let _ = run_cmd("route", &["add", "default", &gw]);
+        }
+    }
+}
+
 pub fn add_route(net: Ipv4Addr, prefix: u8, tun_name: &str) -> std::io::Result<()> {
     add_route_os(net, prefix, tun_name)
 }

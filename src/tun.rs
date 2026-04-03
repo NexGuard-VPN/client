@@ -265,8 +265,9 @@ mod platform {
         }
 
         pub fn read_packet(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let mut hdr_buf = vec![0u8; buf.len() + 4];
-            let n = unsafe { libc::read(self.fd, hdr_buf.as_mut_ptr() as *mut _, hdr_buf.len()) };
+            let mut hdr_buf = [0u8; 65539]; // 65535 + 4 header
+            let read_len = (buf.len() + 4).min(hdr_buf.len());
+            let n = unsafe { libc::read(self.fd, hdr_buf.as_mut_ptr() as *mut _, read_len) };
             if n < 0 {
                 return Err(std::io::Error::last_os_error());
             }
