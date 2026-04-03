@@ -108,7 +108,8 @@ pub fn try_join_server(
     name: &str,
 ) -> Result<JoinResponse, String> {
     let host = control_host(server, control_port);
-    let body = format!(r#"{{"public_key":"{}","name":"{}"}}"#, pub_key, name);
+    let ver = env!("CARGO_PKG_VERSION");
+    let body = format!(r#"{{"public_key":"{}","name":"{}","version":"{}"}}"#, pub_key, name, ver);
     let req = format!(
         "POST /api/v1/join HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         host, token, body.len(), body
@@ -254,14 +255,17 @@ pub struct UpdateInfo {
     pub version: String,
     pub download_url: String,
     pub has_update: bool,
+    pub force_update: bool,
 }
 
 pub fn check_update() -> Option<UpdateInfo> {
     let body = http_get(VERSION_URL_HOST, VERSION_URL_PATH)?;
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
     let latest = v.get("client")?.get("version")?.as_str()?;
+    let min_version = v.get("client")?.get("min_version").and_then(|v| v.as_str()).unwrap_or("0.0.0");
 
     let has_update = version_newer(latest, CURRENT_VERSION);
+    let force_update = version_newer(min_version, CURRENT_VERSION);
     let platform = detect_platform();
     let url = v.get("client")?
         .get("platforms")?
@@ -274,6 +278,7 @@ pub fn check_update() -> Option<UpdateInfo> {
         version: latest.to_string(),
         download_url: url,
         has_update,
+        force_update,
     })
 }
 
@@ -350,6 +355,24 @@ pub fn self_update(url: &str) -> Result<(), String> {
         })?;
     let _ = std::fs::remove_file(&backup);
     Ok(())
+}
+
+pub fn restart_self() -> ! {
+    let exe = std::env::current_exe().expect("current exe");
+    let args: Vec<String> = std::env::args().collect();
+    eprintln!("[nexguard] restarting...");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&exe).args(&args[1..]).exec();
+        eprintln!("[nexguard] restart failed: {}", err);
+        std::process::exit(1);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::process::Command::new(&exe).args(&args[1..]).spawn();
+        std::process::exit(0);
+    }
 }
 
 fn version_newer(latest: &str, current: &str) -> bool {

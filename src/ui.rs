@@ -99,9 +99,13 @@ impl VpnApp {
 
     fn disconnect(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        if let Some(status) = self.status.lock().unwrap().take() {
+            if status.internet_mode {
+                crate::route::emergency_cleanup(&status.tun_name);
+            }
+        }
         *self.state.lock().unwrap() = ConnectionState::Disconnected;
-        *self.status.lock().unwrap() = None;
     }
 
     fn save_new_server(&mut self) {
