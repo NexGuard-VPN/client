@@ -1,11 +1,15 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::net::{SocketAddr, UdpSocket};
+use std::time::Instant;
 
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 
 use crate::tun::TunDevice;
+
+const PROBE_INTERVAL_SECS: u64 = 10;
+const DIRECT_TIMEOUT_SECS: u64 = 30;
 
 struct MeshTunnel {
     tunn: Tunn,
@@ -15,10 +19,12 @@ struct MeshTunnel {
 struct MeshPeerState {
     tunnel: Mutex<MeshTunnel>,
     allowed_ips: Vec<(u32, u32, u8)>,
-    #[allow(dead_code)]
     public_key_b64: String,
     tx_bytes: AtomicU64,
     rx_bytes: AtomicU64,
+    direct_ok: AtomicBool,
+    last_direct_rx: Mutex<Instant>,
+    last_probe: Mutex<Instant>,
 }
 
 pub struct MeshManager {
@@ -46,36 +52,25 @@ impl MeshManager {
         self.active.load(Ordering::Relaxed)
     }
 
-    pub fn add_peer(&self, public_key: &[u8; 32], endpoint: Option<SocketAddr>, allowed_ips: Vec<(u32, u32, u8)>, pub_key_b64: String) {
-        let secret = StaticSecret::from(self.private_key);
-        let tunn = Tunn::new(secret, PublicKey::from(*public_key), None, Some(25), 0, None);
-        let state = MeshPeerState {
-            tunnel: Mutex::new(MeshTunnel { tunn, endpoint }),
-            allowed_ips,
-            public_key_b64: pub_key_b64,
-            tx_bytes: AtomicU64::new(0),
-            rx_bytes: AtomicU64::new(0),
-        };
-        self.peers.lock().unwrap().push(state);
-    }
-
     pub fn try_send(&self, packet: &[u8], dst_ip: u32) -> bool {
         if !self.is_active() { return false; }
         let peers = self.peers.lock().unwrap();
         for peer in peers.iter() {
             if !ip_matches(&peer.allowed_ips, dst_ip) { continue; }
-            let mut tun = peer.tunnel.lock().unwrap();
-            let endpoint = match tun.endpoint {
-                Some(ep) => ep,
-                None => return false,
-            };
-            let mut buf = vec![0u8; packet.len() + 256];
-            if let TunnResult::WriteToNetwork(data) = tun.tunn.encapsulate(packet, &mut buf) {
-                if self.udp.send_to(data, endpoint).is_ok() {
-                    peer.tx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
-                    return true;
+
+            if peer.direct_ok.load(Ordering::Relaxed) {
+                let mut tun = peer.tunnel.lock().unwrap();
+                if let Some(ep) = tun.endpoint {
+                    let mut buf = vec![0u8; packet.len() + 256];
+                    if let TunnResult::WriteToNetwork(data) = tun.tunn.encapsulate(packet, &mut buf) {
+                        if self.udp.send_to(data, ep).is_ok() {
+                            peer.tx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+                            return true;
+                        }
+                    }
                 }
             }
+
             return false;
         }
         false
@@ -96,10 +91,14 @@ impl MeshManager {
                         if t.endpoint != Some(from) {
                             t.endpoint = Some(from);
                         }
+                        peer.direct_ok.store(true, Ordering::Relaxed);
+                        *peer.last_direct_rx.lock().unwrap() = Instant::now();
                         break;
                     }
                     TunnResult::WriteToNetwork(data) => {
                         let _ = self.udp.send_to(data, from);
+                        peer.direct_ok.store(true, Ordering::Relaxed);
+                        *peer.last_direct_rx.lock().unwrap() = Instant::now();
                         self.drain_handshake(&mut t, &mut dec, tun, from);
                         break;
                     }
@@ -123,14 +122,40 @@ impl MeshManager {
         if !self.is_active() { return; }
         let peers = self.peers.lock().unwrap();
         let mut buf = [0u8; 65535];
+        let now = Instant::now();
+
         for peer in peers.iter() {
             let mut t = peer.tunnel.lock().unwrap();
-            if let TunnResult::WriteToNetwork(data) = t.tunn.update_timers(&mut buf) {
-                if let Some(ep) = t.endpoint {
-                    let _ = self.udp.send_to(data, ep);
+
+            let last_rx = peer.last_direct_rx.lock().unwrap().elapsed().as_secs();
+            if last_rx > DIRECT_TIMEOUT_SECS && peer.direct_ok.load(Ordering::Relaxed) {
+                peer.direct_ok.store(false, Ordering::Relaxed);
+                eprintln!("[mesh] peer {} direct connection lost, using server relay",
+                    &peer.public_key_b64[..8]);
+            }
+
+            let should_probe = peer.last_probe.lock().unwrap().elapsed().as_secs() >= PROBE_INTERVAL_SECS;
+            if should_probe {
+                *peer.last_probe.lock().unwrap() = now;
+                if let TunnResult::WriteToNetwork(data) = t.tunn.update_timers(&mut buf) {
+                    if let Some(ep) = t.endpoint {
+                        let _ = self.udp.send_to(data, ep);
+                    }
                 }
             }
         }
+    }
+
+    pub fn peer_stats(&self) -> Vec<(String, bool, u64, u64)> {
+        let peers = self.peers.lock().unwrap();
+        peers.iter().map(|p| {
+            (
+                p.public_key_b64.clone(),
+                p.direct_ok.load(Ordering::Relaxed),
+                p.tx_bytes.load(Ordering::Relaxed),
+                p.rx_bytes.load(Ordering::Relaxed),
+            )
+        }).collect()
     }
 
     pub fn update_peers(&self, mesh_peers: &[crate::api::MeshPeerInfo], my_pub_key: &str) {
@@ -147,8 +172,12 @@ impl MeshManager {
                     if p.public_key_b64 == mp.public_key {
                         if let Some(ep) = new_ep {
                             let mut t = p.tunnel.lock().unwrap();
-                            if t.endpoint != Some(ep) {
+                            if t.endpoint.is_none() || t.endpoint != Some(ep) {
                                 t.endpoint = Some(ep);
+                                if !p.direct_ok.load(Ordering::Relaxed) {
+                                    *p.last_probe.lock().unwrap() = Instant::now()
+                                        - std::time::Duration::from_secs(PROBE_INTERVAL_SECS);
+                                }
                             }
                         }
                         break;
@@ -165,13 +194,20 @@ impl MeshManager {
 
             let secret = StaticSecret::from(self.private_key);
             let tunn = Tunn::new(secret, PublicKey::from(pub_key_bytes), None, Some(25), 0, None);
+            let now = Instant::now();
             peers.push(MeshPeerState {
                 tunnel: Mutex::new(MeshTunnel { tunn, endpoint: new_ep }),
                 allowed_ips,
                 public_key_b64: mp.public_key.clone(),
                 tx_bytes: AtomicU64::new(0),
                 rx_bytes: AtomicU64::new(0),
+                direct_ok: AtomicBool::new(new_ep.is_some()),
+                last_direct_rx: Mutex::new(now),
+                last_probe: Mutex::new(now - std::time::Duration::from_secs(PROBE_INTERVAL_SECS)),
             });
+
+            eprintln!("[mesh] added peer {} endpoint={:?}",
+                &mp.public_key[..8], new_ep);
         }
     }
 }
