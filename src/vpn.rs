@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -6,6 +6,8 @@ use boringtun::noise::Tunn;
 use boringtun::x25519::{PublicKey, StaticSecret};
 
 use crate::{api, mesh, route, tun, wg};
+
+const OBFS_PORT: u16 = 443;
 
 pub struct VpnConfig {
     pub server: String,
@@ -16,6 +18,7 @@ pub struct VpnConfig {
     pub mtu: usize,
     pub vpn_network: Option<String>,
     pub internet: bool,
+    pub relay: Option<String>,
 }
 
 impl Default for VpnConfig {
@@ -29,6 +32,7 @@ impl Default for VpnConfig {
             mtu: 1420,
             vpn_network: None,
             internet: false,
+            relay: None,
         }
     }
 }
@@ -164,9 +168,16 @@ pub fn connect(
                 .map(|a| a.ip().to_string())
                 .unwrap_or_else(|| wg_ip.clone())
         };
+        let relay_ip = join_resp.relay_server.as_ref()
+            .and_then(|rs| rs.split(':').next().map(|s| s.to_string()));
         let mut preserve_ips: Vec<&str> = vec![&wg_ip];
         if control_ip != wg_ip {
             preserve_ips.push(&control_ip);
+        }
+        if let Some(ref rip) = relay_ip {
+            if rip != &wg_ip && rip != &control_ip {
+                preserve_ips.push(rip);
+            }
         }
         let vpn_net = join_resp.vpn_network.as_deref()
             .or(config.vpn_network.as_deref());
@@ -179,15 +190,11 @@ pub fn connect(
         None
     };
 
-    let udp = UdpSocket::bind(format!("0.0.0.0:{}", config.listen_port))
-        .map_err(|e| format!("UDP bind: {}", e))?;
-    udp.set_nonblocking(true).ok();
+    let relay_name = join_resp.relay_name.clone();
 
-    let tunn = Tunn::new(secret, PublicKey::from(server_pub_key), None, Some(25), 0, None);
-    let tunnel = Mutex::new(wg::WgState {
-        tunn,
-        endpoint: server_endpoint,
-    });
+    let server_pub = PublicKey::from(server_pub_key);
+    let tunn = Tunn::new(secret, server_pub, None, Some(25), 0, None);
+    let tunnel = Mutex::new(wg::WgState { tunn, server_pub_key: server_pub });
 
     let tx = Arc::new(AtomicU64::new(0));
     let rx = Arc::new(AtomicU64::new(0));
@@ -238,12 +245,34 @@ pub fn connect(
         None
     };
 
+    let effective_relay = if config.relay.is_some() {
+        config.relay.clone()
+    } else {
+        join_resp.relay_server.clone()
+    };
+    let server_for_relay = config.server.clone();
+    let token_for_relay = join_resp.relay_token.clone().unwrap_or_else(|| config.token.clone());
+    let obfs_addr = format!("{}:{}", server_endpoint.ip(), OBFS_PORT);
+
     let shutdown_dp = Arc::clone(&shutdown);
     std::thread::spawn(move || {
-        wg::run_data_plane(
-            &tun_dev, &udp, &tunnel, &tx, &rx, &shutdown_dp,
-            mesh_mgr.as_ref().map(|m| m.as_ref()),
-        );
+        let stream_result = if let Some(ref relay) = effective_relay {
+            let target = relay_name.as_deref().unwrap_or(&server_for_relay);
+            wg::connect_relay(relay, target, &token_for_relay)
+        } else {
+            wg::connect_tls(&obfs_addr)
+        };
+        match stream_result {
+            Ok(mut stream) => {
+                wg::run_data_plane_tls(
+                    &tun_dev, &mut stream, &tunnel, &tx, &rx, &shutdown_dp,
+                    mesh_mgr.as_ref().map(|m| m.as_ref()), None,
+                );
+            }
+            Err(e) => {
+                eprintln!("[vpn-client] connection failed: {}", e);
+            }
+        }
         drop(exit_state);
         drop(mesh_mgr);
     });

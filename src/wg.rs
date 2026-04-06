@@ -1,7 +1,8 @@
 use std::io::{Read, Write};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use boringtun::noise::{Tunn, TunnResult};
 
@@ -10,146 +11,148 @@ use crate::tun::TunDevice;
 const MAX_PACKET: usize = 65535;
 const TIMER_TICK_MS: u128 = 250;
 const STATS_INTERVAL_SECS: u64 = 30;
+const TLS_SNI: &str = "www.cloudflare.com";
+const TLS_READ_TIMEOUT: Duration = Duration::from_millis(5);
+const TLS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct WgState {
     pub tunn: Tunn,
-    pub endpoint: SocketAddr,
+    pub server_pub_key: boringtun::x25519::PublicKey,
 }
 
-pub fn run_data_plane(
-    tun: &TunDevice,
-    udp: &UdpSocket,
-    tunnel: &Mutex<WgState>,
-    tx: &AtomicU64,
-    rx: &AtomicU64,
-    shutdown: &AtomicBool,
-    mesh: Option<&crate::mesh::MeshManager>,
-) {
-    let mut tun_buf = vec![0u8; MAX_PACKET];
-    let mut udp_buf = vec![0u8; MAX_PACKET];
-    let mut enc_buf = vec![0u8; MAX_PACKET];
-    let mut dec_buf = vec![0u8; MAX_PACKET];
-    let mut last_tick = std::time::Instant::now();
-    let mut last_stats = std::time::Instant::now();
+pub fn connect_relay(
+    relay_addr: &str,
+    server_name: &str,
+    token: &str,
+) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
+        .with_no_client_auth();
+
+    let sni = rustls::pki_types::ServerName::try_from(TLS_SNI)
+        .map_err(|e| format!("sni: {}", e))?;
+    let conn = rustls::ClientConnection::new(Arc::new(config), sni)
+        .map_err(|e| format!("tls: {}", e))?;
+
+    let socket_addr: SocketAddr = relay_addr.parse().map_err(|e| format!("parse {}: {}", relay_addr, e))?;
+    let tcp = TcpStream::connect_timeout(&socket_addr, TLS_CONNECT_TIMEOUT)
+        .map_err(|e| format!("connect {}: {}", relay_addr, e))?;
+    tcp.set_nodelay(true).ok();
+
+    let mut tls = rustls::StreamOwned::new(conn, tcp);
+
+    let upgrade = format!(
+        "GET /relay HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Upgrade: nexguard\r\n\
+         Connection: Upgrade\r\n\
+         X-NexGuard-Server: {}\r\n\
+         X-NexGuard-Token: {}\r\n\
+         \r\n",
+        relay_addr, server_name, token
+    );
+    tls.write_all(upgrade.as_bytes()).map_err(|e| format!("relay write: {}", e))?;
+    tls.flush().map_err(|e| format!("relay flush: {}", e))?;
+
+    let mut resp_buf = [0u8; 1024];
+    let mut total = 0;
+    tls.sock.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    tls.sock.set_write_timeout(Some(Duration::from_secs(5))).ok();
     loop {
-        if shutdown.load(Ordering::Relaxed) {
-            break;
-        }
-
-        let mut did_work = false;
-
-        if let Ok(n) = tun.read_packet(&mut tun_buf) {
-            if n > 0 {
-                did_work = true;
-                let sent_via_mesh = if let Some(ref m) = mesh {
-                    if n >= 20 {
-                        let dst_ip = u32::from_be_bytes([tun_buf[16], tun_buf[17], tun_buf[18], tun_buf[19]]);
-                        m.try_send(&tun_buf[..n], dst_ip)
-                    } else {
-                        false
+        match tls.read(&mut resp_buf[total..]) {
+            Ok(0) => return Err("relay: connection closed during handshake".into()),
+            Ok(n) => {
+                total += n;
+                let resp = std::str::from_utf8(&resp_buf[..total]).unwrap_or("");
+                if resp.contains("\r\n\r\n") {
+                    if !resp.contains("101") {
+                        return Err(format!("relay rejected: {}", resp.lines().next().unwrap_or("")));
                     }
-                } else {
-                    false
-                };
-                if !sent_via_mesh {
-                    let mut wg = tunnel.lock().unwrap();
-                    if let TunnResult::WriteToNetwork(data) =
-                        wg.tunn.encapsulate(&tun_buf[..n], &mut enc_buf)
-                    {
-                        let _ = udp.send_to(data, wg.endpoint);
-                        tx.fetch_add(data.len() as u64, Ordering::Relaxed);
-                    }
+                    break;
+                }
+                if total >= resp_buf.len() {
+                    return Err("relay: response too large".into());
                 }
             }
-        }
-
-        match udp.recv_from(&mut udp_buf) {
-            Ok((n, _)) => {
-                did_work = true;
-                let mut wg = tunnel.lock().unwrap();
-                handle_udp_packet(&mut wg, udp, tun, &udp_buf[..n], &mut dec_buf, rx, n);
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => {}
-        }
-
-        if let Some(ref m) = mesh {
-            m.recv_and_process(tun);
-        }
-
-        if last_tick.elapsed().as_millis() >= TIMER_TICK_MS {
-            last_tick = std::time::Instant::now();
-            let mut wg = tunnel.lock().unwrap();
-            if let TunnResult::WriteToNetwork(data) = wg.tunn.update_timers(&mut enc_buf) {
-                let _ = udp.send_to(data, wg.endpoint);
-            }
-            if let Some(ref m) = mesh {
-                m.tick();
-            }
-        }
-
-        if last_stats.elapsed().as_secs() >= STATS_INTERVAL_SECS {
-            last_stats = std::time::Instant::now();
-            eprintln!(
-                "[vpn-client] tx={} rx={}",
-                fmt_bytes(tx.load(Ordering::Relaxed)),
-                fmt_bytes(rx.load(Ordering::Relaxed))
-            );
-        }
-
-        if !did_work {
-            std::thread::sleep(std::time::Duration::from_micros(100));
+            Err(e) => return Err(format!("relay read: {}", e)),
         }
     }
 
-    eprintln!("[vpn-client] shutdown");
+    tls.sock.set_read_timeout(Some(TLS_READ_TIMEOUT)).ok();
+    Ok(tls)
 }
 
-fn handle_udp_packet(
-    wg: &mut WgState,
-    udp: &UdpSocket,
-    tun: &TunDevice,
-    data: &[u8],
-    dec_buf: &mut [u8],
-    rx: &AtomicU64,
-    n: usize,
-) {
-    match wg.tunn.decapsulate(None, data, dec_buf) {
-        TunnResult::WriteToTunnelV4(payload, _) => {
-            let _ = tun.write_packet(payload);
-            rx.fetch_add(n as u64, Ordering::Relaxed);
-        }
-        TunnResult::WriteToNetwork(resp) => {
-            let _ = udp.send_to(resp, wg.endpoint);
-            drain_pending(wg, udp, tun, dec_buf, rx, n);
-        }
-        _ => {}
+pub fn connect_tls(addr: &str) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
+        .with_no_client_auth();
+
+    let sni = rustls::pki_types::ServerName::try_from(TLS_SNI)
+        .map_err(|e| format!("sni: {}", e))?;
+    let conn = rustls::ClientConnection::new(Arc::new(config), sni)
+        .map_err(|e| format!("tls: {}", e))?;
+
+    let socket_addr: SocketAddr = addr.parse().map_err(|e| format!("parse {}: {}", addr, e))?;
+    let tcp = TcpStream::connect_timeout(&socket_addr, TLS_CONNECT_TIMEOUT)
+        .map_err(|e| format!("connect {}: {}", addr, e))?;
+    tcp.set_nodelay(true).ok();
+    tcp.set_read_timeout(Some(TLS_READ_TIMEOUT)).ok();
+    tcp.set_write_timeout(Some(Duration::from_secs(5))).ok();
+
+    Ok(rustls::StreamOwned::new(conn, tcp))
+}
+
+#[derive(Debug)]
+struct InsecureVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for InsecureVerifier {
+    fn verify_server_cert(
+        &self,
+        _: &rustls::pki_types::CertificateDer,
+        _: &[rustls::pki_types::CertificateDer],
+        _: &rustls::pki_types::ServerName,
+        _: &[u8],
+        _: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer,
+        _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer,
+        _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
-fn drain_pending(
-    wg: &mut WgState,
-    udp: &UdpSocket,
-    tun: &TunDevice,
-    dec_buf: &mut [u8],
-    rx: &AtomicU64,
-    n: usize,
-) {
-    loop {
-        match wg.tunn.decapsulate(None, &[], dec_buf) {
-            TunnResult::WriteToNetwork(data) => {
-                let _ = udp.send_to(data, wg.endpoint);
-            }
-            TunnResult::WriteToTunnelV4(data, _) => {
-                let _ = tun.write_packet(data);
-                rx.fetch_add(n as u64, Ordering::Relaxed);
-                break;
-            }
-            _ => break,
-        }
-    }
+pub struct RekeyCtx {
+    pub server: String,
+    pub control_port: u16,
+    pub token: String,
+    pub private_key: Arc<Mutex<[u8; 32]>>,
 }
+
+const REKEY_INTERVAL_SECS: u64 = 24 * 3600;
 
 pub fn run_data_plane_tls<S: Read + Write>(
     tun: &TunDevice,
@@ -158,6 +161,8 @@ pub fn run_data_plane_tls<S: Read + Write>(
     tx: &AtomicU64,
     rx: &AtomicU64,
     shutdown: &AtomicBool,
+    mesh: Option<&crate::mesh::MeshManager>,
+    rekey_ctx: Option<&RekeyCtx>,
 ) {
     let mut tun_buf = vec![0u8; MAX_PACKET];
     let mut tls_buf = [0u8; MAX_PACKET];
@@ -167,22 +172,37 @@ pub fn run_data_plane_tls<S: Read + Write>(
     let mut write_buf = Vec::with_capacity(MAX_PACKET);
     let mut last_tick = std::time::Instant::now();
     let mut last_stats = std::time::Instant::now();
+    let mut last_rekey = std::time::Instant::now();
+    let mut last_health = std::time::Instant::now();
+    let mut last_rx_check = rx.load(Ordering::Relaxed);
+    let mut stall_count: u32 = 0;
 
     loop {
         if shutdown.load(Ordering::Relaxed) { break; }
         let mut did_work = false;
         write_buf.clear();
 
-        // TUN → WireGuard encrypt → batch to write_buf
         for _ in 0..64 {
             match tun.read_packet(&mut tun_buf) {
                 Ok(n) if n > 0 => {
                     did_work = true;
-                    let mut wg = tunnel.lock().unwrap();
-                    if let TunnResult::WriteToNetwork(data) = wg.tunn.encapsulate(&tun_buf[..n], &mut enc_buf) {
-                        write_buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
-                        write_buf.extend_from_slice(data);
-                        tx.fetch_add(data.len() as u64, Ordering::Relaxed);
+                    let sent_via_mesh = if let Some(m) = mesh {
+                        if n >= 20 {
+                            let dst_ip = u32::from_be_bytes([tun_buf[16], tun_buf[17], tun_buf[18], tun_buf[19]]);
+                            m.try_send(&tun_buf[..n], dst_ip)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !sent_via_mesh {
+                        let mut wg = tunnel.lock().unwrap();
+                        if let TunnResult::WriteToNetwork(data) = wg.tunn.encapsulate(&tun_buf[..n], &mut enc_buf) {
+                            write_buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
+                            write_buf.extend_from_slice(data);
+                            tx.fetch_add(data.len() as u64, Ordering::Relaxed);
+                        }
                     }
                 }
                 Ok(_) => break,
@@ -190,15 +210,20 @@ pub fn run_data_plane_tls<S: Read + Write>(
             }
         }
 
+        if let Some(m) = mesh {
+            m.recv_and_process(tun);
+        }
+
         // Flush batched TLS writes
         if !write_buf.is_empty() {
-            if let Err(e) = tls.write_all(&write_buf) {
-                eprintln!("[vpn-client] tls write error: {}", e);
-                break;
-            }
-            if let Err(e) = tls.flush() {
-                eprintln!("[vpn-client] tls flush error: {}", e);
-                break;
+            match tls.write_all(&write_buf) {
+                Ok(()) => { let _ = tls.flush(); }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(e) => {
+                    eprintln!("[vpn-client] tls write error: {}", e);
+                    break;
+                }
             }
         }
 
@@ -265,6 +290,10 @@ pub fn run_data_plane_tls<S: Read + Write>(
                 let _ = tls.write_all(&buf);
                 let _ = tls.flush();
             }
+            drop(wg);
+            if let Some(m) = mesh {
+                m.tick();
+            }
         }
 
         if last_stats.elapsed().as_secs() >= STATS_INTERVAL_SECS {
@@ -272,11 +301,97 @@ pub fn run_data_plane_tls<S: Read + Write>(
             eprintln!("[vpn-client] tx={} rx={} (tls)", fmt_bytes(tx.load(Ordering::Relaxed)), fmt_bytes(rx.load(Ordering::Relaxed)));
         }
 
+        if last_health.elapsed().as_secs() >= 10 {
+            last_health = std::time::Instant::now();
+            let current_rx = rx.load(Ordering::Relaxed);
+            let current_tx = tx.load(Ordering::Relaxed);
+            if current_tx > 0 && current_rx == last_rx_check {
+                stall_count += 1;
+                if stall_count >= 6 {
+                    eprintln!("[vpn-client] connection stalled (no rx for 60s), reconnecting");
+                    break;
+                }
+                if stall_count >= 3 {
+                    eprintln!("[vpn-client] degraded connection (no rx for {}s)", stall_count * 10);
+                }
+            } else {
+                stall_count = 0;
+            }
+            last_rx_check = current_rx;
+        }
+
+        if let Some(ctx) = rekey_ctx {
+            if last_rekey.elapsed().as_secs() >= REKEY_INTERVAL_SECS {
+                last_rekey = std::time::Instant::now();
+                do_rekey(tunnel, ctx, &mut enc_buf, tls);
+            }
+        }
+
         if !did_work {
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
     }
     eprintln!("[vpn-client] shutdown (tls)");
+}
+
+fn do_rekey<S: Read + Write>(
+    tunnel: &Mutex<WgState>,
+    ctx: &RekeyCtx,
+    enc_buf: &mut [u8],
+    tls: &mut S,
+) {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let old_key = *ctx.private_key.lock().unwrap();
+    let old_secret = boringtun::x25519::StaticSecret::from(old_key);
+    let old_pub = boringtun::x25519::PublicKey::from(&old_secret);
+    let old_pub_b64 = b64.encode(old_pub.as_bytes());
+
+    let new_key = crate::generate_private_key();
+    let new_secret = boringtun::x25519::StaticSecret::from(new_key);
+    let new_pub = boringtun::x25519::PublicKey::from(&new_secret);
+    let new_pub_b64 = b64.encode(new_pub.as_bytes());
+
+    match crate::api::rekey(&ctx.server, ctx.control_port, &ctx.token, &old_pub_b64, &new_pub_b64) {
+        Ok(()) => {
+            let server_pub = {
+                let wg = tunnel.lock().unwrap();
+                wg.server_pub_key
+            };
+            let new_tunn = boringtun::noise::Tunn::new(
+                new_secret, server_pub, None, Some(25), 0, None,
+            );
+            {
+                let mut wg = tunnel.lock().unwrap();
+                wg.tunn = new_tunn;
+            }
+            *ctx.private_key.lock().unwrap() = new_key;
+
+            if let Some(home) = dirs_next() {
+                let key_path = home.join("client.key");
+                let _ = std::fs::write(&key_path, b64.encode(new_key));
+            }
+
+            let mut wg = tunnel.lock().unwrap();
+            if let TunnResult::WriteToNetwork(data) = wg.tunn.update_timers(enc_buf) {
+                let mut buf = Vec::with_capacity(2 + data.len());
+                buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
+                buf.extend_from_slice(data);
+                let _ = tls.write_all(&buf);
+                let _ = tls.flush();
+            }
+
+            eprintln!("[vpn-client] key rotated successfully");
+        }
+        Err(e) => {
+            eprintln!("[vpn-client] rekey failed: {}", e);
+        }
+    }
+}
+
+fn dirs_next() -> Option<std::path::PathBuf> {
+    crate::dirs_next()
 }
 
 fn fmt_bytes(b: u64) -> String {

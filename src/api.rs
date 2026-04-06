@@ -22,6 +22,14 @@ pub struct JoinResponse {
     pub mesh: Option<bool>,
     #[serde(default)]
     pub mesh_peers: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub relay_name: Option<String>,
+    #[serde(default)]
+    pub relay_server: Option<String>,
+    #[serde(default)]
+    pub relay_token: Option<String>,
 }
 
 pub struct MeshPeerInfo {
@@ -107,9 +115,32 @@ pub fn try_join_server(
     pub_key: &str,
     name: &str,
 ) -> Result<JoinResponse, String> {
+    try_join_server_with_routes(server, control_port, token, pub_key, name, &[])
+}
+
+pub fn try_join_server_with_routes(
+    server: &str,
+    control_port: u16,
+    token: &str,
+    pub_key: &str,
+    name: &str,
+    advertise_routes: &[String],
+) -> Result<JoinResponse, String> {
     let host = control_host(server, control_port);
     let ver = env!("CARGO_PKG_VERSION");
-    let body = format!(r#"{{"public_key":"{}","name":"{}","version":"{}"}}"#, pub_key, name, ver);
+    let fp = crate::fingerprint::collect();
+    let device_id_path = crate::dirs_next().map(|d| d.join("device-hwid")).unwrap_or_default();
+    let saved_device_id = std::fs::read_to_string(&device_id_path).unwrap_or_default().trim().to_string();
+    let routes_json = if advertise_routes.is_empty() {
+        String::new()
+    } else {
+        let routes: Vec<String> = advertise_routes.iter().map(|r| format!(r#""{}""#, r)).collect();
+        format!(r#","advertise_routes":[{}]"#, routes.join(","))
+    };
+    let body = format!(
+        r#"{{"public_key":"{}","name":"{}","version":"{}","fingerprint":"{}","device_id":"{}"{}}}"#,
+        pub_key, name, ver, fp.replace('"', ""), saved_device_id, routes_json
+    );
     let req = format!(
         "POST /api/v1/join HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         host, token, body.len(), body
@@ -119,8 +150,16 @@ pub fn try_join_server(
     let body_start = resp.find("\r\n\r\n")
         .ok_or_else(|| "invalid response: no header terminator".to_string())? + 4;
 
-    serde_json::from_str(&resp[body_start..])
-        .map_err(|e| format!("join failed: {} — {}", e, &resp[body_start..]))
+    let join_resp: JoinResponse = serde_json::from_str(&resp[body_start..])
+        .map_err(|e| format!("join failed: {} — {}", e, &resp[body_start..]))?;
+
+    if let Some(ref did) = join_resp.device_id {
+        if !did.is_empty() {
+            let _ = std::fs::write(&device_id_path, did);
+        }
+    }
+
+    Ok(join_resp)
 }
 
 pub fn join_server(
@@ -136,6 +175,30 @@ pub fn join_server(
             eprintln!("[vpn-client] {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+pub fn rekey(
+    server: &str,
+    control_port: u16,
+    token: &str,
+    old_pub_key: &str,
+    new_pub_key: &str,
+) -> Result<(), String> {
+    let host = control_host(server, control_port);
+    let body = format!(
+        r#"{{"old_public_key":"{}","new_public_key":"{}"}}"#,
+        old_pub_key, new_pub_key
+    );
+    let req = format!(
+        "POST /api/v1/rekey HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        host, token, body.len(), body
+    );
+    let resp = try_http_request(&host, &req)?;
+    if resp.contains("\"rekeyed\"") {
+        Ok(())
+    } else {
+        Err(format!("rekey failed: {}", resp))
     }
 }
 

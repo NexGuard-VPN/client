@@ -1,6 +1,6 @@
 [package]
 name = "nexguard"
-version = "0.9.4"
+version = "1.4.2"
 edition = "2021"
 
 [[bin]]
@@ -17,6 +17,9 @@ egui = "0.31"
 rustls = { version = "0.23", features = ["ring"] }
 webpki-roots = "0.26"
 open = "5"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

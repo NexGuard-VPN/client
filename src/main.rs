@@ -1,4 +1,5 @@
 mod api;
+pub mod fingerprint;
 pub mod mesh;
 mod profiles;
 mod route;
@@ -7,7 +8,7 @@ mod ui;
 mod vpn;
 mod wg;
 
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +16,7 @@ use boringtun::noise::Tunn;
 use boringtun::x25519::{PublicKey, StaticSecret};
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+const OBFS_PORT: u16 = 443;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -60,13 +62,17 @@ fn main() {
 
     eprintln!("[vpn-client] public key: {}", pub_key_b64);
 
-    let join_resp = api::join_server(
-        &args.server,
-        args.control_port,
-        &args.token,
-        &pub_key_b64,
-        &args.name,
-    );
+    let join_resp = if args.advertise_routes.is_empty() {
+        api::join_server(&args.server, args.control_port, &args.token, &pub_key_b64, &args.name)
+    } else {
+        eprintln!("[vpn-client] advertising routes: {:?}", args.advertise_routes);
+        match api::try_join_server_with_routes(
+            &args.server, args.control_port, &args.token, &pub_key_b64, &args.name, &args.advertise_routes,
+        ) {
+            Ok(r) => r,
+            Err(e) => { eprintln!("[vpn-client] {}", e); std::process::exit(1); }
+        }
+    };
 
     let assigned_addr = join_resp.address.clone();
     let server_pub_key = b64_decode(&join_resp.server_public_key);
@@ -126,9 +132,16 @@ fn main() {
             let target = if args.server.contains(':') { args.server.clone() } else { format!("{}:9190", args.server) };
             target.to_socket_addrs().ok().and_then(|mut a| a.next()).map(|a| a.ip().to_string()).unwrap_or_else(|| wg_ip.clone())
         };
+        let relay_ip = join_resp.relay_server.as_ref()
+            .and_then(|rs| rs.split(':').next().map(|s| s.to_string()));
         let mut preserve_ips: Vec<&str> = vec![&wg_ip];
         if control_ip != wg_ip {
             preserve_ips.push(&control_ip);
+        }
+        if let Some(ref rip) = relay_ip {
+            if rip != &wg_ip && rip != &control_ip {
+                preserve_ips.push(rip);
+            }
         }
         let vpn_net = join_resp.vpn_network.as_deref()
             .or(args.vpn_network.as_deref());
@@ -147,23 +160,23 @@ fn main() {
         None
     };
 
-    let udp = UdpSocket::bind(format!("0.0.0.0:{}", args.listen_port))
-        .expect("failed to bind UDP");
-    udp.set_nonblocking(true).ok();
-
     eprintln!(
-        "[vpn-client] tun={}, addr={}, endpoint={}, udp=:{}",
+        "[vpn-client] tun={}, addr={}, endpoint={}",
         tun_dev.name(),
         assigned_addr,
         server_endpoint,
-        args.listen_port
     );
 
-    let tunn = Tunn::new(secret, PublicKey::from(server_pub_key), None, Some(25), 0, None);
-    let tunnel = Mutex::new(wg::WgState {
-        tunn,
-        endpoint: server_endpoint,
-    });
+    let server_pub = PublicKey::from(server_pub_key);
+    let tunn = Tunn::new(secret, server_pub, None, Some(25), 0, None);
+    let tunnel = Mutex::new(wg::WgState { tunn, server_pub_key: server_pub });
+    let rekey_key = Arc::new(Mutex::new(private_key));
+    let rekey_ctx = wg::RekeyCtx {
+        server: args.server.clone(),
+        control_port: args.control_port,
+        token: args.token.clone(),
+        private_key: Arc::clone(&rekey_key),
+    };
     let tx = AtomicU64::new(0);
     let rx = AtomicU64::new(0);
 
@@ -209,21 +222,84 @@ fn main() {
 
     setup_signal_handler();
 
-    if args.tls {
-        let tls_addr = format!("{}:{}", server_endpoint.ip(), server_endpoint.port());
-        eprintln!("[vpn-client] connecting TLS to {}...", tls_addr);
-        match connect_tls(&tls_addr) {
-            Ok(mut tls_stream) => {
-                eprintln!("[vpn-client] TLS connected (obfs mode)");
-                wg::run_data_plane_tls(&tun_dev, &mut tls_stream, &tunnel, &tx, &rx, &SHUTDOWN);
-            }
-            Err(e) => {
-                eprintln!("[vpn-client] TLS connection failed: {}", e);
-            }
-        }
+    let _kill_switch = if args.kill_switch {
+        let server_ip = server_endpoint.ip().to_string();
+        Some(route::KillSwitch::activate(tun_dev.name(), &[&server_ip]))
     } else {
-        wg::run_data_plane(&tun_dev, &udp, &tunnel, &tx, &rx, &SHUTDOWN,
-            mesh_mgr.as_ref().map(|m| m.as_ref()));
+        None
+    };
+
+    let tls_addr = format!("{}:{}", server_endpoint.ip(), OBFS_PORT);
+    let relay_target = join_resp.relay_name.as_deref().unwrap_or(&args.server).to_string();
+    let mesh_ref = mesh_mgr.as_ref().map(|m| m.as_ref());
+
+    let effective_relay = if args.relay.is_some() {
+        args.relay.clone()
+    } else if let (Some(rs), Some(_rn)) = (&join_resp.relay_server, &join_resp.relay_name) {
+        eprintln!("[vpn-client] server behind tunnel, using relay {}", rs);
+        Some(rs.clone())
+    } else {
+        None
+    };
+    let relay_auth_token = join_resp.relay_token.as_deref().unwrap_or(&args.token).to_string();
+    let mut backoff_ms: u64 = 1000;
+    const MAX_BACKOFF_MS: u64 = 30_000;
+
+    loop {
+        if SHUTDOWN.load(Ordering::Relaxed) { break; }
+
+        let connected = if let Some(ref relay_addrs) = effective_relay {
+            let relays: Vec<&str> = relay_addrs.split(',').map(|s| s.trim()).collect();
+            let mut ok = false;
+            for addr in &relays {
+                if SHUTDOWN.load(Ordering::Relaxed) { break; }
+                eprintln!("[vpn-client] trying relay {}...", addr);
+                match wg::connect_relay(addr, &relay_target, &relay_auth_token) {
+                    Ok(mut stream) => {
+                        eprintln!("[vpn-client] relay connected via {}", addr);
+                        ok = true;
+                        wg::run_data_plane_tls(&tun_dev, &mut stream, &tunnel, &tx, &rx, &SHUTDOWN,
+                            mesh_ref, Some(&rekey_ctx));
+                        break;
+                    }
+                    Err(e) => eprintln!("[vpn-client] relay {} failed: {}", addr, e),
+                }
+            }
+            if !ok && !SHUTDOWN.load(Ordering::Relaxed) {
+                eprintln!("[vpn-client] relays failed, trying direct TLS...");
+                if let Ok(mut s) = wg::connect_tls(&tls_addr) {
+                    ok = true;
+                    wg::run_data_plane_tls(&tun_dev, &mut s, &tunnel, &tx, &rx, &SHUTDOWN,
+                        mesh_ref, Some(&rekey_ctx));
+                }
+            }
+            ok
+        } else {
+            eprintln!("[vpn-client] connecting TLS to {}...", tls_addr);
+            match wg::connect_tls(&tls_addr) {
+                Ok(mut tls_stream) => {
+                    eprintln!("[vpn-client] TLS connected");
+                    wg::run_data_plane_tls(&tun_dev, &mut tls_stream, &tunnel, &tx, &rx, &SHUTDOWN,
+                        mesh_ref, Some(&rekey_ctx));
+                    true
+                }
+                Err(e) => {
+                    eprintln!("[vpn-client] TLS failed: {}", e);
+                    false
+                }
+            }
+        };
+
+        if SHUTDOWN.load(Ordering::Relaxed) { break; }
+
+        if connected {
+            backoff_ms = 1000;
+            eprintln!("[vpn-client] disconnected, reconnecting in 1s...");
+        } else {
+            eprintln!("[vpn-client] reconnecting in {}s...", backoff_ms / 1000);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
     }
 
     eprintln!("[vpn-client] cleaning up routes...");
@@ -231,47 +307,6 @@ fn main() {
     drop(mesh_mgr);
     if has_internet {
         route::emergency_cleanup(&tun_name_for_cleanup);
-    }
-}
-
-fn connect_tls(addr: &str) -> Result<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>, String> {
-    use std::sync::Arc;
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
-        .with_no_client_auth();
-
-    let sni = rustls::pki_types::ServerName::try_from("nexguard.local")
-        .map_err(|e| format!("sni: {}", e))?;
-    let conn = rustls::ClientConnection::new(Arc::new(config), sni)
-        .map_err(|e| format!("tls: {}", e))?;
-
-    let tcp = std::net::TcpStream::connect_timeout(
-        &addr.parse().map_err(|e| format!("parse: {}", e))?,
-        std::time::Duration::from_secs(10),
-    ).map_err(|e| format!("connect: {}", e))?;
-    tcp.set_nodelay(true).ok();
-    tcp.set_read_timeout(Some(std::time::Duration::from_micros(500))).ok();
-
-    Ok(rustls::StreamOwned::new(conn, tcp))
-}
-
-#[derive(Debug)]
-struct InsecureVerifier;
-impl rustls::client::danger::ServerCertVerifier for InsecureVerifier {
-    fn verify_server_cert(&self, _: &rustls::pki_types::CertificateDer, _: &[rustls::pki_types::CertificateDer], _: &rustls::pki_types::ServerName, _: &[u8], _: rustls::pki_types::UnixTime) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(&self, _: &[u8], _: &rustls::pki_types::CertificateDer, _: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn verify_tls13_signature(&self, _: &[u8], _: &rustls::pki_types::CertificateDer, _: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -445,7 +480,9 @@ struct Args {
     mtu: usize,
     vpn_network: Option<String>,
     internet: bool,
-    tls: bool,
+    relay: Option<String>,
+    advertise_routes: Vec<String>,
+    kill_switch: bool,
 }
 
 fn parse_args() -> Args {
@@ -458,7 +495,9 @@ fn parse_args() -> Args {
     let mut mtu = 1420usize;
     let mut vpn_network = None;
     let mut internet = false;
-    let mut tls = false;
+    let mut relay = None;
+    let mut advertise_routes = Vec::new();
+    let mut kill_switch = false;
 
     let mut i = 1;
     while i < argv.len() {
@@ -466,12 +505,19 @@ fn parse_args() -> Args {
             "--server" | "-s" => { i += 1; if i < argv.len() { server = argv[i].clone(); } }
             "--token" | "-t" => { i += 1; if i < argv.len() { token = argv[i].clone(); } }
             "--name" | "-n" => { i += 1; if i < argv.len() { name = argv[i].clone(); } }
+            "--relay" | "-r" => { i += 1; if i < argv.len() { relay = Some(argv[i].clone()); } }
             "--control-port" => { i += 1; if i < argv.len() { control_port = argv[i].parse().unwrap_or(9190); } }
             "--listen-port" => { i += 1; if i < argv.len() { listen_port = argv[i].parse().unwrap_or(0); } }
             "--mtu" => { i += 1; if i < argv.len() { mtu = argv[i].parse().unwrap_or(1420); } }
             "--vpn-network" | "--network" => { i += 1; if i < argv.len() { vpn_network = Some(argv[i].clone()); } }
+            "--advertise-routes" | "--routes" => {
+                i += 1;
+                if i < argv.len() {
+                    advertise_routes = argv[i].split(',').map(|s| s.trim().to_string()).collect();
+                }
+            }
             "--internet" | "--exit" => { internet = true; }
-            "--tls" | "--obfs" => { tls = true; }
+            "--kill-switch" | "--killswitch" => { kill_switch = true; }
             "--gui" | "--cli" | "--no-gui" => {}
             "--version" | "-v" => {
                 eprintln!("nexguard {}", env!("CARGO_PKG_VERSION"));
@@ -488,8 +534,8 @@ fn parse_args() -> Args {
                 eprintln!("  -s, --server IP:PORT      VPN server address");
                 eprintln!("  -t, --token TOKEN         Auth token");
                 eprintln!("  -n, --name NAME           Client name");
+                eprintln!("  -r, --relay IP:443        Relay server (tunnel through nexguard relay)");
                 eprintln!("  --internet                Route all traffic through VPN");
-                eprintln!("  --tls                     TLS obfuscation (bypass DPI)");
                 eprintln!("  --cli, --no-gui           Force CLI mode");
                 eprintln!("  --gui                     Force GUI mode");
                 std::process::exit(0);
@@ -511,7 +557,9 @@ fn parse_args() -> Args {
         std::process::exit(1);
     }
 
-    Args { server, token, name, control_port, listen_port, mtu, vpn_network, internet, tls }
+    if relay.is_none() { relay = std::env::var("VPN_RELAY").ok(); }
+
+    Args { server, token, name, control_port, listen_port, mtu, vpn_network, internet, relay, advertise_routes, kill_switch }
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {

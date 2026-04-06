@@ -436,6 +436,94 @@ fn restore_dns() {
         "name=NexGuard", "dhcp"]);
 }
 
+pub struct KillSwitch {
+    enabled: bool,
+}
+
+impl KillSwitch {
+    pub fn activate(tun_name: &str, server_ips: &[&str]) -> Self {
+        if let Err(e) = activate_kill_switch(tun_name, server_ips) {
+            eprintln!("[vpn-client] kill switch failed: {}", e);
+            return Self { enabled: false };
+        }
+        eprintln!("[vpn-client] kill switch enabled");
+        Self { enabled: true }
+    }
+
+    pub fn deactivate(&self) {
+        if self.enabled {
+            deactivate_kill_switch();
+            eprintln!("[vpn-client] kill switch disabled");
+        }
+    }
+}
+
+impl Drop for KillSwitch {
+    fn drop(&mut self) {
+        self.deactivate();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn activate_kill_switch(tun_name: &str, server_ips: &[&str]) -> Result<(), String> {
+    let mut rules = String::new();
+    rules.push_str("# NexGuard kill switch\n");
+    rules.push_str("block drop all\n");
+    rules.push_str(&format!("pass on {} all\n", tun_name));
+    rules.push_str("pass on lo0 all\n");
+    for ip in server_ips {
+        rules.push_str(&format!("pass out proto tcp to {} port 443\n", ip));
+        rules.push_str(&format!("pass out proto tcp to {} port 9190\n", ip));
+    }
+    rules.push_str("pass out proto udp to any port 53\n");
+    rules.push_str("pass out proto tcp to any port 53\n");
+
+    std::fs::write("/tmp/nexguard-pf.conf", &rules)
+        .map_err(|e| format!("write pf rules: {}", e))?;
+    run_cmd("pfctl", &["-f", "/tmp/nexguard-pf.conf"])
+        .map_err(|e| format!("pfctl load: {}", e))?;
+    run_cmd("pfctl", &["-e"]).ok();
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn deactivate_kill_switch() {
+    let _ = run_cmd("pfctl", &["-d"]);
+    let _ = std::fs::remove_file("/tmp/nexguard-pf.conf");
+}
+
+#[cfg(target_os = "linux")]
+fn activate_kill_switch(tun_name: &str, server_ips: &[&str]) -> Result<(), String> {
+    run_cmd("iptables", &["-N", "NEXGUARD-KS"]).ok();
+    run_cmd("iptables", &["-F", "NEXGUARD-KS"])?;
+    run_cmd("iptables", &["-A", "NEXGUARD-KS", "-o", tun_name, "-j", "ACCEPT"])?;
+    run_cmd("iptables", &["-A", "NEXGUARD-KS", "-o", "lo", "-j", "ACCEPT"])?;
+    run_cmd("iptables", &["-A", "NEXGUARD-KS", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"])?;
+    for ip in server_ips {
+        run_cmd("iptables", &["-A", "NEXGUARD-KS", "-d", ip, "-p", "tcp", "--dport", "443", "-j", "ACCEPT"])?;
+        run_cmd("iptables", &["-A", "NEXGUARD-KS", "-d", ip, "-p", "tcp", "--dport", "9190", "-j", "ACCEPT"])?;
+    }
+    run_cmd("iptables", &["-A", "NEXGUARD-KS", "-p", "udp", "--dport", "53", "-j", "ACCEPT"])?;
+    run_cmd("iptables", &["-A", "NEXGUARD-KS", "-j", "DROP"])?;
+    run_cmd("iptables", &["-I", "OUTPUT", "1", "-j", "NEXGUARD-KS"])?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn deactivate_kill_switch() {
+    let _ = run_cmd("iptables", &["-D", "OUTPUT", "-j", "NEXGUARD-KS"]);
+    let _ = run_cmd("iptables", &["-F", "NEXGUARD-KS"]);
+    let _ = run_cmd("iptables", &["-X", "NEXGUARD-KS"]);
+}
+
+#[cfg(target_os = "windows")]
+fn activate_kill_switch(_tun_name: &str, _server_ips: &[&str]) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn deactivate_kill_switch() {}
+
 fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), String> {
     let status = std::process::Command::new(cmd)
         .args(args)
