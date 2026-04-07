@@ -180,7 +180,7 @@ impl VpnApp {
 
 const APP_NAME: &str = "NexGuard VPN";
 
-pub fn run_gui_with(server: Option<String>, token: Option<String>, internet: bool) {
+pub fn run_gui_with(token: Option<String>, name: Option<String>, internet: bool) {
     let icon = generate_app_icon();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -194,10 +194,10 @@ pub fn run_gui_with(server: Option<String>, token: Option<String>, internet: boo
         setup_style(&cc.egui_ctx);
         let mut app = VpnApp::default();
         if let Some(t) = token {
-            let name = server.as_deref().unwrap_or("VPN Server").to_string();
+            let profile_name = name.unwrap_or_else(|| "VPN Server".to_string());
             let profile = crate::profiles::ServerProfile {
-                name,
-                server: server.unwrap_or_default(),
+                name: profile_name,
+                server: String::new(),
                 token: t,
                 internet,
             };

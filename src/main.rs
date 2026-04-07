@@ -22,12 +22,12 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let cli_mode = args.iter().any(|a| a == "--cli" || a == "--no-gui");
-    let init_server = arg_value(&args, "--server").or_else(|| arg_value(&args, "-s"));
     let init_token = arg_value(&args, "--token").or_else(|| arg_value(&args, "-t"));
+    let init_name = arg_value(&args, "--name").or_else(|| arg_value(&args, "-n"));
     let init_internet = args.iter().any(|a| a == "--internet" || a == "--exit");
 
     if !cli_mode {
-        ui::run_gui_with(init_server, init_token, init_internet);
+        ui::run_gui_with(init_token, init_name, init_internet);
         return;
     }
 
