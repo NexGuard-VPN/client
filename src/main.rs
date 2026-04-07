@@ -3,6 +3,7 @@ pub mod fingerprint;
 pub mod mesh;
 mod profiles;
 mod route;
+pub mod tray;
 pub mod tun;
 mod ui;
 mod vpn;

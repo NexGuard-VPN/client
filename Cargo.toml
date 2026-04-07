@@ -1,6 +1,6 @@
 [package]
 name = "nexguard"
-version = "1.8.2"
+version = "1.9.0"
 edition = "2021"
 
 [[bin]]
@@ -20,6 +20,7 @@ open = "5"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+tray-icon = "0.19"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
