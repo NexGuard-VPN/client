@@ -8,8 +8,6 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 
 use crate::{api, mesh, route, tun, wg};
 
-const OBFS_PORT: u16 = 443;
-
 pub struct VpnConfig {
     pub server: String,
     pub token: String,
@@ -253,20 +251,18 @@ pub fn connect(
         None
     };
 
-    let effective_relay = config.relay.clone();
+    let relay_addr = config.relay.clone().unwrap_or_default();
     let server_for_relay = config.server.clone();
     let token_for_relay = config.token.clone();
-    let obfs_addr = format!("{}:{}", server_endpoint.ip(), OBFS_PORT);
+
+    if relay_addr.is_empty() {
+        return Err("no relay address configured".into());
+    }
 
     let shutdown_dp = Arc::clone(&shutdown);
     std::thread::spawn(move || {
-        let stream_result = if let Some(ref relay) = effective_relay {
-            let target = relay_name.as_deref().unwrap_or(&server_for_relay);
-            wg::connect_relay(relay, target, &token_for_relay)
-        } else {
-            wg::connect_tls(&obfs_addr)
-        };
-        match stream_result {
+        let target = relay_name.as_deref().unwrap_or(&server_for_relay);
+        match wg::connect_relay(&relay_addr, target, &token_for_relay) {
             Ok(mut stream) => {
                 wg::run_data_plane_tls(
                     &tun_dev, &mut stream, &tunnel, &tx, &rx, &shutdown_dp,

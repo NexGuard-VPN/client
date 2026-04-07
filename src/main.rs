@@ -16,8 +16,6 @@ use boringtun::noise::Tunn;
 use boringtun::x25519::{PublicKey, StaticSecret};
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-const OBFS_PORT: u16 = 443;
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -237,59 +235,39 @@ fn main() {
         None
     };
 
-    let tls_addr = format!("{}:{}", server_endpoint.ip(), OBFS_PORT);
     let relay_target = args.relay_name.as_deref().unwrap_or(&args.server).to_string();
     let mesh_ref = mesh_mgr.as_ref().map(|m| m.as_ref());
 
-    let effective_relay = args.relay.clone();
+    let relay_addrs = args.relay.clone().unwrap_or_default();
     let relay_auth_token = args.token.clone();
     let mut backoff_ms: u64 = 1000;
     const MAX_BACKOFF_MS: u64 = 30_000;
 
+    if relay_addrs.is_empty() {
+        eprintln!("[vpn-client] error: no relay address configured");
+        drop(exit_state);
+        return;
+    }
+
     loop {
         if SHUTDOWN.load(Ordering::Relaxed) { break; }
 
-        let connected = if let Some(ref relay_addrs) = effective_relay {
-            let relays: Vec<&str> = relay_addrs.split(',').map(|s| s.trim()).collect();
-            let mut ok = false;
-            for addr in &relays {
-                if SHUTDOWN.load(Ordering::Relaxed) { break; }
-                eprintln!("[vpn-client] trying relay {}...", addr);
-                match wg::connect_relay(addr, &relay_target, &relay_auth_token) {
-                    Ok(mut stream) => {
-                        eprintln!("[vpn-client] relay connected via {}", addr);
-                        ok = true;
-                        wg::run_data_plane_tls(&tun_dev, &mut stream, &tunnel, &tx, &rx, &SHUTDOWN,
-                            mesh_ref, Some(&rekey_ctx));
-                        break;
-                    }
-                    Err(e) => eprintln!("[vpn-client] relay {} failed: {}", addr, e),
-                }
-            }
-            if !ok && !SHUTDOWN.load(Ordering::Relaxed) {
-                eprintln!("[vpn-client] relays failed, trying direct TLS...");
-                if let Ok(mut s) = wg::connect_tls(&tls_addr) {
-                    ok = true;
-                    wg::run_data_plane_tls(&tun_dev, &mut s, &tunnel, &tx, &rx, &SHUTDOWN,
+        let relays: Vec<&str> = relay_addrs.split(',').map(|s| s.trim()).collect();
+        let mut connected = false;
+        for addr in &relays {
+            if SHUTDOWN.load(Ordering::Relaxed) { break; }
+            eprintln!("[vpn-client] connecting relay {}...", addr);
+            match wg::connect_relay(addr, &relay_target, &relay_auth_token) {
+                Ok(mut stream) => {
+                    eprintln!("[vpn-client] relay connected via {}", addr);
+                    connected = true;
+                    wg::run_data_plane_tls(&tun_dev, &mut stream, &tunnel, &tx, &rx, &SHUTDOWN,
                         mesh_ref, Some(&rekey_ctx));
+                    break;
                 }
+                Err(e) => eprintln!("[vpn-client] relay {} failed: {}", addr, e),
             }
-            ok
-        } else {
-            eprintln!("[vpn-client] connecting TLS to {}...", tls_addr);
-            match wg::connect_tls(&tls_addr) {
-                Ok(mut tls_stream) => {
-                    eprintln!("[vpn-client] TLS connected");
-                    wg::run_data_plane_tls(&tun_dev, &mut tls_stream, &tunnel, &tx, &rx, &SHUTDOWN,
-                        mesh_ref, Some(&rekey_ctx));
-                    true
-                }
-                Err(e) => {
-                    eprintln!("[vpn-client] TLS failed: {}", e);
-                    false
-                }
-            }
-        };
+        }
 
         if SHUTDOWN.load(Ordering::Relaxed) { break; }
 

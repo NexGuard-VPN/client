@@ -93,29 +93,6 @@ pub fn connect_relay(
     Ok(tls)
 }
 
-pub fn connect_tls(addr: &str) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
-        .with_no_client_auth();
-
-    let sni = rustls::pki_types::ServerName::try_from(TLS_SNI)
-        .map_err(|e| format!("sni: {}", e))?;
-    let conn = rustls::ClientConnection::new(Arc::new(config), sni)
-        .map_err(|e| format!("tls: {}", e))?;
-
-    let socket_addr: SocketAddr = addr.parse().map_err(|e| format!("parse {}: {}", addr, e))?;
-    let tcp = TcpStream::connect_timeout(&socket_addr, TLS_CONNECT_TIMEOUT)
-        .map_err(|e| format!("connect {}: {}", addr, e))?;
-    tcp.set_nodelay(true).ok();
-    tcp.set_read_timeout(Some(TLS_READ_TIMEOUT)).ok();
-    tcp.set_write_timeout(Some(Duration::from_secs(5))).ok();
-
-    Ok(rustls::StreamOwned::new(conn, tcp))
-}
-
 #[derive(Debug)]
 struct InsecureVerifier;
 
