@@ -8,7 +8,15 @@ use boringtun::noise::{Tunn, TunnResult};
 
 use crate::tun::TunDevice;
 
+macro_rules! log {
+    ($($arg:tt)*) => {
+        let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!($($arg)*));
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), b"\n");
+    };
+}
+
 const MAX_PACKET: usize = 65535;
+const WG_BUF_SIZE: usize = MAX_PACKET + 148;
 const TIMER_TICK_MS: u128 = 250;
 const STATS_INTERVAL_SECS: u64 = 30;
 const TLS_SNI: &str = "www.cloudflare.com";
@@ -166,8 +174,8 @@ pub fn run_data_plane_tls<S: Read + Write>(
 ) {
     let mut tun_buf = vec![0u8; MAX_PACKET];
     let mut tls_buf = [0u8; MAX_PACKET];
-    let mut enc_buf = vec![0u8; MAX_PACKET];
-    let mut dec_buf = vec![0u8; MAX_PACKET];
+    let mut enc_buf = vec![0u8; WG_BUF_SIZE];
+    let mut dec_buf = vec![0u8; WG_BUF_SIZE];
     let mut pending = Vec::with_capacity(MAX_PACKET);
     let mut write_buf = Vec::with_capacity(MAX_PACKET);
     let mut last_tick = std::time::Instant::now();
@@ -221,7 +229,7 @@ pub fn run_data_plane_tls<S: Read + Write>(
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(e) => {
-                    eprintln!("[vpn-client] tls write error: {}", e);
+                    log!("[vpn-client] tls write error: {}", e);
                     break;
                 }
             }
@@ -241,7 +249,8 @@ pub fn run_data_plane_tls<S: Read + Write>(
 
                     let mut wg = tunnel.lock().unwrap();
                     match wg.tunn.decapsulate(None, &pending[2..2 + pkt_len], &mut dec_buf) {
-                        TunnResult::WriteToTunnelV4(payload, _) => {
+                        TunnResult::WriteToTunnelV4(payload, _)
+                        | TunnResult::WriteToTunnelV6(payload, _) => {
                             let _ = tun.write_packet(payload);
                             rx.fetch_add(pkt_len as u64, Ordering::Relaxed);
                         }
@@ -254,7 +263,8 @@ pub fn run_data_plane_tls<S: Read + Write>(
                                         write_buf.extend_from_slice(&(d.len() as u16).to_be_bytes());
                                         write_buf.extend_from_slice(d);
                                     }
-                                    TunnResult::WriteToTunnelV4(d, _) => {
+                                    TunnResult::WriteToTunnelV4(d, _)
+                                    | TunnResult::WriteToTunnelV6(d, _) => {
                                         let _ = tun.write_packet(d);
                                         rx.fetch_add(pkt_len as u64, Ordering::Relaxed);
                                         break;
@@ -275,7 +285,7 @@ pub fn run_data_plane_tls<S: Read + Write>(
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
                 || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(e) => {
-                eprintln!("[vpn-client] tls read error: {}", e);
+                log!("[vpn-client] tls read error: {}", e);
                 break;
             }
         }
@@ -298,7 +308,7 @@ pub fn run_data_plane_tls<S: Read + Write>(
 
         if last_stats.elapsed().as_secs() >= STATS_INTERVAL_SECS {
             last_stats = std::time::Instant::now();
-            eprintln!("[vpn-client] tx={} rx={} (tls)", fmt_bytes(tx.load(Ordering::Relaxed)), fmt_bytes(rx.load(Ordering::Relaxed)));
+            log!("[vpn-client] tx={} rx={} (tls)", fmt_bytes(tx.load(Ordering::Relaxed)), fmt_bytes(rx.load(Ordering::Relaxed)));
         }
 
         if last_health.elapsed().as_secs() >= 10 {
@@ -308,11 +318,11 @@ pub fn run_data_plane_tls<S: Read + Write>(
             if current_tx > 0 && current_rx == last_rx_check {
                 stall_count += 1;
                 if stall_count >= 6 {
-                    eprintln!("[vpn-client] connection stalled (no rx for 60s), reconnecting");
+                    log!("[vpn-client] connection stalled (no rx for 60s), reconnecting");
                     break;
                 }
                 if stall_count >= 3 {
-                    eprintln!("[vpn-client] degraded connection (no rx for {}s)", stall_count * 10);
+                    log!("[vpn-client] degraded connection (no rx for {}s)", stall_count * 10);
                 }
             } else {
                 stall_count = 0;
@@ -331,7 +341,7 @@ pub fn run_data_plane_tls<S: Read + Write>(
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
     }
-    eprintln!("[vpn-client] shutdown (tls)");
+    log!("[vpn-client] shutdown (tls)");
 }
 
 fn do_rekey<S: Read + Write>(
@@ -371,6 +381,11 @@ fn do_rekey<S: Read + Write>(
             if let Some(home) = dirs_next() {
                 let key_path = home.join("client.key");
                 let _ = std::fs::write(&key_path, b64.encode(new_key));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+                }
             }
 
             let mut wg = tunnel.lock().unwrap();
@@ -382,10 +397,10 @@ fn do_rekey<S: Read + Write>(
                 let _ = tls.flush();
             }
 
-            eprintln!("[vpn-client] key rotated successfully");
+            log!("[vpn-client] key rotated successfully");
         }
         Err(e) => {
-            eprintln!("[vpn-client] rekey failed: {}", e);
+            log!("[vpn-client] rekey failed: {}", e);
         }
     }
 }

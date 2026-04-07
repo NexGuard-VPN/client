@@ -265,7 +265,7 @@ mod platform {
         }
 
         pub fn read_packet(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let mut hdr_buf = [0u8; 65539]; // 65535 + 4 header
+            let mut hdr_buf = [0u8; 65539];
             let read_len = (buf.len() + 4).min(hdr_buf.len());
             let n = unsafe { libc::read(self.fd, hdr_buf.as_mut_ptr() as *mut _, read_len) };
             if n < 0 {
@@ -275,8 +275,8 @@ mod platform {
             if n <= 4 {
                 return Ok(0);
             }
-            let payload = n - 4;
-            buf[..payload].copy_from_slice(&hdr_buf[4..n]);
+            let payload = (n - 4).min(buf.len());
+            buf[..payload].copy_from_slice(&hdr_buf[4..4 + payload]);
             Ok(payload)
         }
 

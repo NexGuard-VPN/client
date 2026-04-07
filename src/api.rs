@@ -24,12 +24,6 @@ pub struct JoinResponse {
     pub mesh_peers: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     pub device_id: Option<String>,
-    #[serde(default)]
-    pub relay_name: Option<String>,
-    #[serde(default)]
-    pub relay_server: Option<String>,
-    #[serde(default)]
-    pub relay_token: Option<String>,
 }
 
 pub struct MeshPeerInfo {
@@ -56,17 +50,6 @@ pub fn get_mesh_peers(server: &str, control_port: u16, token: &str) -> Vec<MeshP
     parse_mesh_peers_json(&resp[body_start..])
 }
 
-pub fn report_endpoint(server: &str, control_port: u16, token: &str, pubkey: &str, endpoint: &str) {
-    let host = control_host(server, control_port);
-    let encoded = urlencode(pubkey);
-    let body = format!(r#"{{"endpoint":"{}"}}"#, endpoint);
-    let req = format!(
-        "POST /api/v1/peers/{}/endpoint HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        encoded, host, token, body.len(), body
-    );
-    let _ = try_http_request(&host, &req);
-}
-
 pub fn parse_mesh_peers(values: &[serde_json::Value]) -> Vec<MeshPeerInfo> {
     values.iter().filter_map(|v| {
         let public_key = v.get("public_key")?.as_str()?.to_string();
@@ -88,25 +71,6 @@ fn parse_mesh_peers_json(body: &str) -> Vec<MeshPeerInfo> {
         Err(_) => Vec::new(),
     }
 }
-
-fn urlencode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() * 3);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(b as char);
-            }
-            _ => {
-                result.push('%');
-                result.push(char::from(HEX[(b >> 4) as usize]));
-                result.push(char::from(HEX[(b & 0xf) as usize]));
-            }
-        }
-    }
-    result
-}
-
-const HEX: [u8; 16] = *b"0123456789ABCDEF";
 
 pub fn try_join_server(
     server: &str,
@@ -286,6 +250,85 @@ fn http_get_tls(host: &str, path: &str) -> Option<String> {
     let text = String::from_utf8_lossy(&resp);
     let body_start = text.find("\r\n\r\n")? + 4;
     Some(text[body_start..].to_string())
+}
+
+pub struct ConnectInfo {
+    pub server: Option<String>,
+    pub relay: Option<String>,
+    pub relay_name: Option<String>,
+    pub join_url: Option<String>,
+}
+
+pub fn join_via_api(url: &str, token: &str, pub_key: &str, name: &str) -> Result<JoinResponse, String> {
+    let ver = env!("CARGO_PKG_VERSION");
+    let fp = crate::fingerprint::collect();
+    let device_id_path = crate::dirs_next().map(|d| d.join("device-hwid")).unwrap_or_default();
+    let saved_device_id = std::fs::read_to_string(&device_id_path).unwrap_or_default().trim().to_string();
+    let body = format!(
+        r#"{{"public_key":"{}","name":"{}","version":"{}","fingerprint":"{}","device_id":"{}"}}"#,
+        pub_key, name, ver, fp.replace('"', ""), saved_device_id
+    );
+
+    let parsed = url.strip_prefix("https://").ok_or("join_url must be https")?;
+    let (host, path) = parsed.split_once('/').unwrap_or((parsed, "api/vpn/join"));
+    let path = format!("/{}", path);
+
+    ensure_crypto_provider();
+    let addr = {
+        use std::net::ToSocketAddrs;
+        format!("{}:443", host).to_socket_addrs()
+            .map_err(|e| format!("resolve {}: {}", host, e))?
+            .next().ok_or_else(|| format!("no addr for {}", host))?
+    };
+    let mut tcp = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(10))
+        .map_err(|e| format!("connect {}: {}", host, e))?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
+
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = std::sync::Arc::new(
+        rustls::ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth(),
+    );
+    let server_name: rustls::pki_types::ServerName = host.to_string().try_into()
+        .map_err(|_| "invalid hostname".to_string())?;
+    let mut conn = rustls::ClientConnection::new(config, server_name)
+        .map_err(|e| format!("tls: {}", e))?;
+    let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
+
+    let req = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        path, host, token, body.len(), body
+    );
+    use std::io::{Read, Write};
+    tls.write_all(req.as_bytes()).map_err(|e| format!("write: {}", e))?;
+    let mut resp = Vec::new();
+    let _ = tls.read_to_end(&mut resp);
+    let text = String::from_utf8_lossy(&resp);
+    let body_start = text.find("\r\n\r\n")
+        .ok_or("invalid response")? + 4;
+
+    let join_resp: JoinResponse = serde_json::from_str(&text[body_start..])
+        .map_err(|e| format!("join parse error: {} — {}", e, &text[body_start..]))?;
+
+    if let Some(ref did) = join_resp.device_id {
+        if !did.is_empty() {
+            let _ = std::fs::write(&device_id_path, did);
+        }
+    }
+    Ok(join_resp)
+}
+
+pub fn fetch_connect_info(token: &str) -> Option<ConnectInfo> {
+    let api_host = std::env::var("NEXGUARD_API_HOST").unwrap_or_else(|_| "api.nexguard.sh".to_string());
+    let path = format!("/api/vpn/connect-info?token={}", token);
+    let body = http_get_tls(&api_host, &path)?;
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    Some(ConnectInfo {
+        server: json["server"].as_str().map(|s| s.to_string()),
+        relay: json["relay"].as_str().map(|s| s.to_string()),
+        relay_name: json["relay_name"].as_str().map(|s| s.to_string()),
+        join_url: json["join_url"].as_str().map(|s| s.to_string()),
+    })
 }
 
 #[derive(Clone, Default)]

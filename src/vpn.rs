@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,8 @@ pub struct VpnConfig {
     pub vpn_network: Option<String>,
     pub internet: bool,
     pub relay: Option<String>,
+    pub relay_name: Option<String>,
+    pub join_url: Option<String>,
 }
 
 impl Default for VpnConfig {
@@ -33,6 +36,8 @@ impl Default for VpnConfig {
             vpn_network: None,
             internet: false,
             relay: None,
+            relay_name: None,
+            join_url: None,
         }
     }
 }
@@ -43,6 +48,7 @@ pub struct VpnStatus {
     pub rx: Arc<AtomicU64>,
     pub connected_at: u64,
     pub address: String,
+    #[allow(dead_code)]
     pub address_v6: Option<String>,
     pub server: String,
     pub endpoint: String,
@@ -88,13 +94,17 @@ pub fn connect(
         client_name = crate::generate_client_name();
     }
 
-    let join_resp = api::try_join_server(
-        &config.server,
-        config.control_port,
-        &config.token,
-        &pub_key_b64,
-        &client_name,
-    )?;
+    let join_resp = if let Some(ref url) = config.join_url {
+        api::join_via_api(url, &config.token, &pub_key_b64, &client_name)?
+    } else {
+        api::try_join_server(
+            &config.server,
+            config.control_port,
+            &config.token,
+            &pub_key_b64,
+            &client_name,
+        )?
+    };
 
     let assigned_addr = join_resp.address.clone();
     let server_pub_key = try_b64_decode(&join_resp.server_public_key)?;
@@ -168,8 +178,8 @@ pub fn connect(
                 .map(|a| a.ip().to_string())
                 .unwrap_or_else(|| wg_ip.clone())
         };
-        let relay_ip = join_resp.relay_server.as_ref()
-            .and_then(|rs| rs.split(':').next().map(|s| s.to_string()));
+        let relay_ip = config.relay.as_ref()
+            .and_then(|rs| rs.split(':').next().map(|s: &str| s.to_string()));
         let mut preserve_ips: Vec<&str> = vec![&wg_ip];
         if control_ip != wg_ip {
             preserve_ips.push(&control_ip);
@@ -179,10 +189,8 @@ pub fn connect(
                 preserve_ips.push(rip);
             }
         }
-        let vpn_net = join_resp.vpn_network.as_deref()
-            .or(config.vpn_network.as_deref());
         let has_v6 = join_resp.vpn_network_v6.is_some();
-        match route::ExitRouteState::setup_dual(&preserve_ips, tun_dev.name(), vpn_net, has_v6) {
+        match route::ExitRouteState::setup_dual(&preserve_ips, tun_dev.name(), has_v6) {
             Ok(state) => Some(state),
             Err(e) => return Err(format!("internet setup failed: {}", e)),
         }
@@ -190,7 +198,7 @@ pub fn connect(
         None
     };
 
-    let relay_name = join_resp.relay_name.clone();
+    let relay_name = config.relay_name.clone();
 
     let server_pub = PublicKey::from(server_pub_key);
     let tunn = Tunn::new(secret, server_pub, None, Some(25), 0, None);
@@ -245,13 +253,9 @@ pub fn connect(
         None
     };
 
-    let effective_relay = if config.relay.is_some() {
-        config.relay.clone()
-    } else {
-        join_resp.relay_server.clone()
-    };
+    let effective_relay = config.relay.clone();
     let server_for_relay = config.server.clone();
-    let token_for_relay = join_resp.relay_token.clone().unwrap_or_else(|| config.token.clone());
+    let token_for_relay = config.token.clone();
     let obfs_addr = format!("{}:{}", server_endpoint.ip(), OBFS_PORT);
 
     let shutdown_dp = Arc::clone(&shutdown);
@@ -270,7 +274,7 @@ pub fn connect(
                 );
             }
             Err(e) => {
-                eprintln!("[vpn-client] connection failed: {}", e);
+                let _ = writeln!(std::io::stderr(), "[vpn-client] connection failed: {}", e);
             }
         }
         drop(exit_state);

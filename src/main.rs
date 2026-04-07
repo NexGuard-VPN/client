@@ -22,7 +22,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let cli_mode = args.iter().any(|a| a == "--cli" || a == "--no-gui");
-    let gui_mode = !cli_mode;
+    let has_token = arg_value(&args, "--token").or_else(|| arg_value(&args, "-t")).is_some();
+    let has_server = arg_value(&args, "--server").or_else(|| arg_value(&args, "-s")).is_some();
+    let gui_mode = !cli_mode && !(has_token && !has_server);
 
     if gui_mode {
         let init_server = arg_value(&args, "--server").or_else(|| arg_value(&args, "-s"));
@@ -62,7 +64,12 @@ fn main() {
 
     eprintln!("[vpn-client] public key: {}", pub_key_b64);
 
-    let join_resp = if args.advertise_routes.is_empty() {
+    let join_resp = if let Some(ref url) = args.join_url {
+        match api::join_via_api(url, &args.token, &pub_key_b64, &args.name) {
+            Ok(r) => r,
+            Err(e) => { eprintln!("[vpn-client] {}", e); std::process::exit(1); }
+        }
+    } else if args.advertise_routes.is_empty() {
         api::join_server(&args.server, args.control_port, &args.token, &pub_key_b64, &args.name)
     } else {
         eprintln!("[vpn-client] advertising routes: {:?}", args.advertise_routes);
@@ -80,7 +87,10 @@ fn main() {
     eprintln!("[vpn-client] assigned address: {}", assigned_addr);
 
     let (ip, prefix) = parse_cidr(&assigned_addr);
-    let server_endpoint = if let Some(ref ep) = join_resp.server_endpoint {
+    let server_endpoint = if args.relay.is_some() {
+        let relay_host = args.relay.as_ref().unwrap().split(':').next().unwrap_or("127.0.0.1");
+        format!("{}:51820", relay_host).parse().unwrap()
+    } else if let Some(ref ep) = join_resp.server_endpoint {
         ep.parse().unwrap_or_else(|_| api::parse_endpoint(&args.server))
     } else {
         api::parse_endpoint(&args.server)
@@ -127,13 +137,15 @@ fn main() {
 
     let exit_state = if args.internet {
         let wg_ip = server_endpoint.ip().to_string();
-        let control_ip = {
+        let control_ip = if args.relay.is_some() {
+            wg_ip.clone()
+        } else {
             use std::net::ToSocketAddrs;
             let target = if args.server.contains(':') { args.server.clone() } else { format!("{}:9190", args.server) };
             target.to_socket_addrs().ok().and_then(|mut a| a.next()).map(|a| a.ip().to_string()).unwrap_or_else(|| wg_ip.clone())
         };
-        let relay_ip = join_resp.relay_server.as_ref()
-            .and_then(|rs| rs.split(':').next().map(|s| s.to_string()));
+        let relay_ip = args.relay.as_ref()
+            .and_then(|rs| rs.split(':').next().map(|s: &str| s.to_string()));
         let mut preserve_ips: Vec<&str> = vec![&wg_ip];
         if control_ip != wg_ip {
             preserve_ips.push(&control_ip);
@@ -143,10 +155,8 @@ fn main() {
                 preserve_ips.push(rip);
             }
         }
-        let vpn_net = join_resp.vpn_network.as_deref()
-            .or(args.vpn_network.as_deref());
         let has_v6 = join_resp.vpn_network_v6.is_some();
-        match route::ExitRouteState::setup_dual(&preserve_ips, tun_dev.name(), vpn_net, has_v6) {
+        match route::ExitRouteState::setup_dual(&preserve_ips, tun_dev.name(), has_v6) {
             Ok(state) => {
                 eprintln!("[vpn-client] internet routing enabled (v6={})", has_v6);
                 Some(state)
@@ -215,7 +225,8 @@ fn main() {
     std::panic::set_hook({
         let tun = tun_name_for_cleanup.clone();
         let internet = has_internet;
-        Box::new(move |_| {
+        Box::new(move |info| {
+            eprintln!("[vpn-client] PANIC: {}", info);
             if internet { route::emergency_cleanup(&tun); }
         })
     });
@@ -230,18 +241,11 @@ fn main() {
     };
 
     let tls_addr = format!("{}:{}", server_endpoint.ip(), OBFS_PORT);
-    let relay_target = join_resp.relay_name.as_deref().unwrap_or(&args.server).to_string();
+    let relay_target = args.relay_name.as_deref().unwrap_or(&args.server).to_string();
     let mesh_ref = mesh_mgr.as_ref().map(|m| m.as_ref());
 
-    let effective_relay = if args.relay.is_some() {
-        args.relay.clone()
-    } else if let (Some(rs), Some(_rn)) = (&join_resp.relay_server, &join_resp.relay_name) {
-        eprintln!("[vpn-client] server behind tunnel, using relay {}", rs);
-        Some(rs.clone())
-    } else {
-        None
-    };
-    let relay_auth_token = join_resp.relay_token.as_deref().unwrap_or(&args.token).to_string();
+    let effective_relay = args.relay.clone();
+    let relay_auth_token = args.token.clone();
     let mut backoff_ms: u64 = 1000;
     const MAX_BACKOFF_MS: u64 = 30_000;
 
@@ -371,7 +375,7 @@ pub fn load_or_generate_key() -> [u8; 32] {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666));
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         fix_ownership(&path);
     }
     key
@@ -461,8 +465,8 @@ pub fn parse_ipv6_cidr(s: &str) -> Option<(std::net::Ipv6Addr, u8)> {
 fn setup_signal_handler() {
     #[cfg(unix)]
     unsafe {
-        libc::signal(libc::SIGINT, handle_signal as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_signal as libc::sighandler_t);
+        libc::signal(libc::SIGINT, handle_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, handle_signal as *const () as libc::sighandler_t);
     }
 }
 
@@ -481,6 +485,8 @@ struct Args {
     vpn_network: Option<String>,
     internet: bool,
     relay: Option<String>,
+    relay_name: Option<String>,
+    join_url: Option<String>,
     advertise_routes: Vec<String>,
     kill_switch: bool,
 }
@@ -552,14 +558,39 @@ fn parse_args() -> Args {
     if server.is_empty() { server = std::env::var("VPN_SERVER").unwrap_or_default(); }
     if token.is_empty() { token = std::env::var("VPN_TOKEN").unwrap_or_default(); }
     if name.is_empty() { name = generate_client_name(); }
-    if server.is_empty() {
-        eprintln!("Error: --server required");
+
+    let mut relay_name: Option<String> = None;
+    let mut join_url: Option<String> = None;
+
+    if server.is_empty() && !token.is_empty() {
+        eprintln!("[nexguard] resolving server from token...");
+        match crate::api::fetch_connect_info(&token) {
+            Some(info) => {
+                join_url = info.join_url;
+                if let Some(s) = info.server {
+                    server = s;
+                } else if let Some(r) = info.relay {
+                    relay = Some(r.clone());
+                    relay_name = info.relay_name;
+                    server = r.split(':').next().unwrap_or(&r).to_string();
+                }
+            }
+            None => {
+                eprintln!("Error: could not resolve server from token");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if server.is_empty() && join_url.is_none() {
+        eprintln!("Error: --server or --token required");
         std::process::exit(1);
     }
+    if server.is_empty() { server = "api-proxy".to_string(); }
 
     if relay.is_none() { relay = std::env::var("VPN_RELAY").ok(); }
 
-    Args { server, token, name, control_port, listen_port, mtu, vpn_network, internet, relay, advertise_routes, kill_switch }
+    Args { server, token, name, control_port, listen_port, mtu, vpn_network, internet, relay, relay_name, join_url, advertise_routes, kill_switch }
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {

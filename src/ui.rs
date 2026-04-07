@@ -68,10 +68,38 @@ impl VpnApp {
     fn connect_selected(&mut self) {
         let Some(idx) = self.selected else { return };
         let Some(profile) = self.profiles.get(idx) else { return };
+        let mut server = profile.server.clone();
+        let mut relay: Option<String> = None;
+        let mut relay_name: Option<String> = None;
+
+        let mut join_url: Option<String> = None;
+
+        if server.is_empty() && !profile.token.is_empty() {
+            if let Some(info) = crate::api::fetch_connect_info(&profile.token) {
+                join_url = info.join_url;
+                if let Some(s) = info.server {
+                    server = s;
+                } else if let Some(r) = info.relay {
+                    relay = Some(r.clone());
+                    relay_name = info.relay_name;
+                    server = r.split(':').next().unwrap_or(&r).to_string();
+                }
+            }
+        }
+
+        if server.is_empty() && join_url.is_none() {
+            *self.state.lock().unwrap() = ConnectionState::Error("Could not resolve server".into());
+            return;
+        }
+        if server.is_empty() { server = "api-proxy".to_string(); }
+
         let config = VpnConfig {
-            server: profile.server.clone(),
+            server,
             token: profile.token.clone(),
             internet: profile.internet,
+            relay,
+            relay_name,
+            join_url,
             ..VpnConfig::default()
         };
         self.shutdown = Arc::new(AtomicBool::new(false));
@@ -109,8 +137,9 @@ impl VpnApp {
     }
 
     fn save_new_server(&mut self) {
+        let name = if self.new_name.is_empty() { "VPN Server".to_string() } else { self.new_name.clone() };
         let profile = ServerProfile {
-            name: if self.new_name.is_empty() { self.new_server.clone() } else { self.new_name.clone() },
+            name,
             server: self.new_server.clone(),
             token: self.new_token.clone(),
             internet: self.new_internet,
@@ -145,10 +174,6 @@ impl VpnApp {
 }
 
 const APP_NAME: &str = "NexGuard VPN";
-
-pub fn run_gui() {
-    run_gui_with(None, None, false);
-}
 
 pub fn run_gui_with(server: Option<String>, token: Option<String>, internet: bool) {
     let icon = generate_app_icon();
@@ -387,10 +412,6 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
         ui.add(egui::TextEdit::singleline(&mut app.new_name).hint_text("My VPN Server").desired_width(f32::INFINITY).margin(egui::vec2(8.0, 8.0)));
 
         ui.add_space(6.0);
-        ui.label(lbl("Server"));
-        ui.add(egui::TextEdit::singleline(&mut app.new_server).hint_text("192.168.1.100 or vpn.example.com").desired_width(f32::INFINITY).margin(egui::vec2(8.0, 8.0)));
-
-        ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label(lbl("Token"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -399,7 +420,7 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
                 }
             });
         });
-        ui.add(egui::TextEdit::singleline(&mut app.new_token).password(!app.show_token).hint_text("VPN access token").desired_width(f32::INFINITY).margin(egui::vec2(8.0, 8.0)));
+        ui.add(egui::TextEdit::singleline(&mut app.new_token).password(!app.show_token).hint_text("Paste device token from dashboard").desired_width(f32::INFINITY).margin(egui::vec2(8.0, 8.0)));
 
         ui.add_space(6.0);
         ui.checkbox(&mut app.new_internet, "Route all traffic through VPN");
@@ -407,8 +428,8 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
 
     ui.add_space(8.0);
     ui.vertical_centered(|ui| {
-        let ok = !app.new_server.is_empty();
-        let btn = egui::Button::new(egui::RichText::new("Save Server").size(14.0).color(egui::Color32::WHITE))
+        let ok = !app.new_token.is_empty();
+        let btn = egui::Button::new(egui::RichText::new("Connect").size(14.0).color(egui::Color32::WHITE))
             .fill(if ok { egui::Color32::from_rgb(56, 189, 248) } else { egui::Color32::from_rgb(55, 65, 81) })
             .min_size(egui::vec2(180.0, 36.0));
         if ui.add_enabled(ok, btn).clicked() {
@@ -438,16 +459,16 @@ fn draw_connected(ui: &mut egui::Ui, status: &Option<VpnStatus>) {
     card(ui, |ui| {
         ui.vertical_centered(|ui| {
             if let Some(ref g) = geo {
-                ui.label(lbl("Public IP"));
-                ui.label(egui::RichText::new(&g.ip).size(24.0).strong().color(egui::Color32::from_rgb(56, 189, 248)));
+                ui.label(lbl("Your IP"));
+                ui.label(egui::RichText::new(&g.ip).size(24.0).strong().color(egui::Color32::from_rgb(34, 197, 94)));
                 let loc = if g.city.is_empty() { g.country.clone() } else { format!("{}, {}", g.city, g.country) };
                 ui.label(egui::RichText::new(&loc).size(12.0).color(egui::Color32::from_rgb(250, 204, 21)));
                 if !g.isp.is_empty() {
                     ui.label(egui::RichText::new(&g.isp).size(10.0).color(egui::Color32::from_rgb(148, 155, 168)));
                 }
             } else {
-                ui.label(lbl("VPN IP"));
-                ui.label(egui::RichText::new(ip_only).size(24.0).strong().color(egui::Color32::from_rgb(56, 189, 248)));
+                ui.label(lbl("Your IP"));
+                ui.label(egui::RichText::new("...").size(24.0).strong().color(egui::Color32::from_rgb(148, 155, 168)));
                 ui.label(egui::RichText::new("Detecting location...").size(10.0).color(egui::Color32::from_rgb(148, 155, 168)));
             }
         });
@@ -464,9 +485,13 @@ fn draw_connected(ui: &mut egui::Ui, status: &Option<VpnStatus>) {
 
     ui.add_space(4.0);
     card(ui, |ui| {
-        row(ui, "Internal IP", ip_only);
+        row(ui, "VPN IP", ip_only);
         ui.separator();
-        if let Some(ref g) = geo { if !g.region.is_empty() { row(ui, "Region", &g.region); ui.separator(); } }
+        if let Some(ref g) = geo {
+            row(ui, "Public IP", &g.ip);
+            ui.separator();
+            if !g.region.is_empty() { row(ui, "Region", &g.region); ui.separator(); }
+        }
         row(ui, "Server", &st.server);
         ui.separator();
         row(ui, "Endpoint", &st.endpoint);

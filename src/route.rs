@@ -5,16 +5,11 @@ pub struct ExitRouteState {
     original_gateway: String,
     original_iface: String,
     tun_name: String,
-    vpn_dns: Option<String>,
     has_v6: bool,
 }
 
 impl ExitRouteState {
-    pub fn setup(server_ips: &[&str], tun_name: &str, vpn_network: Option<&str>) -> Result<Self, String> {
-        Self::setup_dual(server_ips, tun_name, vpn_network, false)
-    }
-
-    pub fn setup_dual(server_ips: &[&str], tun_name: &str, vpn_network: Option<&str>, enable_v6: bool) -> Result<Self, String> {
+    pub fn setup_dual(server_ips: &[&str], tun_name: &str, enable_v6: bool) -> Result<Self, String> {
         let (gw, iface) = detect_default_gateway()?;
 
         let mut preserved = Vec::new();
@@ -37,25 +32,16 @@ impl ExitRouteState {
             let _ = add_default_v6_via_tun(tun_name);
         }
 
-        let vpn_dns = vpn_network.and_then(derive_gateway_ip);
-        if let Some(ref dns) = vpn_dns {
-            set_vpn_dns(dns);
-        }
-
         Ok(Self {
             preserved_ips: preserved,
             original_gateway: gw,
             original_iface: iface,
             tun_name: tun_name.to_owned(),
-            vpn_dns,
             has_v6: enable_v6,
         })
     }
 
     pub fn cleanup(&self) {
-        if self.vpn_dns.is_some() {
-            restore_dns();
-        }
         remove_default_via_tun(&self.tun_name);
         if self.has_v6 {
             remove_default_v6_via_tun(&self.tun_name);
@@ -75,7 +61,6 @@ impl Drop for ExitRouteState {
 
 pub fn emergency_cleanup(tun_name: &str) {
     eprintln!("[vpn-client] emergency route cleanup for {}", tun_name);
-    restore_dns();
     remove_default_via_tun(tun_name);
     remove_default_v6_via_tun(tun_name);
     cleanup_policy_routing();
@@ -89,30 +74,6 @@ pub fn emergency_cleanup(tun_name: &str) {
 
 pub fn add_route(net: Ipv4Addr, prefix: u8, tun_name: &str) -> std::io::Result<()> {
     add_route_os(net, prefix, tun_name)
-}
-
-pub fn add_route_v6(network: &str, prefix: u8, tun_name: &str) -> std::io::Result<()> {
-    add_route_v6_os(network, prefix, tun_name)
-}
-
-#[cfg(target_os = "linux")]
-fn add_route_v6_os(network: &str, prefix: u8, tun: &str) -> std::io::Result<()> {
-    run_cmd("ip", &["-6", "route", "add", &format!("{}/{}", network, prefix), "dev", tun])
-        .map_err(|e| std::io::Error::other(e))
-}
-
-#[cfg(target_os = "macos")]
-fn add_route_v6_os(network: &str, prefix: u8, tun: &str) -> std::io::Result<()> {
-    run_cmd("route", &["-n", "add", "-inet6", &format!("{}/{}", network, prefix), "-interface", tun])
-        .map_err(|e| std::io::Error::other(e))
-}
-
-#[cfg(target_os = "windows")]
-fn add_route_v6_os(network: &str, prefix: u8, tun: &str) -> std::io::Result<()> {
-    let idx = get_interface_index(tun).unwrap_or_default();
-    run_cmd("netsh", &["interface", "ipv6", "add", "route",
-        &format!("{}/{}", network, prefix), &format!("interface={}", idx)])
-        .map_err(|e| std::io::Error::other(e))
 }
 
 #[cfg(target_os = "linux")]
@@ -374,68 +335,6 @@ fn detect_source_ip(iface: &str) -> Option<String> {
     None
 }
 
-#[cfg(target_os = "macos")]
-fn detect_source_ip(iface: &str) -> Option<String> {
-    let out = std::process::Command::new("ifconfig")
-        .arg(iface)
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("inet ") {
-            return rest.split_whitespace().next().map(|s| s.to_owned());
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "windows")]
-fn detect_source_ip(_iface: &str) -> Option<String> { None }
-
-fn derive_gateway_ip(network: &str) -> Option<String> {
-    let (ip_str, _) = network.split_once('/')?;
-    let ip: Ipv4Addr = ip_str.parse().ok()?;
-    let octets = ip.octets();
-    Some(format!("{}.{}.{}.1", octets[0], octets[1], octets[2]))
-}
-
-#[cfg(target_os = "linux")]
-fn set_vpn_dns(vpn_server_ip: &str) {
-    let _ = std::fs::copy("/etc/resolv.conf", "/etc/resolv.conf.vpn-backup");
-    let _ = std::fs::write("/etc/resolv.conf", format!("nameserver {}\n", vpn_server_ip));
-}
-
-#[cfg(target_os = "linux")]
-fn restore_dns() {
-    if std::path::Path::new("/etc/resolv.conf.vpn-backup").exists() {
-        let _ = std::fs::copy("/etc/resolv.conf.vpn-backup", "/etc/resolv.conf");
-        let _ = std::fs::remove_file("/etc/resolv.conf.vpn-backup");
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn set_vpn_dns(vpn_server_ip: &str) {
-    let _ = run_cmd("networksetup", &["-setdnsservers", "Wi-Fi", vpn_server_ip]);
-}
-
-#[cfg(target_os = "macos")]
-fn restore_dns() {
-    let _ = run_cmd("networksetup", &["-setdnsservers", "Wi-Fi", "empty"]);
-}
-
-#[cfg(target_os = "windows")]
-fn set_vpn_dns(vpn_server_ip: &str) {
-    let _ = run_cmd("netsh", &["interface", "ipv4", "set", "dnsservers",
-        "name=NexGuard", "static", vpn_server_ip, "primary"]);
-}
-
-#[cfg(target_os = "windows")]
-fn restore_dns() {
-    let _ = run_cmd("netsh", &["interface", "ipv4", "set", "dnsservers",
-        "name=NexGuard", "dhcp"]);
-}
-
 pub struct KillSwitch {
     enabled: bool,
 }
@@ -525,14 +424,18 @@ fn activate_kill_switch(_tun_name: &str, _server_ips: &[&str]) -> Result<(), Str
 fn deactivate_kill_switch() {}
 
 fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), String> {
-    let status = std::process::Command::new(cmd)
+    let output = std::process::Command::new(cmd)
         .args(args)
-        .status()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
         .map_err(|e| format!("{} {}: {}", cmd, args.join(" "), e))?;
 
-    if status.success() {
+    if output.status.success() {
         Ok(())
     } else {
-        Err(format!("{} {} failed ({})", cmd, args.join(" "), status))
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("{} {} failed ({}) {}", cmd, args.join(" "), output.status, stderr.trim()))
     }
 }

@@ -38,6 +38,11 @@ pub fn save(profiles: &[ServerProfile]) {
     }
     if let Ok(json) = serde_json::to_string_pretty(profiles) {
         let _ = std::fs::write(&path, json);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
     }
 }
 
