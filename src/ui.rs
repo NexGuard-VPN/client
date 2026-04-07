@@ -234,41 +234,94 @@ pub fn run_gui_with(token: Option<String>, name: Option<String>, internet: bool)
 
 fn cr(r: u8) -> egui::CornerRadius { egui::CornerRadius::same(r) }
 
-fn setup_style(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(6.0, 5.0);
-    style.spacing.button_padding = egui::vec2(12.0, 6.0);
-    style.spacing.text_edit_width = 400.0;
-    style.spacing.interact_size.y = 32.0;
-    style.visuals.window_corner_radius = cr(12);
-    for w in [&mut style.visuals.widgets.noninteractive, &mut style.visuals.widgets.inactive, &mut style.visuals.widgets.hovered, &mut style.visuals.widgets.active] {
-        w.corner_radius = cr(8);
+struct Theme {
+    bg: egui::Color32,
+    surface: egui::Color32,
+    surface_hover: egui::Color32,
+    border: egui::Color32,
+    border_active: egui::Color32,
+    text: egui::Color32,
+    text_secondary: egui::Color32,
+    text_muted: egui::Color32,
+    accent: egui::Color32,
+    #[allow(dead_code)]
+    accent_hover: egui::Color32,
+    success: egui::Color32,
+    danger: egui::Color32,
+    warning: egui::Color32,
+    input_bg: egui::Color32,
+}
+
+fn dark_theme() -> Theme {
+    Theme {
+        bg: egui::Color32::from_rgb(9, 9, 11),
+        surface: egui::Color32::from_rgb(24, 24, 27),
+        surface_hover: egui::Color32::from_rgb(39, 39, 42),
+        border: egui::Color32::from_rgb(39, 39, 42),
+        border_active: egui::Color32::from_rgb(56, 189, 248),
+        text: egui::Color32::from_rgb(250, 250, 250),
+        text_secondary: egui::Color32::from_rgb(161, 161, 170),
+        text_muted: egui::Color32::from_rgb(113, 113, 122),
+        accent: egui::Color32::from_rgb(14, 165, 233),
+        accent_hover: egui::Color32::from_rgb(56, 189, 248),
+        success: egui::Color32::from_rgb(34, 197, 94),
+        danger: egui::Color32::from_rgb(239, 68, 68),
+        warning: egui::Color32::from_rgb(234, 179, 8),
+        input_bg: egui::Color32::from_rgb(15, 15, 18),
     }
-    let input_bg = egui::Color32::from_rgb(17, 24, 39);
-    style.visuals.widgets.inactive.bg_fill = input_bg;
-    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(55, 65, 81));
-    style.visuals.widgets.hovered.bg_fill = input_bg;
-    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(56, 189, 248));
-    style.visuals.widgets.active.bg_fill = input_bg;
-    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(56, 189, 248));
-    style.visuals.extreme_bg_color = input_bg;
-    style.visuals.panel_fill = egui::Color32::from_rgb(15, 17, 23);
-    style.visuals.window_fill = egui::Color32::from_rgb(15, 17, 23);
-    style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(24, 25, 33);
+}
+
+fn theme() -> &'static Theme {
+    use std::sync::OnceLock;
+    static T: OnceLock<Theme> = OnceLock::new();
+    T.get_or_init(dark_theme)
+}
+
+fn setup_style(ctx: &egui::Context) {
+    let t = theme();
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    style.spacing.button_padding = egui::vec2(16.0, 8.0);
+    style.spacing.text_edit_width = 400.0;
+    style.spacing.interact_size.y = 36.0;
+    style.visuals.window_corner_radius = cr(12);
+
+    for w in [&mut style.visuals.widgets.noninteractive, &mut style.visuals.widgets.inactive, &mut style.visuals.widgets.hovered, &mut style.visuals.widgets.active] {
+        w.corner_radius = cr(10);
+    }
+
+    style.visuals.widgets.inactive.bg_fill = t.input_bg;
+    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, t.border);
+    style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, t.text_secondary);
+    style.visuals.widgets.hovered.bg_fill = t.surface_hover;
+    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, t.border_active);
+    style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, t.text);
+    style.visuals.widgets.active.bg_fill = t.surface_hover;
+    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, t.accent);
+    style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, t.text);
+    style.visuals.widgets.noninteractive.bg_fill = t.surface;
+    style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, t.text_secondary);
+    style.visuals.extreme_bg_color = t.input_bg;
+    style.visuals.panel_fill = t.bg;
+    style.visuals.window_fill = t.bg;
+    style.visuals.selection.bg_fill = t.accent.linear_multiply(0.3);
+    style.visuals.selection.stroke = egui::Stroke::new(1.0, t.accent);
+
     ctx.set_style(style);
 }
 
 fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let t = theme();
     egui::Frame::default()
-        .fill(egui::Color32::from_rgb(24, 25, 33))
-        .corner_radius(cr(10))
-        .inner_margin(12.0)
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 54, 61)))
+        .fill(t.surface)
+        .corner_radius(cr(12))
+        .inner_margin(16.0)
+        .stroke(egui::Stroke::new(1.0, t.border))
         .show(ui, add);
 }
 
 fn lbl(t: &str) -> egui::RichText {
-    egui::RichText::new(t).size(11.0).color(egui::Color32::from_rgb(148, 155, 168))
+    egui::RichText::new(t).size(12.0).color(theme().text_muted)
 }
 
 impl eframe::App for VpnApp {
@@ -290,26 +343,28 @@ impl eframe::App for VpnApp {
                     draw_connected(ui, &status);
                 }
                 ConnectionState::Connecting => {
+                    let t = theme();
                     draw_header(ui);
                     let is_disconnecting = self.shutdown.load(Ordering::Relaxed);
                     let msg = if is_disconnecting { "Disconnecting..." } else { "Connecting..." };
                     ui.vertical_centered(|ui| {
-                        ui.add_space(30.0);
+                        ui.add_space(40.0);
                         ui.spinner();
-                        ui.add_space(6.0);
-                        ui.label(egui::RichText::new(msg).size(14.0).color(egui::Color32::from_rgb(250, 204, 21)));
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new(msg).size(14.0).color(t.warning));
                     });
                     ctx.request_repaint_after(std::time::Duration::from_millis(200));
                 }
                 ConnectionState::Error(ref msg) => {
+                    let t = theme();
                     draw_header(ui);
                     draw_server_view(ui, self);
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
                     egui::Frame::default()
-                        .fill(egui::Color32::from_rgba_premultiplied(220, 38, 38, 30))
-                        .corner_radius(cr(8)).inner_margin(8.0)
+                        .fill(egui::Color32::from_rgba_premultiplied(239, 68, 68, 25))
+                        .corner_radius(cr(10)).inner_margin(12.0)
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new(msg).size(11.0).color(egui::Color32::from_rgb(248, 113, 113)));
+                            ui.label(egui::RichText::new(msg).size(12.0).color(t.danger));
                         });
                 }
                 ConnectionState::Disconnected => {
@@ -345,40 +400,42 @@ impl eframe::App for VpnApp {
 }
 
 fn draw_header(ui: &mut egui::Ui) {
+    let t = theme();
     ui.vertical_centered(|ui| {
-        ui.add_space(8.0);
+        ui.add_space(12.0);
         draw_logo(ui);
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("NexGuard").size(20.0).strong().color(egui::Color32::WHITE));
-        ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(10.0).color(egui::Color32::from_rgb(100, 116, 139)));
-        ui.add_space(8.0);
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("NexGuard").size(22.0).strong().color(t.text));
+        ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(10.0).color(t.text_muted));
+        ui.add_space(12.0);
     });
 }
 
 fn draw_header_connected(ui: &mut egui::Ui, app: &mut VpnApp) {
-    ui.add_space(6.0);
+    let t = theme();
+    ui.add_space(8.0);
     ui.horizontal(|ui| {
-        ui.add_space(8.0);
+        ui.add_space(12.0);
         draw_logo(ui);
-        ui.add_space(4.0);
+        ui.add_space(8.0);
         ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("NexGuard").size(16.0).strong().color(egui::Color32::WHITE));
-                ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(10.0).color(egui::Color32::from_rgb(100, 116, 139)));
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("NexGuard").size(17.0).strong().color(t.text));
+                ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(10.0).color(t.text_muted));
             });
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("●").size(11.0).color(egui::Color32::from_rgb(34, 197, 94)));
-                ui.label(egui::RichText::new("Connected").size(11.0).strong().color(egui::Color32::from_rgb(34, 197, 94)));
+                ui.label(egui::RichText::new("●").size(12.0).color(t.success));
+                ui.label(egui::RichText::new("Connected").size(12.0).strong().color(t.success));
             });
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(8.0);
-            if ui.add(egui::Button::new(egui::RichText::new("Disconnect").size(12.0).color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(220, 38, 38))).clicked() {
+            ui.add_space(12.0);
+            if ui.add(egui::Button::new(egui::RichText::new("Disconnect").size(12.0).color(t.text)).fill(t.danger)).clicked() {
                 app.disconnect();
             }
         });
     });
-    ui.add_space(2.0);
+    ui.add_space(4.0);
     ui.separator();
 }
 
@@ -390,15 +447,16 @@ fn draw_server_view(ui: &mut egui::Ui, app: &mut VpnApp) {
 }
 
 fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
+    let t = theme();
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Servers").size(13.0).strong().color(egui::Color32::WHITE));
+        ui.label(egui::RichText::new("Servers").size(14.0).strong().color(t.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Button::new(egui::RichText::new("+ Add Server").size(12.0)).min_size(egui::vec2(90.0, 28.0))).clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new("+ Add").size(12.0).color(t.accent)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, t.accent))).clicked() {
                 app.view = View::AddServer;
             }
         });
     });
-    ui.add_space(4.0);
+    ui.add_space(6.0);
 
     if app.profiles.is_empty() {
         draw_add_server(ui, app);
@@ -406,19 +464,22 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
     } else {
         for (i, profile) in app.profiles.iter().enumerate() {
             let is_selected = app.selected == Some(i);
-            let fill = if is_selected { egui::Color32::from_rgb(30, 35, 48) } else { egui::Color32::from_rgb(24, 25, 33) };
-            let stroke_color = if is_selected { egui::Color32::from_rgb(56, 189, 248) } else { egui::Color32::from_rgb(48, 54, 61) };
+            let fill = if is_selected { t.surface_hover } else { t.surface };
+            let stroke_color = if is_selected { t.accent } else { t.border };
 
             egui::Frame::default()
                 .fill(fill)
-                .corner_radius(cr(8))
-                .inner_margin(10.0)
+                .corner_radius(cr(12))
+                .inner_margin(14.0)
                 .stroke(egui::Stroke::new(if is_selected { 1.5 } else { 1.0 }, stroke_color))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        let dot_color = if is_selected { t.accent } else { t.text_muted };
+                        ui.label(egui::RichText::new("●").size(10.0).color(dot_color));
                         ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(&profile.name).size(13.0).strong().color(egui::Color32::WHITE));
-                            ui.label(egui::RichText::new(&profile.server).size(11.0).color(egui::Color32::from_rgb(120, 130, 145)));
+                            ui.label(egui::RichText::new(&profile.name).size(13.0).strong().color(t.text));
+                            let desc = if profile.server.is_empty() { "Token-based" } else { &profile.server };
+                            ui.label(egui::RichText::new(desc).size(11.0).color(t.text_muted));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if is_selected && ui.small_button("✕").clicked() {
@@ -430,7 +491,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                         });
                     });
                 });
-            ui.add_space(2.0);
+            ui.add_space(3.0);
         }
     }
 
@@ -444,12 +505,13 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
         app.selected = Some(sel);
     }
 
-    ui.add_space(8.0);
+    let t = theme();
+    ui.add_space(10.0);
     ui.vertical_centered(|ui| {
         let can_connect = app.selected.is_some() && !app.profiles.is_empty();
-        let btn = egui::Button::new(egui::RichText::new("Connect").size(14.0).color(egui::Color32::WHITE))
-            .fill(if can_connect { egui::Color32::from_rgb(56, 189, 248) } else { egui::Color32::from_rgb(55, 65, 81) })
-            .min_size(egui::vec2(180.0, 36.0));
+        let btn = egui::Button::new(egui::RichText::new("Connect").size(14.0).strong().color(t.text))
+            .fill(if can_connect { t.accent } else { t.surface_hover })
+            .min_size(egui::vec2(200.0, 40.0));
         if ui.add_enabled(can_connect, btn).clicked() {
             app.connect_selected();
         }
@@ -457,60 +519,63 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
 }
 
 fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
+    let t = theme();
     ui.horizontal(|ui| {
-        if ui.small_button("← Back").clicked() {
+        if ui.small_button("< Back").clicked() {
             app.view = View::ServerList;
         }
-        ui.label(egui::RichText::new("Add Server").size(13.0).strong().color(egui::Color32::WHITE));
+        ui.label(egui::RichText::new("Add Server").size(14.0).strong().color(t.text));
     });
-    ui.add_space(4.0);
+    ui.add_space(6.0);
 
     card(ui, |ui| {
-        ui.label(lbl("Name"));
-        ui.add(egui::TextEdit::singleline(&mut app.new_name).hint_text("My VPN Server").desired_width(f32::INFINITY).margin(egui::vec2(8.0, 8.0)));
+        ui.label(lbl("Server Name"));
+        ui.add(egui::TextEdit::singleline(&mut app.new_name).hint_text("e.g. Office VPN").desired_width(f32::INFINITY).margin(egui::vec2(10.0, 10.0)));
 
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.label(lbl("Token"));
+            ui.label(lbl("Device Token"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button(if app.show_token { "Hide" } else { "Show" }).clicked() {
                     app.show_token = !app.show_token;
                 }
             });
         });
-        ui.add(egui::TextEdit::singleline(&mut app.new_token).password(!app.show_token).hint_text("Paste device token from dashboard").desired_width(f32::INFINITY).margin(egui::vec2(8.0, 8.0)));
+        ui.add(egui::TextEdit::singleline(&mut app.new_token).password(!app.show_token).hint_text("Paste token from dashboard").desired_width(f32::INFINITY).margin(egui::vec2(10.0, 10.0)));
 
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         ui.checkbox(&mut app.new_internet, "Route all traffic through VPN");
     });
 
-    ui.add_space(8.0);
+    ui.add_space(10.0);
     ui.vertical_centered(|ui| {
         let ok = !app.new_token.is_empty();
-        let btn = egui::Button::new(egui::RichText::new("Connect").size(14.0).color(egui::Color32::WHITE))
-            .fill(if ok { egui::Color32::from_rgb(56, 189, 248) } else { egui::Color32::from_rgb(55, 65, 81) })
-            .min_size(egui::vec2(180.0, 36.0));
+        let btn = egui::Button::new(egui::RichText::new("Save & Connect").size(14.0).strong().color(t.text))
+            .fill(if ok { t.accent } else { t.surface_hover })
+            .min_size(egui::vec2(200.0, 40.0));
         if ui.add_enabled(ok, btn).clicked() {
             app.save_new_server();
             app.connect_selected();
         }
     });
 
-    ui.add_space(16.0);
+    ui.add_space(20.0);
     ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(10.0);
     ui.vertical_centered(|ui| {
-        ui.label(egui::RichText::new("Don't have a server?").size(12.0).color(egui::Color32::from_rgb(120, 130, 145)));
-        ui.add_space(4.0);
-        if ui.add(egui::Button::new(egui::RichText::new("Deploy VPN Server — 30 days free").size(12.0).color(egui::Color32::WHITE))
-            .fill(egui::Color32::from_rgb(30, 58, 75))
-            .min_size(egui::vec2(260.0, 32.0))).clicked() {
+        ui.label(egui::RichText::new("Don't have a server?").size(12.0).color(t.text_muted));
+        ui.add_space(6.0);
+        if ui.add(egui::Button::new(egui::RichText::new("Deploy VPN Server").size(12.0).color(t.accent))
+            .fill(egui::Color32::TRANSPARENT)
+            .stroke(egui::Stroke::new(1.0, t.accent))
+            .min_size(egui::vec2(200.0, 36.0))).clicked() {
             let _ = open::that("https://nexguard.sh/deploy");
         }
     });
 }
 
 fn draw_connected(ui: &mut egui::Ui, status: &Option<VpnStatus>) {
+    let t = theme();
     let Some(ref st) = status else { return };
     let ip_only = st.address.split('/').next().unwrap_or(&st.address);
     let geo = st.geo.lock().unwrap().clone();
@@ -518,81 +583,80 @@ fn draw_connected(ui: &mut egui::Ui, status: &Option<VpnStatus>) {
     card(ui, |ui| {
         ui.vertical_centered(|ui| {
             if let Some(ref g) = geo {
-                ui.label(lbl("Your IP"));
-                ui.label(egui::RichText::new(&g.ip).size(24.0).strong().color(egui::Color32::from_rgb(34, 197, 94)));
+                ui.label(egui::RichText::new("Your IP").size(11.0).color(t.text_muted));
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(&g.ip).size(26.0).strong().color(t.success));
                 let loc = if g.city.is_empty() { g.country.clone() } else { format!("{}, {}", g.city, g.country) };
-                ui.label(egui::RichText::new(&loc).size(12.0).color(egui::Color32::from_rgb(250, 204, 21)));
+                ui.label(egui::RichText::new(&loc).size(13.0).color(t.warning));
                 if !g.isp.is_empty() {
-                    ui.label(egui::RichText::new(&g.isp).size(10.0).color(egui::Color32::from_rgb(148, 155, 168)));
+                    ui.label(egui::RichText::new(&g.isp).size(10.0).color(t.text_muted));
                 }
             } else {
-                ui.label(lbl("Your IP"));
-                ui.label(egui::RichText::new("...").size(24.0).strong().color(egui::Color32::from_rgb(148, 155, 168)));
-                ui.label(egui::RichText::new("Detecting location...").size(10.0).color(egui::Color32::from_rgb(148, 155, 168)));
+                ui.label(egui::RichText::new("Your IP").size(11.0).color(t.text_muted));
+                ui.add_space(2.0);
+                ui.spinner();
+                ui.label(egui::RichText::new("Detecting...").size(11.0).color(t.text_muted));
             }
         });
     });
 
-    ui.add_space(4.0);
+    ui.add_space(6.0);
     let uptime = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().saturating_sub(st.connected_at);
     ui.columns(4, |c| {
-        mini_stat(&mut c[0], "TX", &fmt_bytes(st.tx.load(Ordering::Relaxed)), egui::Color32::from_rgb(56, 189, 248));
-        mini_stat(&mut c[1], "RX", &fmt_bytes(st.rx.load(Ordering::Relaxed)), egui::Color32::from_rgb(139, 92, 246));
-        mini_stat(&mut c[2], "Up", &fmt_uptime(uptime), egui::Color32::from_rgb(34, 197, 94));
-        mini_stat(&mut c[3], "Mode", if st.internet_mode { "Full" } else { "VPN" }, egui::Color32::from_rgb(59, 130, 246));
+        mini_stat(&mut c[0], "TX", &fmt_bytes(st.tx.load(Ordering::Relaxed)), t.accent);
+        mini_stat(&mut c[1], "RX", &fmt_bytes(st.rx.load(Ordering::Relaxed)), egui::Color32::from_rgb(168, 85, 247));
+        mini_stat(&mut c[2], "Up", &fmt_uptime(uptime), t.success);
+        mini_stat(&mut c[3], "Mode", if st.internet_mode { "Full" } else { "Split" }, egui::Color32::from_rgb(99, 102, 241));
     });
 
-    ui.add_space(4.0);
+    ui.add_space(6.0);
     card(ui, |ui| {
         row(ui, "VPN IP", ip_only);
-        ui.separator();
         if let Some(ref g) = geo {
             row(ui, "Public IP", &g.ip);
-            ui.separator();
-            if !g.region.is_empty() { row(ui, "Region", &g.region); ui.separator(); }
+            if !g.region.is_empty() { row(ui, "Region", &g.region); }
         }
         row(ui, "Server", &st.server);
-        ui.separator();
         row(ui, "Endpoint", &st.endpoint);
-        ui.separator();
         row(ui, "Interface", &st.tun_name);
     });
 }
 
 fn draw_update_banner(ui: &mut egui::Ui, app: &mut VpnApp) {
+    let t = theme();
     if let Some(ref result) = app.update_result.lock().unwrap().clone() {
-        ui.add_space(6.0);
-        let (msg, bg, text_color) = match result {
-            Ok(()) => ("Updated! Restart the app to use the new version.", egui::Color32::from_rgb(20, 55, 35), egui::Color32::WHITE),
-            Err(e) => (e.as_str(), egui::Color32::from_rgb(65, 25, 25), egui::Color32::from_rgb(255, 180, 180)),
+        ui.add_space(8.0);
+        let (msg, bg, tc) = match result {
+            Ok(()) => ("Updated! Restart to apply.", egui::Color32::from_rgba_premultiplied(34, 197, 94, 20), t.success),
+            Err(e) => (e.as_str(), egui::Color32::from_rgba_premultiplied(239, 68, 68, 20), t.danger),
         };
-        egui::Frame::default().fill(bg).corner_radius(cr(10)).inner_margin(12.0)
-            .show(ui, |ui| { ui.label(egui::RichText::new(msg).size(13.0).strong().color(text_color)); });
+        egui::Frame::default().fill(bg).corner_radius(cr(12)).inner_margin(14.0)
+            .show(ui, |ui| { ui.label(egui::RichText::new(msg).size(13.0).strong().color(tc)); });
         return;
     }
     if app.updating.load(Ordering::Relaxed) {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| { ui.spinner(); ui.label(egui::RichText::new("Updating...").size(12.0).color(egui::Color32::from_rgb(250, 204, 21))); });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| { ui.spinner(); ui.label(egui::RichText::new("Updating...").size(12.0).color(t.warning)); });
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
         return;
     }
     let info = app.update_info.lock().unwrap().clone();
     if let Some(ref info) = info {
         if !info.has_update { return; }
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         egui::Frame::default()
-            .fill(egui::Color32::from_rgb(30, 58, 75))
-            .corner_radius(cr(10))
-            .inner_margin(12.0)
+            .fill(t.accent.linear_multiply(0.1))
+            .corner_radius(cr(12))
+            .inner_margin(14.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("New version v{} available", info.version))
-                        .size(13.0).strong().color(egui::Color32::WHITE));
+                    ui.label(egui::RichText::new(format!("v{} available", info.version))
+                        .size(13.0).strong().color(t.text));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let url = info.download_url.clone();
                         let btn = egui::Button::new(
-                            egui::RichText::new("Update Now").size(12.0).color(egui::Color32::WHITE),
-                        ).fill(egui::Color32::from_rgb(56, 189, 248)).min_size(egui::vec2(90.0, 28.0));
+                            egui::RichText::new("Update").size(12.0).color(t.text),
+                        ).fill(t.accent).min_size(egui::vec2(80.0, 30.0));
                         if ui.add(btn).clicked() { app.start_update(url); }
                     });
                 });
@@ -601,21 +665,24 @@ fn draw_update_banner(ui: &mut egui::Ui, app: &mut VpnApp) {
 }
 
 fn mini_stat(ui: &mut egui::Ui, label: &str, value: &str, color: egui::Color32) {
-    egui::Frame::default().fill(egui::Color32::from_rgb(24, 25, 33)).corner_radius(cr(8)).inner_margin(8.0)
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 54, 61)))
+    let t = theme();
+    egui::Frame::default().fill(t.surface).corner_radius(cr(10)).inner_margin(10.0)
+        .stroke(egui::Stroke::new(1.0, t.border))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new(label).size(9.0).color(egui::Color32::from_rgb(148, 155, 168)));
-            ui.label(egui::RichText::new(value).size(13.0).strong().color(color));
+            ui.label(egui::RichText::new(label).size(10.0).color(t.text_muted));
+            ui.label(egui::RichText::new(value).size(14.0).strong().color(color));
         });
 }
 
 fn row(ui: &mut egui::Ui, label: &str, value: &str) {
+    let t = theme();
     ui.horizontal(|ui| {
-        ui.label(lbl(label));
+        ui.label(egui::RichText::new(label).size(12.0).color(t.text_muted));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new(value).size(11.0).color(egui::Color32::from_rgb(200, 200, 210)));
+            ui.label(egui::RichText::new(value).size(12.0).color(t.text_secondary));
         });
     });
+    ui.add_space(2.0);
 }
 
 fn fmt_bytes(b: u64) -> String {
@@ -630,24 +697,25 @@ fn fmt_uptime(s: u64) -> String {
 }
 
 fn draw_logo(ui: &mut egui::Ui) {
+    let t = theme();
     let size = 40.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     let p = ui.painter();
     let c = rect.center();
     let bg = egui::Rect::from_center_size(c, egui::vec2(size, size));
-    p.rect_filled(bg, cr(10), egui::Color32::from_rgb(15, 23, 42));
-    p.rect_stroke(bg, cr(10), egui::Stroke::new(1.5, egui::Color32::from_rgb(56, 189, 248)), egui::StrokeKind::Outside);
+    p.rect_filled(bg, cr(12), t.surface);
+    p.rect_stroke(bg, cr(12), egui::Stroke::new(1.5, t.accent), egui::StrokeKind::Outside);
     let s = size * 0.32;
     let shield = vec![
         egui::pos2(c.x, c.y - s * 0.9), egui::pos2(c.x + s * 0.75, c.y - s * 0.25),
         egui::pos2(c.x + s * 0.55, c.y + s * 0.45), egui::pos2(c.x, c.y + s * 1.0),
         egui::pos2(c.x - s * 0.55, c.y + s * 0.45), egui::pos2(c.x - s * 0.75, c.y - s * 0.25),
     ];
-    p.add(egui::Shape::convex_polygon(shield, egui::Color32::from_rgb(56, 189, 248), egui::Stroke::NONE));
+    p.add(egui::Shape::convex_polygon(shield, t.accent, egui::Stroke::NONE));
     let is = s * 0.55;
     let lcy = c.y + s * 0.15;
     let body = egui::Rect::from_center_size(egui::pos2(c.x, lcy + is * 0.15), egui::vec2(is * 0.7, is * 0.55));
-    p.rect_filled(body, cr(2), egui::Color32::from_rgb(15, 23, 42));
+    p.rect_filled(body, cr(2), t.surface);
     let ar = is * 0.25;
     let acy = lcy - is * 0.12;
     for i in 0..12 {
@@ -655,7 +723,7 @@ fn draw_logo(ui: &mut egui::Ui) {
         let a2 = std::f32::consts::PI + (std::f32::consts::PI * (i + 1) as f32 / 12.0);
         p.line_segment(
             [egui::pos2(c.x + ar * a1.cos(), acy + ar * a1.sin()), egui::pos2(c.x + ar * a2.cos(), acy + ar * a2.sin())],
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(15, 23, 42)),
+            egui::Stroke::new(1.5, t.surface),
         );
     }
 }
