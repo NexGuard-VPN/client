@@ -68,46 +68,46 @@ impl VpnApp {
     fn connect_selected(&mut self) {
         let Some(idx) = self.selected else { return };
         let Some(profile) = self.profiles.get(idx) else { return };
-        let mut server = profile.server.clone();
-        let mut relay: Option<String> = None;
-        let mut relay_name: Option<String> = None;
-
-        let mut join_url: Option<String> = None;
-
-        if server.is_empty() && !profile.token.is_empty() {
-            if let Some(info) = crate::api::fetch_connect_info(&profile.token) {
-                join_url = info.join_url;
-                if let Some(s) = info.server {
-                    server = s;
-                } else if let Some(r) = info.relay {
-                    relay = Some(r.clone());
-                    relay_name = info.relay_name;
-                    server = r.split(':').next().unwrap_or(&r).to_string();
-                }
-            }
-        }
-
-        if server.is_empty() && join_url.is_none() {
-            *self.state.lock().unwrap() = ConnectionState::Error("Could not resolve server".into());
-            return;
-        }
-        if server.is_empty() { server = "api-proxy".to_string(); }
-
-        let config = VpnConfig {
-            server,
-            token: profile.token.clone(),
-            internet: profile.internet,
-            relay,
-            relay_name,
-            join_url,
-            ..VpnConfig::default()
-        };
+        let profile = profile.clone();
         self.shutdown = Arc::new(AtomicBool::new(false));
         *self.state.lock().unwrap() = ConnectionState::Connecting;
         let state = Arc::clone(&self.state);
         let status_slot = Arc::clone(&self.status);
         let shutdown = Arc::clone(&self.shutdown);
         std::thread::spawn(move || {
+            let mut server = profile.server.clone();
+            let mut relay: Option<String> = None;
+            let mut relay_name: Option<String> = None;
+            let mut join_url: Option<String> = None;
+
+            if server.is_empty() && !profile.token.is_empty() {
+                if let Some(info) = crate::api::fetch_connect_info(&profile.token) {
+                    join_url = info.join_url;
+                    if let Some(s) = info.server {
+                        server = s;
+                    } else if let Some(r) = info.relay {
+                        relay = Some(r.clone());
+                        relay_name = info.relay_name;
+                        server = r.split(':').next().unwrap_or(&r).to_string();
+                    }
+                }
+            }
+
+            if server.is_empty() && join_url.is_none() {
+                *state.lock().unwrap() = ConnectionState::Error("Could not resolve server".into());
+                return;
+            }
+            if server.is_empty() { server = "api-proxy".to_string(); }
+
+            let config = VpnConfig {
+                server,
+                token: profile.token.clone(),
+                internet: profile.internet,
+                relay,
+                relay_name,
+                join_url,
+                ..VpnConfig::default()
+            };
             match crate::vpn::connect(config, Arc::clone(&shutdown)) {
                 Ok(st) => {
                     let geo_slot = Arc::clone(&st.geo);
@@ -127,13 +127,18 @@ impl VpnApp {
 
     fn disconnect(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        if let Some(status) = self.status.lock().unwrap().take() {
-            if status.internet_mode {
-                crate::route::emergency_cleanup(&status.tun_name);
+        let status_slot = Arc::clone(&self.status);
+        let state = Arc::clone(&self.state);
+        *self.state.lock().unwrap() = ConnectionState::Connecting;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            if let Some(status) = status_slot.lock().unwrap().take() {
+                if status.internet_mode {
+                    crate::route::emergency_cleanup(&status.tun_name);
+                }
             }
-        }
-        *self.state.lock().unwrap() = ConnectionState::Disconnected;
+            *state.lock().unwrap() = ConnectionState::Disconnected;
+        });
     }
 
     fn save_new_server(&mut self) {
@@ -252,11 +257,13 @@ impl eframe::App for VpnApp {
                 }
                 ConnectionState::Connecting => {
                     draw_header(ui);
+                    let is_disconnecting = self.shutdown.load(Ordering::Relaxed);
+                    let msg = if is_disconnecting { "Disconnecting..." } else { "Connecting..." };
                     ui.vertical_centered(|ui| {
                         ui.add_space(30.0);
                         ui.spinner();
                         ui.add_space(6.0);
-                        ui.label(egui::RichText::new("Connecting...").size(14.0).color(egui::Color32::from_rgb(250, 204, 21)));
+                        ui.label(egui::RichText::new(msg).size(14.0).color(egui::Color32::from_rgb(250, 204, 21)));
                     });
                     ctx.request_repaint_after(std::time::Duration::from_millis(200));
                 }
@@ -434,6 +441,7 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
             .min_size(egui::vec2(180.0, 36.0));
         if ui.add_enabled(ok, btn).clicked() {
             app.save_new_server();
+            app.connect_selected();
         }
     });
 
