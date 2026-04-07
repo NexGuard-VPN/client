@@ -177,27 +177,44 @@ fn make_icon(connected: bool) -> Icon {
     let mut rgba = vec![0u8; size * size * 4];
     let cx = size as f32 / 2.0;
     let cy = size as f32 / 2.0;
-    let r = size as f32 * 0.42;
 
-    let (cr, cg, cb) = if connected { (34, 197, 94) } else { (148, 155, 168) };
+    let (r, g, b) = if connected { (29, 178, 127) } else { (113, 113, 122) };
 
-    let pts = [
-        (cx, cy - r * 0.9),
-        (cx + r * 0.75, cy - r * 0.25),
-        (cx + r * 0.55, cy + r * 0.45),
-        (cx, cy + r),
-        (cx - r * 0.55, cy + r * 0.45),
-        (cx - r * 0.75, cy - r * 0.25),
+    let rings: &[(f32, f32, u8)] = &[
+        (size as f32 * 0.42, 2.0, if connected { 90 } else { 50 }),
+        (size as f32 * 0.26, 2.0, if connected { 160 } else { 80 }),
     ];
+    let center_r = size as f32 * 0.12;
+    let arm_w = 1.8f32;
 
     for y in 0..size {
         for x in 0..size {
-            if point_in_polygon(x as f32, y as f32, &pts) {
-                let i = (y * size + x) * 4;
-                rgba[i] = cr;
-                rgba[i + 1] = cg;
-                rgba[i + 2] = cb;
-                rgba[i + 3] = 255;
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let i = (y * size + x) * 4;
+
+            if dist <= center_r {
+                rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = 255;
+                continue;
+            }
+
+            for &(ring_r, width, alpha) in rings {
+                if (dist - ring_r).abs() <= width {
+                    rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = alpha;
+                    break;
+                }
+            }
+
+            let arms = [
+                (dx.abs() <= arm_w && dy < -center_r && dy > -(cx - 2.0)),
+                (dx.abs() <= arm_w && dy > center_r && dy < (cx - 2.0)),
+                (dy.abs() <= arm_w && dx < -center_r && dx > -(cy - 2.0)),
+                (dy.abs() <= arm_w && dx > center_r && dx < (cy - 2.0)),
+            ];
+            if arms.iter().any(|&a| a) && rgba[i + 3] == 0 {
+                rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b;
+                rgba[i + 3] = if connected { 180 } else { 70 };
             }
         }
     }
@@ -205,21 +222,6 @@ fn make_icon(connected: bool) -> Icon {
     Icon::from_rgba(rgba, size as u32, size as u32).unwrap_or_else(|_| {
         Icon::from_rgba(vec![0; 4], 1, 1).unwrap()
     })
-}
-
-fn point_in_polygon(px: f32, py: f32, pts: &[(f32, f32)]) -> bool {
-    let mut inside = false;
-    let n = pts.len();
-    let mut j = n - 1;
-    for i in 0..n {
-        let (xi, yi) = pts[i];
-        let (xj, yj) = pts[j];
-        if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
 }
 
 fn fmt_bytes(b: u64) -> String {

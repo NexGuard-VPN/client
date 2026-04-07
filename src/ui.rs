@@ -262,8 +262,8 @@ fn dark_theme() -> Theme {
         text: egui::Color32::from_rgb(250, 250, 250),
         text_secondary: egui::Color32::from_rgb(161, 161, 170),
         text_muted: egui::Color32::from_rgb(113, 113, 122),
-        accent: egui::Color32::from_rgb(14, 165, 233),
-        accent_hover: egui::Color32::from_rgb(56, 189, 248),
+        accent: egui::Color32::from_rgb(29, 178, 127),
+        accent_hover: egui::Color32::from_rgb(52, 211, 153),
         success: egui::Color32::from_rgb(34, 197, 94),
         danger: egui::Color32::from_rgb(239, 68, 68),
         warning: egui::Color32::from_rgb(234, 179, 8),
@@ -704,47 +704,85 @@ fn draw_logo(ui: &mut egui::Ui) {
     let c = rect.center();
     let bg = egui::Rect::from_center_size(c, egui::vec2(size, size));
     p.rect_filled(bg, cr(12), t.surface);
-    p.rect_stroke(bg, cr(12), egui::Stroke::new(1.5, t.accent), egui::StrokeKind::Outside);
-    let s = size * 0.32;
-    let shield = vec![
-        egui::pos2(c.x, c.y - s * 0.9), egui::pos2(c.x + s * 0.75, c.y - s * 0.25),
-        egui::pos2(c.x + s * 0.55, c.y + s * 0.45), egui::pos2(c.x, c.y + s * 1.0),
-        egui::pos2(c.x - s * 0.55, c.y + s * 0.45), egui::pos2(c.x - s * 0.75, c.y - s * 0.25),
-    ];
-    p.add(egui::Shape::convex_polygon(shield, t.accent, egui::Stroke::NONE));
-    let is = s * 0.55;
-    let lcy = c.y + s * 0.15;
-    let body = egui::Rect::from_center_size(egui::pos2(c.x, lcy + is * 0.15), egui::vec2(is * 0.7, is * 0.55));
-    p.rect_filled(body, cr(2), t.surface);
-    let ar = is * 0.25;
-    let acy = lcy - is * 0.12;
-    for i in 0..12 {
-        let a1 = std::f32::consts::PI + (std::f32::consts::PI * i as f32 / 12.0);
-        let a2 = std::f32::consts::PI + (std::f32::consts::PI * (i + 1) as f32 / 12.0);
-        p.line_segment(
-            [egui::pos2(c.x + ar * a1.cos(), acy + ar * a1.sin()), egui::pos2(c.x + ar * a2.cos(), acy + ar * a2.sin())],
-            egui::Stroke::new(1.5, t.surface),
-        );
-    }
+    p.rect_stroke(bg, cr(12), egui::Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
+
+    let accent_dim = egui::Color32::from_rgba_premultiplied(29, 178, 127, 60);
+    let accent_mid = egui::Color32::from_rgba_premultiplied(29, 178, 127, 140);
+
+    p.circle_stroke(c, size * 0.38, egui::Stroke::new(2.0, accent_dim));
+    p.circle_stroke(c, size * 0.24, egui::Stroke::new(2.0, accent_mid));
+    p.circle_filled(c, size * 0.10, t.accent);
+
+    let arm = size * 0.16;
+    let gap = size * 0.12;
+    let arm_stroke = egui::Stroke::new(2.0, accent_mid);
+    p.line_segment([egui::pos2(c.x, c.y - gap - arm), egui::pos2(c.x, c.y - gap)], arm_stroke);
+    p.line_segment([egui::pos2(c.x, c.y + gap), egui::pos2(c.x, c.y + gap + arm)], arm_stroke);
+    p.line_segment([egui::pos2(c.x - gap - arm, c.y), egui::pos2(c.x - gap, c.y)], arm_stroke);
+    p.line_segment([egui::pos2(c.x + gap, c.y), egui::pos2(c.x + gap + arm, c.y)], arm_stroke);
 }
 
 fn generate_app_icon() -> egui::IconData {
     const SZ: usize = 128;
     let mut rgba = vec![0u8; SZ * SZ * 4];
-    let cx = SZ as f32 / 2.0; let cy = SZ as f32 / 2.0; let r = SZ as f32 * 0.45;
-    for y in 0..SZ { for x in 0..SZ {
-        let dx = (x as f32 - cx).abs(); let dy = (y as f32 - cy).abs(); let cr = 20.0;
-        let inside = if dx > cx - cr && dy > cy - cr { let a = dx - (cx - cr); let b = dy - (cy - cr); a*a + b*b <= cr*cr } else { dx <= cx && dy <= cy };
-        if inside { let i = (y * SZ + x) * 4; rgba[i] = 15; rgba[i+1] = 23; rgba[i+2] = 42; rgba[i+3] = 255; }
-    }}
-    let pts = [(cx, cy - r*0.72), (cx + r*0.6, cy - r*0.2), (cx + r*0.44, cy + r*0.36), (cx, cy + r*0.8), (cx - r*0.44, cy + r*0.36), (cx - r*0.6, cy - r*0.2)];
-    for y in 0..SZ { for x in 0..SZ { if point_in_polygon(x as f32, y as f32, &pts) { let i = (y*SZ+x)*4; rgba[i]=56; rgba[i+1]=189; rgba[i+2]=248; rgba[i+3]=255; } }}
-    egui::IconData { rgba, width: SZ as u32, height: SZ as u32 }
-}
+    let cx = SZ as f32 / 2.0;
+    let cy = SZ as f32 / 2.0;
 
-fn point_in_polygon(px: f32, py: f32, pts: &[(f32, f32)]) -> bool {
-    let mut inside = false; let n = pts.len(); let mut j = n - 1;
-    for i in 0..n { let (xi,yi) = pts[i]; let (xj,yj) = pts[j];
-        if ((yi > py) != (yj > py)) && (px < (xj-xi)*(py-yi)/(yj-yi)+xi) { inside = !inside; } j = i; }
-    inside
+    for y in 0..SZ {
+        for x in 0..SZ {
+            let dx = (x as f32 - cx).abs();
+            let dy = (y as f32 - cy).abs();
+            let corner = 22.0f32;
+            let inside = if dx > cx - corner && dy > cy - corner {
+                let a = dx - (cx - corner);
+                let b = dy - (cy - corner);
+                a * a + b * b <= corner * corner
+            } else {
+                dx <= cx && dy <= cy
+            };
+            if inside {
+                let i = (y * SZ + x) * 4;
+                rgba[i] = 9; rgba[i + 1] = 9; rgba[i + 2] = 11; rgba[i + 3] = 255;
+            }
+        }
+    }
+
+    let (r, g, b): (u8, u8, u8) = (29, 178, 127);
+    let rings: &[(f32, f32, u8)] = &[(SZ as f32 * 0.38, 3.5, 90), (SZ as f32 * 0.24, 3.5, 160)];
+    let center_r = SZ as f32 * 0.10;
+    let arm_w = 3.0f32;
+    let arm_gap = SZ as f32 * 0.12;
+    let arm_end = SZ as f32 * 0.42;
+
+    for y in 0..SZ {
+        for x in 0..SZ {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let i = (y * SZ + x) * 4;
+            if rgba[i + 3] == 0 { continue; }
+
+            if dist <= center_r {
+                rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b;
+                continue;
+            }
+            for &(ring_r, w, a) in rings {
+                if (dist - ring_r).abs() <= w {
+                    rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = a;
+                    break;
+                }
+            }
+            let arms = [
+                (dx.abs() <= arm_w && dy < -arm_gap && dy.abs() < arm_end),
+                (dx.abs() <= arm_w && dy > arm_gap && dy.abs() < arm_end),
+                (dy.abs() <= arm_w && dx < -arm_gap && dx.abs() < arm_end),
+                (dy.abs() <= arm_w && dx > arm_gap && dx.abs() < arm_end),
+            ];
+            if arms.iter().any(|&a| a) && rgba[i + 3] == 255 {
+                rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = 160;
+            }
+        }
+    }
+
+    egui::IconData { rgba, width: SZ as u32, height: SZ as u32 }
 }
