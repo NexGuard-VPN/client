@@ -193,11 +193,17 @@ pub fn run_gui_with(server: Option<String>, token: Option<String>, internet: boo
     eframe::run_native(APP_NAME, options, Box::new(move |cc| {
         setup_style(&cc.egui_ctx);
         let mut app = VpnApp::default();
-        if server.is_some() || token.is_some() {
-            app.view = View::AddServer;
-            if let Some(s) = server { app.new_server = s; }
-            if let Some(t) = token { app.new_token = t; }
-            app.new_internet = internet;
+        if let Some(t) = token {
+            let name = server.as_deref().unwrap_or("VPN Server").to_string();
+            let profile = crate::profiles::ServerProfile {
+                name,
+                server: server.unwrap_or_default(),
+                token: t,
+                internet,
+            };
+            crate::profiles::add(&mut app.profiles, profile);
+            app.selected = Some(app.profiles.len() - 1);
+            app.connect_selected();
         }
         Ok(Box::new(app))
     })).ok();

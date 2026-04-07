@@ -22,14 +22,11 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let cli_mode = args.iter().any(|a| a == "--cli" || a == "--no-gui");
-    let has_token = arg_value(&args, "--token").or_else(|| arg_value(&args, "-t")).is_some();
-    let has_server = arg_value(&args, "--server").or_else(|| arg_value(&args, "-s")).is_some();
-    let gui_mode = !cli_mode && !(has_token && !has_server);
+    let init_server = arg_value(&args, "--server").or_else(|| arg_value(&args, "-s"));
+    let init_token = arg_value(&args, "--token").or_else(|| arg_value(&args, "-t"));
+    let init_internet = args.iter().any(|a| a == "--internet" || a == "--exit");
 
-    if gui_mode {
-        let init_server = arg_value(&args, "--server").or_else(|| arg_value(&args, "-s"));
-        let init_token = arg_value(&args, "--token").or_else(|| arg_value(&args, "-t"));
-        let init_internet = args.iter().any(|a| a == "--internet" || a == "--exit");
+    if !cli_mode {
         ui::run_gui_with(init_server, init_token, init_internet);
         return;
     }
