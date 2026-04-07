@@ -29,6 +29,7 @@ struct VpnApp {
     status: Arc<Mutex<Option<VpnStatus>>>,
     shutdown: Arc<AtomicBool>,
     connect_trigger: Arc<AtomicBool>,
+    tray: Option<crate::tray::NexTray>,
     update_info: Arc<Mutex<Option<crate::api::UpdateInfo>>>,
     updating: Arc<AtomicBool>,
     update_result: Arc<Mutex<Option<Result<(), String>>>>,
@@ -59,6 +60,7 @@ impl Default for VpnApp {
             status: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
             connect_trigger: Arc::new(AtomicBool::new(false)),
+            tray: None,
             update_info,
             updating: Arc::new(AtomicBool::new(false)),
             update_result: Arc::new(Mutex::new(None)),
@@ -196,13 +198,11 @@ pub fn run_gui_with(token: Option<String>, name: Option<String>, internet: bool)
         setup_style(&cc.egui_ctx);
         let mut app = VpnApp::default();
 
-        let tray_status = Arc::clone(&app.status);
-        let tray_shutdown = Arc::clone(&app.shutdown);
-        let connect_trigger = Arc::new(AtomicBool::new(false));
-        app.connect_trigger = Arc::clone(&connect_trigger);
-        std::thread::spawn(move || {
-            crate::tray::run_tray(tray_status, tray_shutdown, connect_trigger);
-        });
+        app.tray = crate::tray::NexTray::new(
+            Arc::clone(&app.status),
+            Arc::clone(&app.shutdown),
+            Arc::clone(&app.connect_trigger),
+        );
 
         if let Some(t) = token {
             let profile_name = name.unwrap_or_else(|| "VPN Server".to_string());
@@ -303,6 +303,10 @@ impl eframe::App for VpnApp {
             draw_update_banner(ui, self);
             });
         });
+
+        if let Some(ref mut tray) = self.tray {
+            tray.tick();
+        }
 
         if self.connect_trigger.swap(false, Ordering::Relaxed) {
             if matches!(state, ConnectionState::Disconnected | ConnectionState::Error(_)) {
