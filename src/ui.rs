@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
@@ -29,6 +29,7 @@ struct VpnApp {
     status: Arc<Mutex<Option<VpnStatus>>>,
     shutdown: Arc<AtomicBool>,
     connect_trigger: Arc<AtomicBool>,
+    selected_server: Arc<AtomicUsize>,
     tray: Option<crate::tray::NexTray>,
     update_info: Arc<Mutex<Option<crate::api::UpdateInfo>>>,
     updating: Arc<AtomicBool>,
@@ -60,6 +61,7 @@ impl Default for VpnApp {
             status: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
             connect_trigger: Arc::new(AtomicBool::new(false)),
+            selected_server: Arc::new(AtomicUsize::new(0)),
             tray: None,
             update_info,
             updating: Arc::new(AtomicBool::new(false)),
@@ -155,6 +157,7 @@ impl VpnApp {
         };
         crate::profiles::add(&mut self.profiles, profile);
         self.selected = Some(self.profiles.len() - 1);
+        self.sync_tray_servers();
         self.new_name.clear();
         self.new_server.clear();
         self.new_token.clear();
@@ -166,6 +169,13 @@ impl VpnApp {
         if let Some(idx) = self.selected {
             crate::profiles::remove(&mut self.profiles, idx);
             self.selected = if self.profiles.is_empty() { None } else { Some(0) };
+            self.sync_tray_servers();
+        }
+    }
+
+    fn sync_tray_servers(&mut self) {
+        if let Some(ref mut tray) = self.tray {
+            tray.update_servers(&self.profiles, self.selected.unwrap_or(0));
         }
     }
 
@@ -202,6 +212,8 @@ pub fn run_gui_with(token: Option<String>, name: Option<String>, internet: bool)
             Arc::clone(&app.status),
             Arc::clone(&app.shutdown),
             Arc::clone(&app.connect_trigger),
+            Arc::clone(&app.selected_server),
+            &app.profiles,
         );
 
         if let Some(t) = token {
@@ -261,6 +273,11 @@ fn lbl(t: &str) -> egui::RichText {
 
 impl eframe::App for VpnApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
         let state = self.state.lock().unwrap().clone();
         let status = self.status.lock().unwrap().clone();
 
@@ -306,6 +323,13 @@ impl eframe::App for VpnApp {
 
         if let Some(ref mut tray) = self.tray {
             tray.tick();
+        }
+
+        let tray_server = self.selected_server.load(Ordering::Relaxed);
+        if tray_server != self.selected.unwrap_or(usize::MAX) {
+            if tray_server < self.profiles.len() {
+                self.selected = Some(tray_server);
+            }
         }
 
         if self.connect_trigger.swap(false, Ordering::Relaxed) {

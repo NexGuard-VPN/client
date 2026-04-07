@@ -47,7 +47,11 @@ pub fn save(profiles: &[ServerProfile]) {
 }
 
 pub fn add(profiles: &mut Vec<ServerProfile>, profile: ServerProfile) {
-    if let Some(existing) = profiles.iter_mut().find(|p| p.server == profile.server) {
+    let existing = profiles.iter_mut().find(|p| {
+        (!p.token.is_empty() && p.token == profile.token)
+            || (!p.server.is_empty() && !profile.server.is_empty() && p.server == profile.server)
+    });
+    if let Some(existing) = existing {
         existing.token = profile.token;
         existing.name = profile.name;
         existing.internet = profile.internet;
