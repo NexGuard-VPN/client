@@ -7,8 +7,20 @@ on:
 permissions:
   contents: write
 
+env:
+  BASE_URL: https://nexguard.sh/download
+
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
     strategy:
       matrix:
         include:
@@ -38,6 +50,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Update Cargo.toml version
+        shell: bash
+        run: sed -i.bak "s/^version = .*/version = \"${{ needs.prepare.outputs.version }}\"/" Cargo.toml && rm -f Cargo.toml.bak
 
       - name: Install cross (Linux ARM64)
         if: matrix.cross
@@ -74,9 +90,9 @@ jobs:
         if: matrix.dmg
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="${{ needs.prepare.outputs.version }}"
           cp target/${{ matrix.target }}/release/nexguard target/release/nexguard
-          bash scripts/build-dmg.sh "$TAG"
+          bash scripts/build-dmg.sh "$VERSION"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
@@ -99,8 +115,10 @@ jobs:
           path: target/${{ matrix.target }}/release/wintun.dll
 
   release:
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -109,24 +127,67 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Generate version.json
+        run: |
+          cat > artifacts/version.json << EOF
+          {
+            "client": {
+              "version": "${VERSION}",
+              "platforms": {
+                "macos-arm64": { "url": "${BASE_URL}/nexguard-macos-${VERSION}", "dmg": "${BASE_URL}/NexGuard-${VERSION}.dmg" },
+                "macos-amd64": { "url": "${BASE_URL}/nexguard-macos-${VERSION}" },
+                "linux-amd64": { "url": "${BASE_URL}/nexguard-linux-${VERSION}" },
+                "linux-arm64": { "url": "${BASE_URL}/nexguard-linux-arm64-${VERSION}" },
+                "windows-amd64": { "url": "${BASE_URL}/nexguard-windows-${VERSION}.exe" }
+              }
+            },
+            "server": {
+              "version": "1.4.0",
+              "platforms": {
+                "linux-amd64": { "url": "${BASE_URL}/nexguard-server-linux-1.4.0" },
+                "linux-arm64": { "url": "${BASE_URL}/nexguard-server-linux-arm64-1.4.0" }
+              }
+            }
+          }
+          EOF
+
+      - name: Rename artifacts with version
+        run: |
+          cd artifacts
+          [ -f nexguard-macos-arm64 ] && cp nexguard-macos-arm64 nexguard-macos-${VERSION}
+          [ -f nexguard-macos-amd64 ] && cp nexguard-macos-amd64 nexguard-macos-intel-${VERSION}
+          [ -f nexguard-linux-amd64 ] && cp nexguard-linux-amd64 nexguard-linux-${VERSION}
+          [ -f nexguard-linux-arm64 ] && cp nexguard-linux-arm64 nexguard-linux-arm64-${VERSION}
+          [ -f nexguard-windows-amd64.exe ] && cp nexguard-windows-amd64.exe nexguard-windows-${VERSION}.exe
+          for dmg in NexGuard-*-macOS.dmg; do
+            [ -f "$dmg" ] && mv "$dmg" "NexGuard-${VERSION}.dmg"
+          done
+          ls -la
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: |
+            artifacts/nexguard-macos-${{ env.VERSION }}
+            artifacts/nexguard-linux-${{ env.VERSION }}
+            artifacts/nexguard-linux-arm64-${{ env.VERSION }}
+            artifacts/nexguard-windows-${{ env.VERSION }}.exe
+            artifacts/NexGuard-${{ env.VERSION }}.dmg
+            artifacts/version.json
           generate_release_notes: true
 
-      - name: Deploy binaries to server
+      - name: Deploy to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: root
           key: ${{ secrets.SSH_KEY }}
-          source: "artifacts/*"
+          source: "artifacts/nexguard-macos-${{ env.VERSION }},artifacts/nexguard-macos-intel-${{ env.VERSION }},artifacts/nexguard-linux-${{ env.VERSION }},artifacts/nexguard-linux-arm64-${{ env.VERSION }},artifacts/nexguard-windows-${{ env.VERSION }}.exe,artifacts/NexGuard-${{ env.VERSION }}.dmg,artifacts/version.json"
           target: /var/www/nexguard/download/
           strip_components: 1
           overwrite: true
 
-      - name: Setup download symlinks and install script
+      - name: Update symlinks
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -134,9 +195,10 @@ jobs:
           key: ${{ secrets.SSH_KEY }}
           script: |
             cd /var/www/nexguard/download
-            ln -sf nexguard-macos-arm64 macos
-            ln -sf nexguard-macos-amd64 macos-intel
-            ln -sf nexguard-linux-amd64 linux
-            ln -sf nexguard-linux-arm64 linux-arm64
-            ln -sf nexguard-windows-amd64.exe windows.exe
-            ls -la /var/www/nexguard/download/
+            chmod +x nexguard-macos-${{ env.VERSION }} nexguard-linux-${{ env.VERSION }} nexguard-linux-arm64-${{ env.VERSION }} 2>/dev/null
+            ln -sf nexguard-macos-${{ env.VERSION }} macos
+            ln -sf nexguard-macos-intel-${{ env.VERSION }} macos-intel
+            ln -sf nexguard-linux-${{ env.VERSION }} linux
+            ln -sf nexguard-linux-arm64-${{ env.VERSION }} linux-arm64
+            ln -sf nexguard-windows-${{ env.VERSION }}.exe windows.exe
+            ls -la macos linux linux-arm64 windows.exe version.json
