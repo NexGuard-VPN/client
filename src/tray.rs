@@ -178,14 +178,17 @@ fn make_icon(connected: bool) -> Icon {
     let cx = size as f32 / 2.0;
     let cy = size as f32 / 2.0;
 
-    let (r, g, b) = if connected { (29, 178, 127) } else { (113, 113, 122) };
+    let (r, g, b) = if connected { (52, 211, 153) } else { (113, 113, 122) };
+    let half = size as f32 / 2.0;
 
     let rings: &[(f32, f32, u8)] = &[
-        (size as f32 * 0.42, 2.0, if connected { 90 } else { 50 }),
-        (size as f32 * 0.26, 2.0, if connected { 160 } else { 80 }),
+        (half * 0.6875, 2.0, if connected { 90 } else { 50 }),
+        (half * 0.40625, 2.0, if connected { 165 } else { 80 }),
     ];
-    let center_r = size as f32 * 0.12;
+    let center_r = half * 0.1875;
     let arm_w = 1.8f32;
+    let arm_gap = half * 0.4375;
+    let arm_end = half * 0.75;
 
     for y in 0..size {
         for x in 0..size {
@@ -207,10 +210,10 @@ fn make_icon(connected: bool) -> Icon {
             }
 
             let arms = [
-                (dx.abs() <= arm_w && dy < -center_r && dy > -(cx - 2.0)),
-                (dx.abs() <= arm_w && dy > center_r && dy < (cx - 2.0)),
-                (dy.abs() <= arm_w && dx < -center_r && dx > -(cy - 2.0)),
-                (dy.abs() <= arm_w && dx > center_r && dx < (cy - 2.0)),
+                (dx.abs() <= arm_w && dy < -arm_gap && dy.abs() < arm_end),
+                (dx.abs() <= arm_w && dy > arm_gap && dy.abs() < arm_end),
+                (dy.abs() <= arm_w && dx < -arm_gap && dx.abs() < arm_end),
+                (dy.abs() <= arm_w && dx > arm_gap && dx.abs() < arm_end),
             ];
             if arms.iter().any(|&a| a) && rgba[i + 3] == 0 {
                 rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b;

@@ -262,8 +262,8 @@ fn dark_theme() -> Theme {
         text: egui::Color32::from_rgb(250, 250, 250),
         text_secondary: egui::Color32::from_rgb(161, 161, 170),
         text_muted: egui::Color32::from_rgb(113, 113, 122),
-        accent: egui::Color32::from_rgb(29, 178, 127),
-        accent_hover: egui::Color32::from_rgb(52, 211, 153),
+        accent: egui::Color32::from_rgb(52, 211, 153),
+        accent_hover: egui::Color32::from_rgb(74, 222, 168),
         success: egui::Color32::from_rgb(34, 197, 94),
         danger: egui::Color32::from_rgb(239, 68, 68),
         warning: egui::Color32::from_rgb(234, 179, 8),
@@ -467,30 +467,38 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             let fill = if is_selected { t.surface_hover } else { t.surface };
             let stroke_color = if is_selected { t.accent } else { t.border };
 
-            egui::Frame::default()
+            let frame_resp = egui::Frame::default()
                 .fill(fill)
                 .corner_radius(cr(12))
                 .inner_margin(14.0)
                 .stroke(egui::Stroke::new(if is_selected { 1.5 } else { 1.0 }, stroke_color))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let dot_color = if is_selected { t.accent } else { t.text_muted };
-                        ui.label(egui::RichText::new("●").size(10.0).color(dot_color));
+                        let radio_icon = if is_selected { "◉" } else { "○" };
+                        let radio_color = if is_selected { t.accent } else { t.text_muted };
+                        ui.label(egui::RichText::new(radio_icon).size(14.0).color(radio_color));
                         ui.vertical(|ui| {
                             ui.label(egui::RichText::new(&profile.name).size(13.0).strong().color(t.text));
                             let desc = if profile.server.is_empty() { "Token-based" } else { &profile.server };
                             ui.label(egui::RichText::new(desc).size(11.0).color(t.text_muted));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if is_selected && ui.small_button("✕").clicked() {
+                            let del_btn = ui.add(egui::Button::new(
+                                egui::RichText::new("🗑").size(14.0)
+                            ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE));
+                            if del_btn.clicked() {
                                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_idx"), i));
-                            }
-                            if !is_selected && ui.small_button("Select").clicked() {
-                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
                             }
                         });
                     });
                 });
+
+            let card_rect = frame_resp.response.rect;
+            let card_resp = ui.interact(card_rect, egui::Id::new(format!("server_card_{}", i)), egui::Sense::click());
+            if card_resp.clicked() && !is_selected {
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
+            }
+
             ui.add_space(3.0);
         }
     }
@@ -699,24 +707,26 @@ fn fmt_uptime(s: u64) -> String {
 fn draw_logo(ui: &mut egui::Ui) {
     let t = theme();
     let size = 40.0;
+    let half = size / 2.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     let p = ui.painter();
     let c = rect.center();
     let bg = egui::Rect::from_center_size(c, egui::vec2(size, size));
-    p.rect_filled(bg, cr(12), t.surface);
-    p.rect_stroke(bg, cr(12), egui::Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
+    p.rect_filled(bg, cr(9), egui::Color32::from_rgb(9, 9, 11));
+    p.rect_stroke(bg, cr(9), egui::Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
 
-    let a35 = egui::Color32::from_rgba_premultiplied(29, 178, 127, 90);
-    let a65 = egui::Color32::from_rgba_premultiplied(29, 178, 127, 165);
-    let a70 = egui::Color32::from_rgba_premultiplied(29, 178, 127, 180);
+    let green = t.accent;
+    let a35 = egui::Color32::from_rgba_premultiplied(52, 211, 153, 90);
+    let a65 = egui::Color32::from_rgba_premultiplied(52, 211, 153, 165);
+    let a70 = egui::Color32::from_rgba_premultiplied(52, 211, 153, 180);
 
-    p.circle_stroke(c, size * 0.35, egui::Stroke::new(2.5, a35));
-    p.circle_stroke(c, size * 0.22, egui::Stroke::new(2.5, a65));
-    p.circle_filled(c, size * 0.08, t.accent);
+    p.circle_stroke(c, half * 0.6875, egui::Stroke::new(2.5, a35));
+    p.circle_stroke(c, half * 0.40625, egui::Stroke::new(2.5, a65));
+    p.circle_filled(c, half * 0.1875, green);
 
-    let arm_out = size * 0.44;
-    let arm_in = size * 0.12;
-    let s = egui::Stroke::new(2.5, a70);
+    let arm_out = half * 0.75;
+    let arm_in = half * 0.4375;
+    let s = egui::Stroke::new(2.2, a70);
     p.line_segment([egui::pos2(c.x, c.y - arm_out), egui::pos2(c.x, c.y - arm_in)], s);
     p.line_segment([egui::pos2(c.x, c.y + arm_in), egui::pos2(c.x, c.y + arm_out)], s);
     p.line_segment([egui::pos2(c.x - arm_out, c.y), egui::pos2(c.x - arm_in, c.y)], s);
@@ -728,12 +738,13 @@ fn generate_app_icon() -> egui::IconData {
     let mut rgba = vec![0u8; SZ * SZ * 4];
     let cx = SZ as f32 / 2.0;
     let cy = SZ as f32 / 2.0;
+    let half = SZ as f32 / 2.0;
+    let corner = (14.0 / 32.0) * half;
 
     for y in 0..SZ {
         for x in 0..SZ {
             let dx = (x as f32 - cx).abs();
             let dy = (y as f32 - cy).abs();
-            let corner = 22.0f32;
             let inside = if dx > cx - corner && dy > cy - corner {
                 let a = dx - (cx - corner);
                 let b = dy - (cy - corner);
@@ -748,12 +759,14 @@ fn generate_app_icon() -> egui::IconData {
         }
     }
 
-    let (r, g, b): (u8, u8, u8) = (29, 178, 127);
-    let rings: &[(f32, f32, u8)] = &[(SZ as f32 * 0.38, 3.5, 90), (SZ as f32 * 0.24, 3.5, 160)];
-    let center_r = SZ as f32 * 0.10;
-    let arm_w = 3.0f32;
-    let arm_gap = SZ as f32 * 0.12;
-    let arm_end = SZ as f32 * 0.42;
+    let (r, g, b): (u8, u8, u8) = (52, 211, 153);
+    let outer_r = half * 0.6875;
+    let inner_r = half * 0.40625;
+    let rings: &[(f32, f32, u8)] = &[(outer_r, 3.5, 90), (inner_r, 3.5, 165)];
+    let center_r = half * 0.1875;
+    let arm_w = 3.5f32;
+    let arm_gap = half * 0.4375;
+    let arm_end = half * 0.75;
 
     for y in 0..SZ {
         for x in 0..SZ {
@@ -780,7 +793,7 @@ fn generate_app_icon() -> egui::IconData {
                 (dy.abs() <= arm_w && dx > arm_gap && dx.abs() < arm_end),
             ];
             if arms.iter().any(|&a| a) && rgba[i + 3] == 255 {
-                rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = 160;
+                rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = 180;
             }
         }
     }
