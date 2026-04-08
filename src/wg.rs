@@ -40,12 +40,20 @@ pub fn connect_relay(
         .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
         .with_no_client_auth();
 
-    let sni = rustls::pki_types::ServerName::try_from(TLS_SNI)
+    let host = relay_addr.split(':').next().unwrap_or(TLS_SNI);
+    let sni_name = if host.parse::<std::net::IpAddr>().is_ok() { TLS_SNI } else { host };
+    let sni = rustls::pki_types::ServerName::try_from(sni_name.to_string())
         .map_err(|e| format!("sni: {}", e))?;
     let conn = rustls::ClientConnection::new(Arc::new(config), sni)
         .map_err(|e| format!("tls: {}", e))?;
 
-    let socket_addr: SocketAddr = relay_addr.parse().map_err(|e| format!("parse {}: {}", relay_addr, e))?;
+    let socket_addr: SocketAddr = relay_addr.parse().unwrap_or_else(|_| {
+        use std::net::ToSocketAddrs;
+        relay_addr.to_socket_addrs()
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+            .unwrap_or_else(|| format!("{}:443", relay_addr).to_socket_addrs().ok().and_then(|mut a| a.next()).expect("resolve relay"))
+    });
     let tcp = TcpStream::connect_timeout(&socket_addr, TLS_CONNECT_TIMEOUT)
         .map_err(|e| format!("connect {}: {}", relay_addr, e))?;
     tcp.set_nodelay(true).ok();
