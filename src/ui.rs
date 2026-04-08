@@ -483,7 +483,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             let fill = if is_selected { t.surface_hover } else { t.surface };
             let stroke_color = if is_selected { t.accent } else { t.border };
 
-            let frame_resp = egui::Frame::default()
+            egui::Frame::default()
                 .fill(fill)
                 .corner_radius(cr(12))
                 .inner_margin(14.0)
@@ -492,15 +492,25 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                     ui.horizontal(|ui| {
                         let radio_icon = if is_selected { "◉" } else { "○" };
                         let radio_color = if is_selected { t.accent } else { t.text_muted };
-                        ui.label(egui::RichText::new(radio_icon).size(14.0).color(radio_color));
+                        let select_btn = ui.add(egui::Button::new(
+                            egui::RichText::new(radio_icon).size(14.0).color(radio_color)
+                        ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE));
+                        if select_btn.clicked() && !is_selected {
+                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
+                        }
                         ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(&profile.name).size(13.0).strong().color(t.text));
+                            let name_btn = ui.add(egui::Button::new(
+                                egui::RichText::new(&profile.name).size(13.0).strong().color(t.text)
+                            ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE));
+                            if name_btn.clicked() && !is_selected {
+                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
+                            }
                             let desc = if profile.server.is_empty() { "Token-based" } else { &profile.server };
                             ui.label(egui::RichText::new(desc).size(11.0).color(t.text_muted));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let del_btn = ui.add(egui::Button::new(
-                                egui::RichText::new("🗑").size(14.0)
+                                egui::RichText::new("🗑").size(14.0).color(t.danger)
                             ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE));
                             if del_btn.clicked() {
                                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_idx"), i));
@@ -508,12 +518,6 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                         });
                     });
                 });
-
-            let card_rect = frame_resp.response.rect;
-            let card_resp = ui.interact(card_rect, egui::Id::new(format!("server_card_{}", i)), egui::Sense::click());
-            if card_resp.clicked() && !is_selected {
-                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
-            }
 
             ui.add_space(3.0);
         }
