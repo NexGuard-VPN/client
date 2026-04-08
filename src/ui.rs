@@ -706,20 +706,21 @@ fn draw_logo(ui: &mut egui::Ui) {
     p.rect_filled(bg, cr(12), t.surface);
     p.rect_stroke(bg, cr(12), egui::Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
 
-    let accent_dim = egui::Color32::from_rgba_premultiplied(29, 178, 127, 60);
-    let accent_mid = egui::Color32::from_rgba_premultiplied(29, 178, 127, 140);
+    let a35 = egui::Color32::from_rgba_premultiplied(29, 178, 127, 90);
+    let a65 = egui::Color32::from_rgba_premultiplied(29, 178, 127, 165);
+    let a70 = egui::Color32::from_rgba_premultiplied(29, 178, 127, 180);
 
-    p.circle_stroke(c, size * 0.38, egui::Stroke::new(2.0, accent_dim));
-    p.circle_stroke(c, size * 0.24, egui::Stroke::new(2.0, accent_mid));
-    p.circle_filled(c, size * 0.10, t.accent);
+    p.circle_stroke(c, size * 0.35, egui::Stroke::new(2.5, a35));
+    p.circle_stroke(c, size * 0.22, egui::Stroke::new(2.5, a65));
+    p.circle_filled(c, size * 0.08, t.accent);
 
-    let arm = size * 0.16;
-    let gap = size * 0.12;
-    let arm_stroke = egui::Stroke::new(2.0, accent_mid);
-    p.line_segment([egui::pos2(c.x, c.y - gap - arm), egui::pos2(c.x, c.y - gap)], arm_stroke);
-    p.line_segment([egui::pos2(c.x, c.y + gap), egui::pos2(c.x, c.y + gap + arm)], arm_stroke);
-    p.line_segment([egui::pos2(c.x - gap - arm, c.y), egui::pos2(c.x - gap, c.y)], arm_stroke);
-    p.line_segment([egui::pos2(c.x + gap, c.y), egui::pos2(c.x + gap + arm, c.y)], arm_stroke);
+    let arm_out = size * 0.44;
+    let arm_in = size * 0.12;
+    let s = egui::Stroke::new(2.5, a70);
+    p.line_segment([egui::pos2(c.x, c.y - arm_out), egui::pos2(c.x, c.y - arm_in)], s);
+    p.line_segment([egui::pos2(c.x, c.y + arm_in), egui::pos2(c.x, c.y + arm_out)], s);
+    p.line_segment([egui::pos2(c.x - arm_out, c.y), egui::pos2(c.x - arm_in, c.y)], s);
+    p.line_segment([egui::pos2(c.x + arm_in, c.y), egui::pos2(c.x + arm_out, c.y)], s);
 }
 
 fn generate_app_icon() -> egui::IconData {
