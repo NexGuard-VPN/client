@@ -326,7 +326,8 @@ fn lbl(t: &str) -> egui::RichText {
 
 impl eframe::App for VpnApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.viewport().close_requested()) {
+        let quit = self.tray.as_ref().map_or(false, |t| t.quit_requested);
+        if ctx.input(|i| i.viewport().close_requested()) && !quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
@@ -378,12 +379,23 @@ impl eframe::App for VpnApp {
 
         if let Some(ref mut tray) = self.tray {
             tray.tick();
+
+            if tray.quit_requested {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+
+            if tray.reconnect_after_disconnect && matches!(state, ConnectionState::Disconnected | ConnectionState::Error(_)) {
+                tray.reconnect_after_disconnect = false;
+                self.connect_selected();
+            }
         }
 
         let tray_server = self.selected_server.load(Ordering::Relaxed);
         if tray_server != self.selected.unwrap_or(usize::MAX) {
             if tray_server < self.profiles.len() {
                 self.selected = Some(tray_server);
+                self.sync_tray_servers();
             }
         }
 
@@ -393,8 +405,8 @@ impl eframe::App for VpnApp {
             }
         }
 
-        if matches!(state, ConnectionState::Connected) {
-            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        if matches!(state, ConnectionState::Connected | ConnectionState::Connecting) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
     }
 }

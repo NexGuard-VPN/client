@@ -26,6 +26,8 @@ pub struct NexTray {
     shutdown: Arc<AtomicBool>,
     connect_trigger: Arc<AtomicBool>,
     selected_server: Arc<AtomicUsize>,
+    pub quit_requested: bool,
+    pub reconnect_after_disconnect: bool,
 }
 
 impl NexTray {
@@ -97,6 +99,8 @@ impl NexTray {
             shutdown,
             connect_trigger,
             selected_server,
+            quit_requested: false,
+            reconnect_after_disconnect: false,
         })
     }
 
@@ -128,8 +132,7 @@ impl NexTray {
                 }
             } else if event.id == self.quit_id {
                 self.shutdown.store(true, Ordering::Relaxed);
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                std::process::exit(0);
+                self.quit_requested = true;
             } else {
                 for (item, idx) in &self.server_items {
                     if event.id == *item.id() {
@@ -137,8 +140,10 @@ impl NexTray {
                         let connected = self.status.lock().unwrap().is_some();
                         if connected {
                             self.shutdown.store(true, Ordering::Relaxed);
+                            self.reconnect_after_disconnect = true;
+                        } else {
+                            self.connect_trigger.store(true, Ordering::Relaxed);
                         }
-                        self.connect_trigger.store(true, Ordering::Relaxed);
                         break;
                     }
                 }
