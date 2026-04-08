@@ -51,6 +51,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux' && !matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev libgtk-3-dev libxdo-dev libayatana-appindicator3-dev pkg-config
+
       - name: Update Cargo.toml version
         shell: bash
         run: sed -i.bak "s/^version = .*/version = \"${{ needs.prepare.outputs.version }}\"/" Cargo.toml && rm -f Cargo.toml.bak
