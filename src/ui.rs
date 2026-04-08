@@ -716,99 +716,27 @@ fn fmt_uptime(s: u64) -> String {
     else { format!("{}h{}m", s / 3600, (s % 3600) / 60) }
 }
 
+fn logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    ctx.data(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new("ng_logo"))).unwrap_or_else(|| {
+        let png = include_bytes!("../assets/logo-64.png");
+        let img = image::load_from_memory(png).unwrap().to_rgba8();
+        let size = [img.width() as _, img.height() as _];
+        let pixels = img.into_raw();
+        let ci = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+        let tex = ctx.load_texture("logo", ci, egui::TextureOptions::LINEAR);
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("ng_logo"), tex.clone()));
+        tex
+    })
+}
+
 fn draw_logo(ui: &mut egui::Ui) {
-    let t = theme();
+    let tex = logo_texture(ui.ctx());
     let size = 40.0;
-    let half = size / 2.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    let p = ui.painter();
-    let c = rect.center();
-    let bg = egui::Rect::from_center_size(c, egui::vec2(size, size));
-    p.rect_filled(bg, cr(9), egui::Color32::from_rgb(9, 9, 11));
-    p.rect_stroke(bg, cr(9), egui::Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
-
-    let green = t.accent;
-    let a35 = egui::Color32::from_rgba_premultiplied(52, 211, 153, 90);
-    let a65 = egui::Color32::from_rgba_premultiplied(52, 211, 153, 165);
-    let a70 = egui::Color32::from_rgba_premultiplied(52, 211, 153, 180);
-
-    p.circle_stroke(c, half * 0.6875, egui::Stroke::new(2.5, a35));
-    p.circle_stroke(c, half * 0.40625, egui::Stroke::new(2.5, a65));
-    p.circle_filled(c, half * 0.1875, green);
-
-    let arm_out = half * 0.75;
-    let arm_in = half * 0.4375;
-    let s = egui::Stroke::new(2.2, a70);
-    p.line_segment([egui::pos2(c.x, c.y - arm_out), egui::pos2(c.x, c.y - arm_in)], s);
-    p.line_segment([egui::pos2(c.x, c.y + arm_in), egui::pos2(c.x, c.y + arm_out)], s);
-    p.line_segment([egui::pos2(c.x - arm_out, c.y), egui::pos2(c.x - arm_in, c.y)], s);
-    p.line_segment([egui::pos2(c.x + arm_in, c.y), egui::pos2(c.x + arm_out, c.y)], s);
+    ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(size, size)));
 }
 
 fn generate_app_icon() -> egui::IconData {
-    const SZ: usize = 128;
-    let mut rgba = vec![0u8; SZ * SZ * 4];
-    let cx = SZ as f32 / 2.0;
-    let cy = SZ as f32 / 2.0;
-    let half = SZ as f32 / 2.0;
-    let corner = (14.0 / 32.0) * half;
-
-    for y in 0..SZ {
-        for x in 0..SZ {
-            let dx = (x as f32 - cx).abs();
-            let dy = (y as f32 - cy).abs();
-            let inside = if dx > cx - corner && dy > cy - corner {
-                let a = dx - (cx - corner);
-                let b = dy - (cy - corner);
-                a * a + b * b <= corner * corner
-            } else {
-                dx <= cx && dy <= cy
-            };
-            if inside {
-                let i = (y * SZ + x) * 4;
-                rgba[i] = 9; rgba[i + 1] = 9; rgba[i + 2] = 11; rgba[i + 3] = 255;
-            }
-        }
-    }
-
-    let (r, g, b): (u8, u8, u8) = (52, 211, 153);
-    let outer_r = half * 0.6875;
-    let inner_r = half * 0.40625;
-    let rings: &[(f32, f32, u8)] = &[(outer_r, 3.5, 90), (inner_r, 3.5, 165)];
-    let center_r = half * 0.1875;
-    let arm_w = 3.5f32;
-    let arm_gap = half * 0.4375;
-    let arm_end = half * 0.75;
-
-    for y in 0..SZ {
-        for x in 0..SZ {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let i = (y * SZ + x) * 4;
-            if rgba[i + 3] == 0 { continue; }
-
-            if dist <= center_r {
-                rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b;
-                continue;
-            }
-            for &(ring_r, w, a) in rings {
-                if (dist - ring_r).abs() <= w {
-                    rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = a;
-                    break;
-                }
-            }
-            let arms = [
-                (dx.abs() <= arm_w && dy < -arm_gap && dy.abs() < arm_end),
-                (dx.abs() <= arm_w && dy > arm_gap && dy.abs() < arm_end),
-                (dy.abs() <= arm_w && dx < -arm_gap && dx.abs() < arm_end),
-                (dy.abs() <= arm_w && dx > arm_gap && dx.abs() < arm_end),
-            ];
-            if arms.iter().any(|&a| a) && rgba[i + 3] == 255 {
-                rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = 180;
-            }
-        }
-    }
-
-    egui::IconData { rgba, width: SZ as u32, height: SZ as u32 }
+    let png = include_bytes!("../assets/logo-128.png");
+    let img = image::load_from_memory(png).unwrap().to_rgba8();
+    egui::IconData { width: img.width(), height: img.height(), rgba: img.into_raw() }
 }

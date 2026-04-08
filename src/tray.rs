@@ -179,50 +179,19 @@ impl NexTray {
 
 fn make_icon(connected: bool) -> Icon {
     let size = ICON_SIZE as usize;
-    let mut rgba = vec![0u8; size * size * 4];
-    let cx = size as f32 / 2.0;
-    let cy = size as f32 / 2.0;
+    let png = include_bytes!("../assets/logo-64.png");
+    let img = image::load_from_memory(png).unwrap().to_rgba8();
+    let resized = image::imageops::resize(&img, size as u32, size as u32, image::imageops::FilterType::Lanczos3);
+    let mut rgba = resized.into_raw();
 
-    let (r, g, b) = if connected { (52, 211, 153) } else { (113, 113, 122) };
-    let half = size as f32 / 2.0;
-
-    let rings: &[(f32, f32, u8)] = &[
-        (half * 0.6875, 2.0, if connected { 90 } else { 50 }),
-        (half * 0.40625, 2.0, if connected { 165 } else { 80 }),
-    ];
-    let center_r = half * 0.1875;
-    let arm_w = 1.8f32;
-    let arm_gap = half * 0.4375;
-    let arm_end = half * 0.75;
-
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let i = (y * size + x) * 4;
-
-            if dist <= center_r {
-                rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = 255;
-                continue;
-            }
-
-            for &(ring_r, width, alpha) in rings {
-                if (dist - ring_r).abs() <= width {
-                    rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = alpha;
-                    break;
-                }
-            }
-
-            let arms = [
-                (dx.abs() <= arm_w && dy < -arm_gap && dy.abs() < arm_end),
-                (dx.abs() <= arm_w && dy > arm_gap && dy.abs() < arm_end),
-                (dy.abs() <= arm_w && dx < -arm_gap && dx.abs() < arm_end),
-                (dy.abs() <= arm_w && dx > arm_gap && dx.abs() < arm_end),
-            ];
-            if arms.iter().any(|&a| a) && rgba[i + 3] == 0 {
-                rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b;
-                rgba[i + 3] = if connected { 180 } else { 70 };
+    if !connected {
+        for i in (0..rgba.len()).step_by(4) {
+            if rgba[i + 3] > 0 {
+                let lum = (rgba[i] as u16 + rgba[i + 1] as u16 + rgba[i + 2] as u16) / 3;
+                rgba[i] = lum as u8;
+                rgba[i + 1] = lum as u8;
+                rgba[i + 2] = lum as u8;
+                rgba[i + 3] = rgba[i + 3] / 2;
             }
         }
     }
