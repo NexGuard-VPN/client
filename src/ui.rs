@@ -327,9 +327,14 @@ fn lbl(t: &str) -> egui::RichText {
 impl eframe::App for VpnApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let quit = self.tray.as_ref().map_or(false, |t| t.quit_requested);
-        if ctx.input(|i| i.viewport().close_requested()) && !quit {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if quit {
+                self.disconnect();
+                return;
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
         }
 
         let state = self.state.lock().unwrap().clone();
@@ -385,8 +390,15 @@ impl eframe::App for VpnApp {
             tray.tick();
 
             if tray.quit_requested {
+                self.disconnect();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
+            }
+
+            if tray.show_requested {
+                tray.show_requested = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
 
             if tray.reconnect_after_disconnect && matches!(state, ConnectionState::Disconnected | ConnectionState::Error(_)) {
@@ -398,13 +410,25 @@ impl eframe::App for VpnApp {
         let tray_server = self.selected_server.load(Ordering::Relaxed);
         if tray_server != self.selected.unwrap_or(usize::MAX) {
             if tray_server < self.profiles.len() {
+                let old_selected = self.selected;
                 self.selected = Some(tray_server);
                 self.sync_tray_servers();
+                if matches!(state, ConnectionState::Connected) && old_selected != self.selected {
+                    self.disconnect();
+                    if let Some(ref mut tray) = self.tray {
+                        tray.reconnect_after_disconnect = true;
+                    }
+                }
             }
         }
 
         if self.connect_trigger.swap(false, Ordering::Relaxed) {
-            if matches!(state, ConnectionState::Disconnected | ConnectionState::Error(_)) {
+            if matches!(state, ConnectionState::Connected) {
+                self.disconnect();
+                if let Some(ref mut tray) = self.tray {
+                    tray.reconnect_after_disconnect = true;
+                }
+            } else if matches!(state, ConnectionState::Disconnected | ConnectionState::Error(_)) {
                 self.connect_selected();
             }
         }

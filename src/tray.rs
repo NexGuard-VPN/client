@@ -18,6 +18,7 @@ pub struct NexTray {
     server_items: Vec<(MenuItem, usize)>,
     servers_sub: Submenu,
     toggle_id: tray_icon::menu::MenuId,
+    show_id: tray_icon::menu::MenuId,
     quit_id: tray_icon::menu::MenuId,
     icon_on: Icon,
     icon_off: Icon,
@@ -28,6 +29,7 @@ pub struct NexTray {
     selected_server: Arc<AtomicUsize>,
     pub quit_requested: bool,
     pub reconnect_after_disconnect: bool,
+    pub show_requested: bool,
 }
 
 impl NexTray {
@@ -45,6 +47,7 @@ impl NexTray {
         let servers_sub = Submenu::new("Servers", true);
         let item_ip = MenuItem::new("", false, None);
         let item_tx_rx = MenuItem::new("", false, None);
+        let item_show = MenuItem::new("Show Window", true, None);
         let item_quit = MenuItem::new("Quit NexGuard", true, None);
 
         let mut server_items = Vec::new();
@@ -67,6 +70,7 @@ impl NexTray {
         let _ = menu.append(&item_ip);
         let _ = menu.append(&item_tx_rx);
         let _ = menu.append(&PredefinedMenuItem::separator());
+        let _ = menu.append(&item_show);
         let _ = menu.append(&item_quit);
 
         let icon_off = make_icon(false);
@@ -80,6 +84,7 @@ impl NexTray {
             .ok()?;
 
         let toggle_id = item_toggle.id().clone();
+        let show_id = item_show.id().clone();
         let quit_id = item_quit.id().clone();
 
         Some(Self {
@@ -91,6 +96,7 @@ impl NexTray {
             server_items,
             servers_sub,
             toggle_id,
+            show_id,
             quit_id,
             icon_on,
             icon_off,
@@ -101,6 +107,7 @@ impl NexTray {
             selected_server,
             quit_requested: false,
             reconnect_after_disconnect: false,
+            show_requested: false,
         })
     }
 
@@ -130,6 +137,8 @@ impl NexTray {
                 } else {
                     self.connect_trigger.store(true, Ordering::Relaxed);
                 }
+            } else if event.id == self.show_id {
+                self.show_requested = true;
             } else if event.id == self.quit_id {
                 self.shutdown.store(true, Ordering::Relaxed);
                 self.quit_requested = true;
