@@ -342,18 +342,22 @@ impl eframe::App for VpnApp {
                     draw_header_connected(ui, self);
                     ui.add_space(6.0);
                     draw_connected(ui, &status);
+                    ui.add_space(6.0);
+                    draw_server_view(ui, self);
                 }
                 ConnectionState::Connecting => {
                     let t = theme();
                     draw_header(ui);
-                    let is_disconnecting = self.shutdown.load(Ordering::Relaxed);
-                    let msg = if is_disconnecting { "Disconnecting..." } else { "Connecting..." };
                     ui.vertical_centered(|ui| {
-                        ui.add_space(40.0);
+                        ui.add_space(20.0);
                         ui.spinner();
-                        ui.add_space(8.0);
+                        ui.add_space(4.0);
+                        let is_disconnecting = self.shutdown.load(Ordering::Relaxed);
+                        let msg = if is_disconnecting { "Disconnecting..." } else { "Connecting..." };
                         ui.label(egui::RichText::new(msg).size(14.0).color(t.warning));
                     });
+                    ui.add_space(6.0);
+                    draw_server_view(ui, self);
                     ctx.request_repaint_after(std::time::Duration::from_millis(200));
                 }
                 ConnectionState::Error(ref msg) => {
@@ -526,16 +530,22 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
     }
 
     let t = theme();
-    ui.add_space(10.0);
-    ui.vertical_centered(|ui| {
-        let can_connect = app.selected.is_some() && !app.profiles.is_empty();
-        let btn = egui::Button::new(egui::RichText::new("Connect").size(14.0).strong().color(t.text))
-            .fill(if can_connect { t.accent } else { t.surface_hover })
-            .min_size(egui::vec2(200.0, 40.0));
-        if ui.add_enabled(can_connect, btn).clicked() {
-            app.connect_selected();
-        }
-    });
+    let current_state = app.state.lock().unwrap().clone();
+    let is_connected = matches!(current_state, ConnectionState::Connected);
+    let is_connecting = matches!(current_state, ConnectionState::Connecting);
+
+    if !is_connected && !is_connecting {
+        ui.add_space(10.0);
+        ui.vertical_centered(|ui| {
+            let can_connect = app.selected.is_some() && !app.profiles.is_empty();
+            let btn = egui::Button::new(egui::RichText::new("Connect").size(14.0).strong().color(t.text))
+                .fill(if can_connect { t.accent } else { t.surface_hover })
+                .min_size(egui::vec2(200.0, 40.0));
+            if ui.add_enabled(can_connect, btn).clicked() {
+                app.connect_selected();
+            }
+        });
+    }
 }
 
 fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
