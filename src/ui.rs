@@ -87,20 +87,26 @@ impl VpnApp {
             let mut join_url: Option<String> = None;
 
             if server.is_empty() && !profile.token.is_empty() {
-                if let Some(info) = crate::api::fetch_connect_info(&profile.token) {
-                    join_url = info.join_url;
-                    if let Some(s) = info.server {
-                        server = s;
-                    } else if let Some(r) = info.relay {
-                        relay = Some(r.clone());
-                        relay_name = info.relay_name;
-                        server = "relay".to_string();
+                match crate::api::fetch_connect_info(&profile.token) {
+                    Some(info) => {
+                        join_url = info.join_url;
+                        if let Some(s) = info.server {
+                            server = s;
+                        } else if let Some(r) = info.relay {
+                            relay = Some(r.clone());
+                            relay_name = info.relay_name;
+                            server = "relay".to_string();
+                        }
+                    }
+                    None => {
+                        *state.lock().unwrap() = ConnectionState::Error("Cannot reach NexGuard API. Check your internet connection.".into());
+                        return;
                     }
                 }
             }
 
             if server.is_empty() && join_url.is_none() {
-                *state.lock().unwrap() = ConnectionState::Error("Could not resolve server".into());
+                *state.lock().unwrap() = ConnectionState::Error("Server not found. Check your token.".into());
                 return;
             }
             if server.is_empty() { server = "api-proxy".to_string(); }
@@ -494,7 +500,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             if ui.add(egui::Button::new(egui::RichText::new("+ Add").size(12.0).color(t.accent)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, t.accent))).clicked() {
                 app.view = View::AddServer;
             }
-            if ui.add(egui::Button::new(egui::RichText::new("Deploy your own server").size(11.0).color(t.text_muted)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new("Deploy server ↗").size(11.0).color(t.accent)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
                 let _ = open::that("https://nexguard.sh/deploy");
             }
         });
