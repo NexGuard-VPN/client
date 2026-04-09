@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" width="80" height="80" alt="NexGuard">
+  <img src="assets/logo-128.png" width="80" height="80" alt="NexGuard">
 </p>
 
 <h1 align="center">NexGuard</h1>
