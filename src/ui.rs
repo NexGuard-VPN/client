@@ -516,27 +516,33 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             let fill = if is_selected { t.surface_hover } else { t.surface };
             let stroke_color = if is_selected { t.accent } else { t.border };
 
-            ui.horizontal(|ui| {
-                let select_text = format!("{} {}", if is_selected { "◉" } else { "○" }, &profile.name);
-                let select_btn = ui.add(
-                    egui::Button::new(egui::RichText::new(&select_text).size(13.0).strong().color(
-                        if is_selected { t.accent } else { t.text }
-                    ))
-                    .fill(fill)
-                    .corner_radius(cr(12))
-                    .stroke(egui::Stroke::new(if is_selected { 1.5 } else { 1.0 }, stroke_color))
-                    .min_size(egui::vec2(ui.available_width() - 40.0, 44.0))
-                );
-                if select_btn.clicked() {
-                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
-                }
-
-                if ui.add(egui::Button::new(
-                    egui::RichText::new("🗑").size(13.0).color(t.danger)
-                ).fill(t.surface).corner_radius(cr(10)).min_size(egui::vec2(36.0, 44.0))).clicked() {
-                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_idx"), i));
-                }
-            });
+            let card = egui::Frame::default()
+                .fill(fill)
+                .corner_radius(cr(12))
+                .inner_margin(14.0)
+                .stroke(egui::Stroke::new(if is_selected { 1.5 } else { 1.0 }, stroke_color))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let dot = if is_selected { "●" } else { "○" };
+                        let dot_color = if is_selected { t.accent } else { t.text_muted };
+                        ui.label(egui::RichText::new(dot).size(12.0).color(dot_color));
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(&profile.name).size(13.0).strong().color(t.text));
+                            let desc = if profile.server.is_empty() { "Token-based" } else { &profile.server };
+                            ui.label(egui::RichText::new(desc).size(11.0).color(t.text_muted));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(
+                                egui::RichText::new("✕").size(12.0).color(t.text_muted)
+                            ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
+                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_idx"), i));
+                            }
+                        });
+                    });
+                });
+            if card.response.interact(egui::Sense::click()).clicked() {
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
+            }
 
             ui.add_space(3.0);
         }
