@@ -494,6 +494,9 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             if ui.add(egui::Button::new(egui::RichText::new("+ Add").size(12.0).color(t.accent)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, t.accent))).clicked() {
                 app.view = View::AddServer;
             }
+            if ui.add(egui::Button::new(egui::RichText::new("Deploy your own server").size(11.0).color(t.text_muted)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
+                let _ = open::that("https://nexguard.sh/deploy");
+            }
         });
     });
     ui.add_space(6.0);
