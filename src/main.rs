@@ -20,6 +20,15 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
+    if args.iter().any(|a| a == "--install-service") {
+        install_service(&args);
+        return;
+    }
+    if args.iter().any(|a| a == "--uninstall-service") {
+        uninstall_service();
+        return;
+    }
+
     let cli_mode = args.iter().any(|a| a == "--cli" || a == "--no-gui");
     let init_token = arg_value(&args, "--token").or_else(|| arg_value(&args, "-t"));
     let init_name = arg_value(&args, "--name").or_else(|| arg_value(&args, "-n"));
@@ -642,4 +651,102 @@ fn get_hostname() -> String {
         if let Ok(h) = std::env::var("COMPUTERNAME") { return h; }
     }
     "device".to_string()
+}
+
+fn install_service(args: &[String]) {
+    let exe = std::env::current_exe().expect("current exe");
+    let exe_path = exe.to_str().expect("exe path");
+
+    let token = arg_value(args, "--token").or_else(|| arg_value(args, "-t"));
+    let name = arg_value(args, "--name").or_else(|| arg_value(args, "-n"));
+    let internet = args.iter().any(|a| a == "--internet" || a == "--exit");
+
+    let mut cli_args = vec!["--cli".to_string()];
+    if let Some(t) = &token {
+        cli_args.push("--token".to_string());
+        cli_args.push(t.clone());
+    }
+    if let Some(n) = &name {
+        cli_args.push("--name".to_string());
+        cli_args.push(n.clone());
+    }
+    if internet {
+        cli_args.push("--internet".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>sh.nexguard.vpn</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>{}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/nexguard.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/nexguard.log</string>
+</dict>
+</plist>"#,
+            exe_path,
+            cli_args.iter().map(|a| format!("\n        <string>{}</string>", a)).collect::<String>()
+        );
+
+        let path = "/Library/LaunchDaemons/sh.nexguard.vpn.plist";
+        std::fs::write(path, plist).expect("write plist");
+        let _ = std::process::Command::new("launchctl").args(["load", "-w", path]).status();
+        eprintln!("[nexguard] service installed — auto-starts on boot");
+        eprintln!("[nexguard] to uninstall: sudo nexguard --uninstall-service");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let unit = format!(r#"[Unit]
+Description=NexGuard VPN Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={} {}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+"#, exe_path, cli_args.join(" "));
+
+        let path = "/etc/systemd/system/nexguard.service";
+        std::fs::write(path, unit).expect("write service");
+        let _ = std::process::Command::new("systemctl").args(["daemon-reload"]).status();
+        let _ = std::process::Command::new("systemctl").args(["enable", "--now", "nexguard"]).status();
+        eprintln!("[nexguard] service installed — auto-starts on boot");
+        eprintln!("[nexguard] to uninstall: sudo nexguard --uninstall-service");
+    }
+}
+
+fn uninstall_service() {
+    #[cfg(target_os = "macos")]
+    {
+        let path = "/Library/LaunchDaemons/sh.nexguard.vpn.plist";
+        let _ = std::process::Command::new("launchctl").args(["unload", "-w", path]).status();
+        let _ = std::fs::remove_file(path);
+        eprintln!("[nexguard] service removed");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("systemctl").args(["disable", "--now", "nexguard"]).status();
+        let _ = std::fs::remove_file("/etc/systemd/system/nexguard.service");
+        let _ = std::process::Command::new("systemctl").args(["daemon-reload"]).status();
+        eprintln!("[nexguard] service removed");
+    }
 }
