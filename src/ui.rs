@@ -507,7 +507,8 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             let fill = if is_selected { t.surface_hover } else { t.surface };
             let stroke_color = if is_selected { t.accent } else { t.border };
 
-            egui::Frame::default()
+            let del_clicked = std::cell::Cell::new(false);
+            let frame_resp = egui::Frame::default()
                 .fill(fill)
                 .corner_radius(cr(12))
                 .inner_margin(14.0)
@@ -516,32 +517,27 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                     ui.horizontal(|ui| {
                         let radio_icon = if is_selected { "◉" } else { "○" };
                         let radio_color = if is_selected { t.accent } else { t.text_muted };
-                        let select_btn = ui.add(egui::Button::new(
-                            egui::RichText::new(radio_icon).size(14.0).color(radio_color)
-                        ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE));
-                        if select_btn.clicked() && !is_selected {
-                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
-                        }
+                        ui.label(egui::RichText::new(radio_icon).size(14.0).color(radio_color));
                         ui.vertical(|ui| {
-                            let name_btn = ui.add(egui::Button::new(
-                                egui::RichText::new(&profile.name).size(13.0).strong().color(t.text)
-                            ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE));
-                            if name_btn.clicked() && !is_selected {
-                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
-                            }
+                            ui.label(egui::RichText::new(&profile.name).size(13.0).strong().color(t.text));
                             let desc = if profile.server.is_empty() { "Token-based" } else { &profile.server };
                             ui.label(egui::RichText::new(desc).size(11.0).color(t.text_muted));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let del_btn = ui.add(egui::Button::new(
+                            if ui.add(egui::Button::new(
                                 egui::RichText::new("🗑").size(14.0).color(t.danger)
-                            ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE));
-                            if del_btn.clicked() {
-                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_idx"), i));
+                            ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
+                                del_clicked.set(true);
                             }
                         });
                     });
                 });
+
+            if del_clicked.get() {
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_idx"), i));
+            } else if frame_resp.response.interact(egui::Sense::click()).clicked() {
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
+            }
 
             ui.add_space(3.0);
         }
