@@ -416,25 +416,18 @@ impl eframe::App for VpnApp {
         let tray_server = self.selected_server.load(Ordering::Relaxed);
         if tray_server != self.selected.unwrap_or(usize::MAX) {
             if tray_server < self.profiles.len() {
-                let old_selected = self.selected;
                 self.selected = Some(tray_server);
                 self.sync_tray_servers();
-                if matches!(state, ConnectionState::Connected) && old_selected != self.selected {
-                    self.disconnect();
-                    if let Some(ref mut tray) = self.tray {
-                        tray.reconnect_after_disconnect = true;
-                    }
-                }
             }
         }
 
         if self.connect_trigger.swap(false, Ordering::Relaxed) {
-            if matches!(state, ConnectionState::Connected) {
+            if matches!(state, ConnectionState::Connected | ConnectionState::Connecting) {
                 self.disconnect();
                 if let Some(ref mut tray) = self.tray {
                     tray.reconnect_after_disconnect = true;
                 }
-            } else if matches!(state, ConnectionState::Disconnected | ConnectionState::Error(_)) {
+            } else {
                 self.connect_selected();
             }
         }

@@ -146,13 +146,7 @@ impl NexTray {
                 for (item, idx) in &self.server_items {
                     if event.id == *item.id() {
                         self.selected_server.store(*idx, Ordering::Relaxed);
-                        let connected = self.status.lock().unwrap().is_some();
-                        if connected {
-                            self.shutdown.store(true, Ordering::Relaxed);
-                            self.reconnect_after_disconnect = true;
-                        } else {
-                            self.connect_trigger.store(true, Ordering::Relaxed);
-                        }
+                        self.connect_trigger.store(true, Ordering::Relaxed);
                         break;
                     }
                 }
