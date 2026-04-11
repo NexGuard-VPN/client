@@ -24,6 +24,7 @@ struct VpnApp {
     new_server: String,
     new_token: String,
     new_internet: bool,
+    new_share_lan: bool,
     show_token: bool,
     state: Arc<Mutex<ConnectionState>>,
     status: Arc<Mutex<Option<VpnStatus>>>,
@@ -56,6 +57,7 @@ impl Default for VpnApp {
             new_server: String::new(),
             new_token: String::new(),
             new_internet: true,
+            new_share_lan: false,
             show_token: false,
             state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
             status: Arc::new(Mutex::new(None)),
@@ -115,6 +117,7 @@ impl VpnApp {
                 server,
                 token: profile.token.clone(),
                 internet: profile.internet,
+                share_lan: profile.share_lan,
                 relay,
                 relay_name,
                 join_url,
@@ -160,6 +163,7 @@ impl VpnApp {
             server: self.new_server.clone(),
             token: self.new_token.clone(),
             internet: self.new_internet,
+            share_lan: self.new_share_lan,
         };
         crate::profiles::add(&mut self.profiles, profile);
         self.selected = Some(self.profiles.len() - 1);
@@ -168,6 +172,7 @@ impl VpnApp {
         self.new_server.clear();
         self.new_token.clear();
         self.new_internet = true;
+        self.new_share_lan = false;
         self.view = View::ServerList;
     }
 
@@ -229,6 +234,7 @@ pub fn run_gui_with(token: Option<String>, name: Option<String>, internet: bool)
                 server: String::new(),
                 token: t,
                 internet,
+                share_lan: false,
             };
             crate::profiles::add(&mut app.profiles, profile);
             app.selected = Some(app.profiles.len() - 1);
@@ -597,6 +603,7 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
 
         ui.add_space(8.0);
         ui.checkbox(&mut app.new_internet, "Route all traffic through VPN");
+        ui.checkbox(&mut app.new_share_lan, "Allow other peers to access my local network");
     });
 
     ui.add_space(10.0);

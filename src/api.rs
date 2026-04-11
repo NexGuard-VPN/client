@@ -260,13 +260,23 @@ pub struct ConnectInfo {
 }
 
 pub fn join_via_api(url: &str, token: &str, pub_key: &str, name: &str) -> Result<JoinResponse, String> {
+    join_via_api_with_routes(url, token, pub_key, name, &[])
+}
+
+pub fn join_via_api_with_routes(url: &str, token: &str, pub_key: &str, name: &str, advertise_routes: &[String]) -> Result<JoinResponse, String> {
     let ver = env!("CARGO_PKG_VERSION");
     let fp = crate::fingerprint::collect();
     let device_id_path = crate::dirs_next().map(|d| d.join("device-hwid")).unwrap_or_default();
     let saved_device_id = std::fs::read_to_string(&device_id_path).unwrap_or_default().trim().to_string();
+    let routes_json = if advertise_routes.is_empty() {
+        String::new()
+    } else {
+        let routes: Vec<String> = advertise_routes.iter().map(|r| format!(r#""{}""#, r)).collect();
+        format!(r#","advertise_routes":[{}]"#, routes.join(","))
+    };
     let body = format!(
-        r#"{{"public_key":"{}","name":"{}","version":"{}","fingerprint":"{}","device_id":"{}"}}"#,
-        pub_key, name, ver, fp.replace('"', ""), saved_device_id
+        r#"{{"public_key":"{}","name":"{}","version":"{}","fingerprint":"{}","device_id":"{}"{}}}"#,
+        pub_key, name, ver, fp.replace('"', ""), saved_device_id, routes_json
     );
 
     let parsed = url.strip_prefix("https://").ok_or("join_url must be https")?;

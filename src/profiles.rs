@@ -7,6 +7,8 @@ pub struct ServerProfile {
     pub server: String,
     pub token: String,
     pub internet: bool,
+    #[serde(default)]
+    pub share_lan: bool,
 }
 
 fn profiles_path() -> PathBuf {
@@ -55,6 +57,7 @@ pub fn add(profiles: &mut Vec<ServerProfile>, profile: ServerProfile) {
         existing.token = profile.token;
         existing.name = profile.name;
         existing.internet = profile.internet;
+        existing.share_lan = profile.share_lan;
     } else {
         profiles.push(profile);
     }

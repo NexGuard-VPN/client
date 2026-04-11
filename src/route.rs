@@ -439,3 +439,60 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), String> {
         Err(format!("{} {} failed ({}) {}", cmd, args.join(" "), output.status, stderr.trim()))
     }
 }
+
+pub fn detect_local_subnets() -> Vec<String> {
+    let mut subnets = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("route").args(["-n", "get", "default"]).output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            let mut iface = String::new();
+            for line in s.lines() {
+                if let Some(rest) = line.trim().strip_prefix("interface:") {
+                    iface = rest.trim().to_string();
+                }
+            }
+            if !iface.is_empty() {
+                if let Ok(out) = std::process::Command::new("ifconfig").arg(&iface).output() {
+                    let s = String::from_utf8_lossy(&out.stdout);
+                    for line in s.lines() {
+                        let line = line.trim();
+                        if let Some(rest) = line.strip_prefix("inet ") {
+                            let parts: Vec<&str> = rest.split_whitespace().collect();
+                            if parts.len() >= 4 && parts[2] == "netmask" {
+                                let ip = parts[0];
+                                let netmask = parts[3].trim_start_matches("0x");
+                                if let Ok(mask) = u32::from_str_radix(netmask, 16) {
+                                    let prefix = mask.count_ones();
+                                    if let Ok(ip_addr) = ip.parse::<std::net::Ipv4Addr>() {
+                                        let net_u32 = u32::from(ip_addr) & mask;
+                                        let net = std::net::Ipv4Addr::from(net_u32);
+                                        if !ip_addr.is_loopback() {
+                                            subnets.push(format!("{}/{}", net, prefix));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = std::process::Command::new("ip").args(["-4", "route", "show"]).output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            for line in s.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 && parts[1] == "dev" && !parts[0].starts_with("default") && !parts[0].starts_with("0.0.0.0") {
+                    if parts[0].contains("/") && !parts[0].starts_with("127.") && !parts[0].starts_with("100.") {
+                        subnets.push(parts[0].to_string());
+                    }
+                }
+            }
+        }
+    }
+    subnets.into_iter().take(3).collect()
+}
+

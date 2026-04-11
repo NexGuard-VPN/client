@@ -20,6 +20,7 @@ pub struct VpnConfig {
     pub relay: Option<String>,
     pub relay_name: Option<String>,
     pub join_url: Option<String>,
+    pub share_lan: bool,
 }
 
 impl Default for VpnConfig {
@@ -36,6 +37,7 @@ impl Default for VpnConfig {
             relay: None,
             relay_name: None,
             join_url: None,
+            share_lan: false,
         }
     }
 }
@@ -92,15 +94,22 @@ pub fn connect(
         client_name = crate::generate_client_name();
     }
 
-    let join_resp = if let Some(ref url) = config.join_url {
-        api::join_via_api(url, &config.token, &pub_key_b64, &client_name)?
+    let advertise_routes: Vec<String> = if config.share_lan {
+        crate::route::detect_local_subnets()
     } else {
-        api::try_join_server(
+        Vec::new()
+    };
+
+    let join_resp = if let Some(ref url) = config.join_url {
+        api::join_via_api_with_routes(url, &config.token, &pub_key_b64, &client_name, &advertise_routes)?
+    } else {
+        api::try_join_server_with_routes(
             &config.server,
             config.control_port,
             &config.token,
             &pub_key_b64,
             &client_name,
+            &advertise_routes,
         )?
     };
 
