@@ -63,7 +63,7 @@ impl Default for VpnApp {
             status: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
             connect_trigger: Arc::new(AtomicBool::new(false)),
-            selected_server: Arc::new(AtomicUsize::new(0)),
+            selected_server: Arc::new(AtomicUsize::new(usize::MAX)),
             tray: None,
             update_info,
             updating: Arc::new(AtomicBool::new(false)),
@@ -420,7 +420,8 @@ impl eframe::App for VpnApp {
         }
 
         let tray_server = self.selected_server.load(Ordering::Relaxed);
-        if tray_server != self.selected.unwrap_or(usize::MAX) {
+        if tray_server != usize::MAX {
+            self.selected_server.store(usize::MAX, Ordering::Relaxed);
             if tray_server < self.profiles.len() {
                 self.selected = Some(tray_server);
                 self.sync_tray_servers();
@@ -438,9 +439,12 @@ impl eframe::App for VpnApp {
             }
         }
 
-        if matches!(state, ConnectionState::Connected | ConnectionState::Connecting) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
-        }
+        let repaint_interval = if matches!(state, ConnectionState::Connected | ConnectionState::Connecting) {
+            200
+        } else {
+            500
+        };
+        ctx.request_repaint_after(std::time::Duration::from_millis(repaint_interval));
     }
 }
 
@@ -539,7 +543,9 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                         });
                     });
                 });
-            if card.response.interact(egui::Sense::click()).clicked() {
+            let card_rect = card.response.rect;
+            let card_id = egui::Id::new(("server_card", i));
+            if ui.interact(card_rect, card_id, egui::Sense::click()).clicked() {
                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
             }
 
