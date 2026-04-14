@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::net::{SocketAddr, UdpSocket};
@@ -130,7 +131,7 @@ impl MeshManager {
             let last_rx = peer.last_direct_rx.lock().unwrap().elapsed().as_secs();
             if last_rx > DIRECT_TIMEOUT_SECS && peer.direct_ok.load(Ordering::Relaxed) {
                 peer.direct_ok.store(false, Ordering::Relaxed);
-                eprintln!("[mesh] peer {} direct connection lost, using server relay",
+                let _ = writeln!(std::io::stderr(), "[mesh] peer {} direct connection lost, using server relay",
                     &peer.public_key_b64[..8]);
             }
 
@@ -206,7 +207,7 @@ impl MeshManager {
                 last_probe: Mutex::new(now - std::time::Duration::from_secs(PROBE_INTERVAL_SECS)),
             });
 
-            eprintln!("[mesh] added peer {} endpoint={:?}",
+            let _ = writeln!(std::io::stderr(), "[mesh] added peer {} endpoint={:?}",
                 &mp.public_key[..8], new_ep);
         }
     }

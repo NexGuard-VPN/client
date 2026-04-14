@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::net::Ipv4Addr;
 
 pub struct ExitRouteState {
@@ -60,7 +61,7 @@ impl Drop for ExitRouteState {
 }
 
 pub fn emergency_cleanup(tun_name: &str) {
-    eprintln!("[vpn-client] emergency route cleanup for {}", tun_name);
+    let _ = writeln!(std::io::stderr(), "[vpn-client] emergency route cleanup for {}", tun_name);
     remove_default_via_tun(tun_name);
     remove_default_v6_via_tun(tun_name);
     cleanup_policy_routing();
@@ -342,17 +343,17 @@ pub struct KillSwitch {
 impl KillSwitch {
     pub fn activate(tun_name: &str, server_ips: &[&str]) -> Self {
         if let Err(e) = activate_kill_switch(tun_name, server_ips) {
-            eprintln!("[vpn-client] kill switch failed: {}", e);
+            let _ = writeln!(std::io::stderr(), "[vpn-client] kill switch failed: {}", e);
             return Self { enabled: false };
         }
-        eprintln!("[vpn-client] kill switch enabled");
+        let _ = writeln!(std::io::stderr(), "[vpn-client] kill switch enabled");
         Self { enabled: true }
     }
 
     pub fn deactivate(&self) {
         if self.enabled {
             deactivate_kill_switch();
-            eprintln!("[vpn-client] kill switch disabled");
+            let _ = writeln!(std::io::stderr(), "[vpn-client] kill switch disabled");
         }
     }
 }

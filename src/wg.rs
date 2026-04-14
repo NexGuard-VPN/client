@@ -47,13 +47,14 @@ pub fn connect_relay(
     let conn = rustls::ClientConnection::new(Arc::new(config), sni)
         .map_err(|e| format!("tls: {}", e))?;
 
-    let socket_addr: SocketAddr = relay_addr.parse().unwrap_or_else(|_| {
+    let socket_addr: SocketAddr = {
         use std::net::ToSocketAddrs;
-        relay_addr.to_socket_addrs()
-            .ok()
-            .and_then(|mut addrs| addrs.next())
-            .unwrap_or_else(|| format!("{}:443", relay_addr).to_socket_addrs().ok().and_then(|mut a| a.next()).expect("resolve relay"))
-    });
+        relay_addr.parse().or_else(|_|
+            relay_addr.to_socket_addrs().map_err(|e| format!("{}", e)).and_then(|mut a| a.next().ok_or_else(|| "no address".into()))
+        ).or_else(|_: String|
+            format!("{}:443", relay_addr).to_socket_addrs().map_err(|e| format!("{}", e)).and_then(|mut a| a.next().ok_or_else(|| "no address".into()))
+        ).map_err(|e| format!("resolve relay {}: {}", relay_addr, e))?
+    };
     let tcp = TcpStream::connect_timeout(&socket_addr, TLS_CONNECT_TIMEOUT)
         .map_err(|e| format!("connect {}: {}", relay_addr, e))?;
     tcp.set_nodelay(true).ok();
