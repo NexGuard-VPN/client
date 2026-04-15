@@ -536,7 +536,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.add(egui::Button::new(
-                                egui::RichText::new("✕").size(12.0).color(t.text_muted)
+                                egui::RichText::new("🗑").size(14.0).color(t.danger)
                             ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
                                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_idx"), i));
                             }
@@ -553,14 +553,19 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
         }
     }
 
+    let has_delete = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("del_idx"))).is_some();
     if let Some(del) = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("del_idx"))) {
         ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("del_idx")));
         app.selected = Some(del);
         app.remove_selected();
     }
-    if let Some(sel) = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("sel_idx"))) {
+    if !has_delete {
+        if let Some(sel) = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("sel_idx"))) {
+            ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("sel_idx")));
+            app.selected = Some(sel);
+        }
+    } else {
         ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("sel_idx")));
-        app.selected = Some(sel);
     }
 
     let t = theme();
