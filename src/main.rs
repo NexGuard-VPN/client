@@ -661,6 +661,20 @@ fn install_service(args: &[String]) {
     let name = arg_value(args, "--name").or_else(|| arg_value(args, "-n"));
     let internet = args.iter().any(|a| a == "--internet" || a == "--exit");
 
+    if let Some(ref t) = token {
+        let profile_name = name.clone().unwrap_or_else(|| "VPN Server".to_string());
+        let profile = crate::profiles::ServerProfile {
+            name: profile_name.clone(),
+            server: String::new(),
+            token: t.clone(),
+            internet,
+            share_lan: false,
+        };
+        let mut profiles_list = crate::profiles::load();
+        crate::profiles::add(&mut profiles_list, profile);
+        eprintln!("[nexguard] profile saved: {}", profile_name);
+    }
+
     let mut cli_args = vec!["--cli".to_string()];
     if let Some(t) = &token {
         cli_args.push("--token".to_string());
