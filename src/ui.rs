@@ -35,6 +35,7 @@ struct VpnApp {
     update_info: Arc<Mutex<Option<crate::api::UpdateInfo>>>,
     updating: Arc<AtomicBool>,
     update_result: Arc<Mutex<Option<Result<(), String>>>>,
+    confirm_delete: Option<usize>,
 }
 
 impl Default for VpnApp {
@@ -68,6 +69,7 @@ impl Default for VpnApp {
             update_info,
             updating: Arc::new(AtomicBool::new(false)),
             update_result: Arc::new(Mutex::new(None)),
+            confirm_delete: None,
         }
     }
 }
@@ -535,17 +537,23 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                             ui.label(egui::RichText::new(desc).size(11.0).color(t.text_muted));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new(
-                                egui::RichText::new("🗑").size(14.0).color(t.danger)
-                            ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
-                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_idx"), i));
+                            let del_btn = egui::Button::new(
+                                egui::RichText::new("Remove").size(11.0).color(t.danger)
+                            )
+                            .fill(egui::Color32::TRANSPARENT)
+                            .stroke(egui::Stroke::new(1.0, t.danger))
+                            .min_size(egui::vec2(60.0, 22.0));
+                            let resp = ui.add(del_btn).on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if resp.clicked() {
+                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_confirm_idx"), i));
                             }
                         });
                     });
                 });
             let card_rect = card.response.rect;
             let card_id = egui::Id::new(("server_card", i));
-            if ui.interact(card_rect, card_id, egui::Sense::click()).clicked() {
+            let del_pending = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("del_confirm_idx"))) == Some(i);
+            if !del_pending && ui.interact(card_rect, card_id, egui::Sense::click()).clicked() {
                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
             }
 
@@ -553,19 +561,56 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
         }
     }
 
-    let has_delete = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("del_idx"))).is_some();
-    if let Some(del) = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("del_idx"))) {
-        ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("del_idx")));
-        app.selected = Some(del);
-        app.remove_selected();
+    if let Some(idx) = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("del_confirm_idx"))) {
+        ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("del_confirm_idx")));
+        ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("sel_idx")));
+        app.confirm_delete = Some(idx);
     }
-    if !has_delete {
-        if let Some(sel) = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("sel_idx"))) {
-            ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("sel_idx")));
+    if let Some(sel) = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("sel_idx"))) {
+        ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("sel_idx")));
+        if app.confirm_delete.is_none() {
             app.selected = Some(sel);
         }
-    } else {
-        ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("sel_idx")));
+    }
+
+    if let Some(idx) = app.confirm_delete {
+        let name = app.profiles.get(idx).map(|p| p.name.clone()).unwrap_or_default();
+        let t = theme();
+        let mut close = false;
+        let mut do_delete = false;
+        egui::Window::new("Confirm deletion")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .fixed_size(egui::vec2(280.0, 120.0))
+            .show(ui.ctx(), |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(format!("Remove \"{}\"?", name)).size(13.0).color(t.text));
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("This only removes it from this device.").size(11.0).color(t.text_muted));
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(30.0);
+                        if ui.add(egui::Button::new(egui::RichText::new("Cancel").size(12.0).color(t.text))
+                            .fill(t.surface).min_size(egui::vec2(90.0, 28.0))).clicked() {
+                            close = true;
+                        }
+                        ui.add_space(8.0);
+                        if ui.add(egui::Button::new(egui::RichText::new("Delete").size(12.0).color(egui::Color32::WHITE))
+                            .fill(t.danger).min_size(egui::vec2(90.0, 28.0))).clicked() {
+                            do_delete = true;
+                        }
+                    });
+                });
+            });
+        if do_delete {
+            app.selected = Some(idx);
+            app.remove_selected();
+            app.confirm_delete = None;
+        } else if close {
+            app.confirm_delete = None;
+        }
     }
 
     let t = theme();
