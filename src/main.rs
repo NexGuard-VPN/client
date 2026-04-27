@@ -93,9 +93,8 @@ fn main() {
     eprintln!("[vpn-client] assigned address: {}", assigned_addr);
 
     let (ip, prefix) = parse_cidr(&assigned_addr);
-    let server_endpoint = if args.relay.is_some() {
-        let relay_host = args.relay.as_ref().unwrap().split(':').next().unwrap_or("127.0.0.1");
-        format!("{}:51820", relay_host).parse().unwrap()
+    let server_endpoint: std::net::SocketAddr = if args.relay.is_some() {
+        "127.0.0.1:51820".parse().unwrap()
     } else if let Some(ref ep) = join_resp.server_endpoint {
         ep.parse().unwrap_or_else(|_| api::parse_endpoint(&args.server))
     } else {
