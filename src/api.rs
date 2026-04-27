@@ -398,12 +398,37 @@ pub fn check_update() -> Option<UpdateInfo> {
     })
 }
 
+const RELEASE_PUBKEY_HEX: &str = "a9cd9912c215b85684bb1ddbbc5dd6fb3c5e9a232b7097dbc00b37eeb0a73eae";
+
+fn verify_signature(binary: &[u8], signature: &[u8]) -> Result<(), String> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let pk_bytes = hex::decode(RELEASE_PUBKEY_HEX).map_err(|_| "bad pubkey hex")?;
+    let pk_arr: [u8; 32] = pk_bytes.try_into().map_err(|_| "pubkey not 32 bytes")?;
+    let pk = VerifyingKey::from_bytes(&pk_arr).map_err(|_| "bad pubkey")?;
+    if signature.len() != 64 {
+        return Err(format!("bad signature length: {}", signature.len()));
+    }
+    let sig_arr: [u8; 64] = signature.try_into().map_err(|_| "sig not 64 bytes")?;
+    let sig = Signature::from_bytes(&sig_arr);
+    pk.verify(binary, &sig).map_err(|e| format!("signature verification failed: {}", e))
+}
+
 pub fn download_update(url: &str) -> Result<Vec<u8>, String> {
     let (host, path) = parse_url(url)?;
     let body = download_tls(&host, &path)?;
     if body.len() < 1000 || body.starts_with(b"<html") || body.starts_with(b"<!DOCTYPE") {
         return Err("download returned HTML, not a binary".into());
     }
+    let sig_path = format!("{}.sig", path);
+    let sig_raw = download_tls(&host, &sig_path)
+        .map_err(|e| format!("missing signature {}: {}", sig_path, e))?;
+    let sig_text = std::str::from_utf8(&sig_raw).unwrap_or("").trim();
+    let sig_bytes = if sig_text.len() == 128 {
+        hex::decode(sig_text).map_err(|e| format!("bad signature hex: {}", e))?
+    } else {
+        sig_raw
+    };
+    verify_signature(&body, &sig_bytes)?;
     Ok(body)
 }
 
