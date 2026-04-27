@@ -9,7 +9,7 @@ use crate::tun::TunDevice;
 use crate::wg::WgState;
 
 const TLS_SNI: &str = "tunnel.nexguard.sh";
-const QUIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const QUIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_PACKET: usize = 65535;
 const WG_BUF_SIZE: usize = MAX_PACKET + 148;
 
@@ -89,6 +89,7 @@ pub fn connect_quic_relay(
     let closed = Arc::new(AtomicBool::new(false));
     let closed_clone = Arc::clone(&closed);
 
+    eprintln!("[quic] dialing {} (sni={})", socket_addr, sni_name);
     let setup = runtime.block_on(async move {
         tokio::time::timeout(QUIC_CONNECT_TIMEOUT, async {
             let mut tls = rustls::ClientConfig::builder()
@@ -113,15 +114,17 @@ pub fn connect_quic_relay(
             let mut endpoint = quinn::Endpoint::client(bind).map_err(|e| format!("endpoint: {}", e))?;
             endpoint.set_default_client_config(client_config);
 
-            let conn = endpoint.connect(socket_addr, &sni_string)
-                .map_err(|e| format!("connect: {}", e))?
-                .await
-                .map_err(|e| format!("handshake: {}", e))?;
+            let connecting = endpoint.connect(socket_addr, &sni_string)
+                .map_err(|e| format!("connect: {}", e))?;
+            eprintln!("[quic] handshake started, waiting...");
+            let conn = connecting.await.map_err(|e| format!("handshake: {}", e))?;
+            eprintln!("[quic] connected, opening intro stream");
 
             let mut send = conn.open_uni().await.map_err(|e| format!("open_uni: {}", e))?;
             let intro = format!("nexguard:{}\n", server_name_str);
             send.write_all(intro.as_bytes()).await.map_err(|e| format!("intro write: {}", e))?;
             send.finish().map_err(|e| format!("intro finish: {}", e))?;
+            eprintln!("[quic] intro sent ({})", server_name_str);
 
             Ok::<quinn::Connection, String>(conn)
         }).await.map_err(|_| "QUIC connect timeout".to_string())?
