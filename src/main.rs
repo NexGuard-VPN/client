@@ -8,6 +8,7 @@ pub mod tun;
 mod ui;
 mod vpn;
 mod wg;
+mod wg_quic;
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -264,18 +265,33 @@ fn main() {
 
         let relays: Vec<&str> = relay_addrs.split(',').map(|s| s.trim()).collect();
         let mut connected = false;
+        let force_tls = std::env::var("NEXGUARD_FORCE_TLS").is_ok();
         for addr in &relays {
             if SHUTDOWN.load(Ordering::Relaxed) { break; }
-            eprintln!("[vpn-client] connecting relay {}...", addr);
+
+            if !force_tls {
+                eprintln!("[vpn-client] connecting QUIC relay {}...", addr);
+                match wg_quic::connect_quic_relay(addr, &relay_target) {
+                    Ok(quic) => {
+                        eprintln!("[vpn-client] relay connected via QUIC {}", addr);
+                        connected = true;
+                        wg_quic::run_data_plane_quic(&tun_dev, &quic, &tunnel, &tx, &rx, &SHUTDOWN);
+                        break;
+                    }
+                    Err(e) => eprintln!("[vpn-client] QUIC {} failed: {} — falling back to TLS", addr, e),
+                }
+            }
+
+            eprintln!("[vpn-client] connecting TLS relay {}...", addr);
             match wg::connect_relay(addr, &relay_target, &relay_auth_token) {
                 Ok(mut stream) => {
-                    eprintln!("[vpn-client] relay connected via {}", addr);
+                    eprintln!("[vpn-client] relay connected via TLS {}", addr);
                     connected = true;
                     wg::run_data_plane_tls(&tun_dev, &mut stream, &tunnel, &tx, &rx, &SHUTDOWN,
                         mesh_ref, Some(&rekey_ctx));
                     break;
                 }
-                Err(e) => eprintln!("[vpn-client] relay {} failed: {}", addr, e),
+                Err(e) => eprintln!("[vpn-client] TLS {} failed: {}", addr, e),
             }
         }
 
