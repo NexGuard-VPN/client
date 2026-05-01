@@ -27,6 +27,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: nexguard-linux-amd64
+            cross: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact: nexguard-linux-arm64
@@ -61,7 +62,7 @@ jobs:
         shell: bash
         run: sed -i.bak "s/^version = .*/version = \"${{ needs.prepare.outputs.version }}\"/" Cargo.toml && rm -f Cargo.toml.bak
 
-      - name: Install cross (Linux ARM64)
+      - name: Install cross (Linux)
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 

@@ -1,12 +1,12 @@
 {
   "client": {
-    "version": "1.9.23",
+    "version": "1.9.31",
     "platforms": {
-      "macos-arm64": { "url": "https://nexguard.sh/download/nexguard-macos-1.9.23", "dmg": "https://nexguard.sh/download/NexGuard-1.9.23.dmg" },
-      "macos-amd64": { "url": "https://nexguard.sh/download/nexguard-macos-1.9.23" },
-      "linux-amd64": { "url": "https://nexguard.sh/download/nexguard-linux-1.9.23" },
-      "linux-arm64": { "url": "https://nexguard.sh/download/nexguard-linux-arm64-1.9.23" },
-      "windows-amd64": { "url": "https://nexguard.sh/download/nexguard-windows-1.9.23.exe" }
+      "macos-arm64": { "url": "https://nexguard.sh/download/nexguard-macos-1.9.31", "dmg": "https://nexguard.sh/download/NexGuard-1.9.31.dmg" },
+      "macos-amd64": { "url": "https://nexguard.sh/download/nexguard-macos-1.9.31" },
+      "linux-amd64": { "url": "https://nexguard.sh/download/nexguard-linux-1.9.31" },
+      "linux-arm64": { "url": "https://nexguard.sh/download/nexguard-linux-arm64-1.9.31" },
+      "windows-amd64": { "url": "https://nexguard.sh/download/nexguard-windows-1.9.31.exe" }
     }
   },
   "server": {
