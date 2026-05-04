@@ -540,12 +540,16 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
     } else {
         let mut connect_idx: Option<usize> = None;
         let mut edit_idx: Option<usize> = None;
+        let mut select_idx: Option<usize> = None;
+        let mut disconnect_now = false;
+        let current_state = app.state.lock().unwrap().clone();
+        let is_connected = matches!(current_state, ConnectionState::Connected);
         for (i, profile) in app.profiles.iter().enumerate() {
             let is_selected = app.selected == Some(i);
             let fill = if is_selected { t.surface_hover } else { t.surface };
             let stroke_color = if is_selected { t.accent } else { t.border };
 
-            egui::Frame::default()
+            let card = egui::Frame::default()
                 .fill(fill)
                 .corner_radius(cr(10))
                 .inner_margin(12.0)
@@ -595,26 +599,55 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                             });
 
                             ui.add_space(4.0);
-                            let connect_btn = egui::Button::new(
-                                egui::RichText::new("Connect").size(11.0).color(t.text)
+                            let active = is_connected && app.selected == Some(i);
+                            let (label, fill_color) = if active {
+                                ("Disconnect", t.danger)
+                            } else {
+                                ("Connect", t.accent)
+                            };
+                            let action_btn = egui::Button::new(
+                                egui::RichText::new(label).size(11.0).color(t.text)
                             )
-                            .fill(t.accent)
-                            .min_size(egui::vec2(70.0, 24.0));
-                            if ui.add(connect_btn).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                                connect_idx = Some(i);
+                            .fill(fill_color)
+                            .min_size(egui::vec2(82.0, 24.0));
+                            if ui.add(action_btn).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                if active {
+                                    disconnect_now = true;
+                                } else {
+                                    connect_idx = Some(i);
+                                }
                             }
                         });
                     });
                 });
 
+            let card_rect = card.response.rect;
+            const RIGHT_AREA: f32 = 140.0;
+            let click_rect = egui::Rect::from_min_max(
+                card_rect.min,
+                egui::pos2((card_rect.max.x - RIGHT_AREA).max(card_rect.min.x), card_rect.max.y),
+            );
+            let card_id = egui::Id::new(("server_card_select", i));
+            if ui.interact(click_rect, card_id, egui::Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                select_idx = Some(i);
+            }
+
             ui.add_space(3.0);
         }
 
-        if let Some(idx) = edit_idx {
+        if disconnect_now {
+            app.disconnect();
+        } else if let Some(idx) = edit_idx {
             app.start_edit(idx);
         } else if let Some(idx) = connect_idx {
             app.selected = Some(idx);
             app.connect_selected();
+        } else if let Some(idx) = select_idx {
+            app.selected = Some(idx);
+            app.sync_tray_servers();
         }
     }
 
