@@ -278,7 +278,7 @@ fn main() {
 
             if !skip_quic {
                 eprintln!("[vpn-client] connecting QUIC relay {}...", addr);
-                match wg_quic::connect_quic_relay(addr, &relay_target) {
+                match wg_quic::connect_quic_relay(addr, &relay_target, &relay_auth_token) {
                     Ok(quic) => {
                         eprintln!("[vpn-client] relay connected via QUIC {}", addr);
                         connected = true;

@@ -23,6 +23,7 @@ pub struct QuicTunnel {
 pub fn connect_quic_relay(
     relay_addr: &str,
     server_name: &str,
+    token: &str,
 ) -> Result<QuicTunnel, String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -45,6 +46,7 @@ pub fn connect_quic_relay(
         .map_err(|e| format!("tokio rt: {}", e))?;
 
     let server_name_str = server_name.to_string();
+    let token_str = token.to_string();
     let sni_string = sni_name.to_string();
 
     let (tx_to_quic, mut rx_to_quic) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -85,7 +87,7 @@ pub fn connect_quic_relay(
             eprintln!("[quic] connected, opening intro stream");
 
             let mut send = conn.open_uni().await.map_err(|e| format!("open_uni: {}", e))?;
-            let intro = format!("nexguard:{}\n", server_name_str);
+            let intro = format!("nexguard:{}:{}\n", server_name_str, token_str);
             send.write_all(intro.as_bytes()).await.map_err(|e| format!("intro write: {}", e))?;
             send.finish().map_err(|e| format!("intro finish: {}", e))?;
             eprintln!("[quic] intro sent ({})", server_name_str);
