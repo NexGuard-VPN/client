@@ -36,6 +36,7 @@ struct VpnApp {
     updating: Arc<AtomicBool>,
     update_result: Arc<Mutex<Option<Result<(), String>>>>,
     confirm_delete: Option<usize>,
+    editing_idx: Option<usize>,
 }
 
 impl Default for VpnApp {
@@ -70,6 +71,7 @@ impl Default for VpnApp {
             updating: Arc::new(AtomicBool::new(false)),
             update_result: Arc::new(Mutex::new(None)),
             confirm_delete: None,
+            editing_idx: None,
         }
     }
 }
@@ -167,8 +169,16 @@ impl VpnApp {
             internet: self.new_internet,
             share_lan: self.new_share_lan,
         };
-        crate::profiles::add(&mut self.profiles, profile);
-        self.selected = Some(self.profiles.len() - 1);
+        if let Some(idx) = self.editing_idx.take() {
+            if idx < self.profiles.len() {
+                self.profiles[idx] = profile;
+                crate::profiles::save(&self.profiles);
+                self.selected = Some(idx);
+            }
+        } else {
+            crate::profiles::add(&mut self.profiles, profile);
+            self.selected = Some(self.profiles.len() - 1);
+        }
         self.sync_tray_servers();
         self.new_name.clear();
         self.new_server.clear();
@@ -176,6 +186,18 @@ impl VpnApp {
         self.new_internet = true;
         self.new_share_lan = false;
         self.view = View::ServerList;
+    }
+
+    fn start_edit(&mut self, idx: usize) {
+        if let Some(p) = self.profiles.get(idx) {
+            self.new_name = p.name.clone();
+            self.new_server = p.server.clone();
+            self.new_token = p.token.clone();
+            self.new_internet = p.internet;
+            self.new_share_lan = p.share_lan;
+            self.editing_idx = Some(idx);
+            self.view = View::AddServer;
+        }
     }
 
     fn remove_selected(&mut self) {
@@ -517,6 +539,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
         return;
     } else {
         let mut connect_idx: Option<usize> = None;
+        let mut edit_idx: Option<usize> = None;
         for (i, profile) in app.profiles.iter().enumerate() {
             let is_selected = app.selected == Some(i);
             let fill = if is_selected { t.surface_hover } else { t.surface };
@@ -538,13 +561,21 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                             ui.label(egui::RichText::new(desc).size(11.0).color(t.text_muted));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let menu_btn = egui::Button::new(
-                                egui::RichText::new("⋯").size(14.0).color(t.text_muted)
-                            )
-                            .fill(egui::Color32::TRANSPARENT)
-                            .stroke(egui::Stroke::NONE)
-                            .min_size(egui::vec2(24.0, 24.0));
-                            let menu_resp = ui.add(menu_btn).on_hover_cursor(egui::CursorIcon::PointingHand);
+                            let (menu_rect, menu_resp_raw) = ui.allocate_exact_size(
+                                egui::vec2(24.0, 28.0), egui::Sense::click()
+                            );
+                            let dot_color = if menu_resp_raw.hovered() { t.text } else { t.text_muted };
+                            let cx = menu_rect.center().x;
+                            let cy = menu_rect.center().y;
+                            for (i, dy) in [-7.0, 0.0, 7.0].iter().enumerate() {
+                                let _ = i;
+                                ui.painter().circle_filled(
+                                    egui::pos2(cx, cy + dy),
+                                    1.8,
+                                    dot_color,
+                                );
+                            }
+                            let menu_resp = menu_resp_raw.on_hover_cursor(egui::CursorIcon::PointingHand);
                             let popup_id = egui::Id::new(("server_menu", i));
                             if menu_resp.clicked() {
                                 ui.memory_mut(|m| m.toggle_popup(popup_id));
@@ -552,7 +583,12 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                             egui::popup_below_widget(ui, popup_id, &menu_resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
                                 ui.set_min_width(120.0);
                                 if ui.add(egui::Button::new(
-                                    egui::RichText::new("Remove").size(12.0).color(t.danger)
+                                    egui::RichText::new("Edit").size(12.0).color(t.text)
+                                ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(110.0, 24.0))).clicked() {
+                                    edit_idx = Some(i);
+                                }
+                                if ui.add(egui::Button::new(
+                                    egui::RichText::new("Delete").size(12.0).color(t.danger)
                                 ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(110.0, 24.0))).clicked() {
                                     ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_confirm_idx"), i));
                                 }
@@ -574,7 +610,9 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             ui.add_space(3.0);
         }
 
-        if let Some(idx) = connect_idx {
+        if let Some(idx) = edit_idx {
+            app.start_edit(idx);
+        } else if let Some(idx) = connect_idx {
             app.selected = Some(idx);
             app.connect_selected();
         }
@@ -636,11 +674,19 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
 
 fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
     let t = theme();
+    let editing = app.editing_idx.is_some();
     ui.horizontal(|ui| {
         if ui.small_button("< Back").clicked() {
+            app.editing_idx = None;
+            app.new_name.clear();
+            app.new_server.clear();
+            app.new_token.clear();
+            app.new_internet = true;
+            app.new_share_lan = false;
             app.view = View::ServerList;
         }
-        ui.label(egui::RichText::new("Add Server").size(14.0).strong().color(t.text));
+        let title = if editing { "Edit Server" } else { "Add Server" };
+        ui.label(egui::RichText::new(title).size(14.0).strong().color(t.text));
     });
     ui.add_space(6.0);
 
@@ -667,12 +713,16 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
     ui.add_space(10.0);
     ui.vertical_centered(|ui| {
         let ok = !app.new_token.is_empty();
-        let btn = egui::Button::new(egui::RichText::new("Save & Connect").size(14.0).strong().color(t.text))
+        let label = if editing { "Save" } else { "Save & Connect" };
+        let btn = egui::Button::new(egui::RichText::new(label).size(14.0).strong().color(t.text))
             .fill(if ok { t.accent } else { t.surface_hover })
             .min_size(egui::vec2(200.0, 40.0));
         if ui.add_enabled(ok, btn).clicked() {
+            let was_editing = editing;
             app.save_new_server();
-            app.connect_selected();
+            if !was_editing {
+                app.connect_selected();
+            }
         }
     });
 
