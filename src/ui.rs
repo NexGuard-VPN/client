@@ -522,7 +522,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             let fill = if is_selected { t.surface_hover } else { t.surface };
             let stroke_color = if is_selected { t.accent } else { t.border };
 
-            let card = egui::Frame::default()
+            egui::Frame::default()
                 .fill(fill)
                 .corner_radius(cr(10))
                 .inner_margin(12.0)
@@ -570,12 +570,6 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                         });
                     });
                 });
-            let card_rect = card.response.rect;
-            let card_id = egui::Id::new(("server_card", i));
-            let del_pending = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("del_confirm_idx"))) == Some(i);
-            if !del_pending && ui.interact(card_rect, card_id, egui::Sense::click()).clicked() {
-                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("sel_idx"), i));
-            }
 
             ui.add_space(3.0);
         }
