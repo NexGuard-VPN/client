@@ -9,7 +9,7 @@ use crate::tun::TunDevice;
 use crate::wg::WgState;
 
 const TLS_SNI: &str = "tunnel.nexguard.sh";
-const QUIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const QUIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_PACKET: usize = 65535;
 const WG_BUF_SIZE: usize = MAX_PACKET + 148;
 

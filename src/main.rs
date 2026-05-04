@@ -259,25 +259,42 @@ fn main() {
         return;
     }
 
+    let force_tls = std::env::var("NEXGUARD_FORCE_TLS").is_ok();
+    let mut skip_quic = force_tls || load_relay_mode().as_deref() == Some("tls");
+    let mut quic_failures: u32 = 0;
+    const QUIC_SKIP_THRESHOLD: u32 = 2;
+
+    if skip_quic && !force_tls {
+        eprintln!("[vpn-client] using TLS relay (cached preference)");
+    }
+
     loop {
         if SHUTDOWN.load(Ordering::Relaxed) { break; }
 
         let relays: Vec<&str> = relay_addrs.split(',').map(|s| s.trim()).collect();
         let mut connected = false;
-        let force_tls = std::env::var("NEXGUARD_FORCE_TLS").is_ok();
         for addr in &relays {
             if SHUTDOWN.load(Ordering::Relaxed) { break; }
 
-            if !force_tls {
+            if !skip_quic {
                 eprintln!("[vpn-client] connecting QUIC relay {}...", addr);
                 match wg_quic::connect_quic_relay(addr, &relay_target) {
                     Ok(quic) => {
                         eprintln!("[vpn-client] relay connected via QUIC {}", addr);
                         connected = true;
+                        quic_failures = 0;
+                        save_relay_mode("quic");
                         wg_quic::run_data_plane_quic(&tun_dev, &quic, &tunnel, &tx, &rx, &SHUTDOWN);
                         break;
                     }
-                    Err(e) => eprintln!("[vpn-client] QUIC {} failed: {} — falling back to TLS", addr, e),
+                    Err(e) => {
+                        quic_failures += 1;
+                        eprintln!("[vpn-client] QUIC {} failed: {} — falling back to TLS", addr, e);
+                        if quic_failures >= QUIC_SKIP_THRESHOLD {
+                            eprintln!("[vpn-client] QUIC unreliable, switching to TLS for this session");
+                            skip_quic = true;
+                        }
+                    }
                 }
             }
 
@@ -286,6 +303,7 @@ fn main() {
                 Ok(mut stream) => {
                     eprintln!("[vpn-client] relay connected via TLS {}", addr);
                     connected = true;
+                    save_relay_mode("tls");
                     wg::run_data_plane_tls(&tun_dev, &mut stream, &tunnel, &tx, &rx, &SHUTDOWN,
                         mesh_ref, Some(&rekey_ctx));
                     break;
@@ -317,6 +335,23 @@ fn main() {
 fn key_path() -> std::path::PathBuf {
     let dir = dirs_next().unwrap_or_else(|| std::path::PathBuf::from("."));
     dir.join("client.key")
+}
+
+fn relay_mode_path() -> Option<std::path::PathBuf> {
+    Some(dirs_next()?.join("relay-mode"))
+}
+
+fn load_relay_mode() -> Option<String> {
+    let p = relay_mode_path()?;
+    std::fs::read_to_string(&p).ok().map(|s| s.trim().to_string())
+}
+
+fn save_relay_mode(mode: &str) {
+    if let Some(p) = relay_mode_path() {
+        if load_relay_mode().as_deref() != Some(mode) {
+            let _ = std::fs::write(&p, mode);
+        }
+    }
 }
 
 fn dirs_next() -> Option<std::path::PathBuf> {
