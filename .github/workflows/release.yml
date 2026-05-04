@@ -140,6 +140,7 @@ jobs:
           {
             "client": {
               "version": "${VERSION}",
+              "min_version": "1.9.34",
               "platforms": {
                 "macos-arm64": { "url": "${BASE_URL}/nexguard-macos-${VERSION}", "dmg": "${BASE_URL}/NexGuard-${VERSION}.dmg" },
                 "macos-amd64": { "url": "${BASE_URL}/nexguard-macos-${VERSION}" },
