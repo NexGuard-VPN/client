@@ -20,43 +20,6 @@ pub struct QuicTunnel {
     _runtime: tokio::runtime::Runtime,
 }
 
-#[derive(Debug)]
-struct InsecureVerifier;
-
-impl rustls::client::danger::ServerCertVerifier for InsecureVerifier {
-    fn verify_server_cert(
-        &self,
-        _: &rustls::pki_types::CertificateDer,
-        _: &[rustls::pki_types::CertificateDer],
-        _: &rustls::pki_types::ServerName,
-        _: &[u8],
-        _: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(
-        &self,
-        _: &[u8],
-        _: &rustls::pki_types::CertificateDer,
-        _: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn verify_tls13_signature(
-        &self,
-        _: &[u8],
-        _: &rustls::pki_types::CertificateDer,
-        _: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
-}
-
 pub fn connect_quic_relay(
     relay_addr: &str,
     server_name: &str,
@@ -92,9 +55,10 @@ pub fn connect_quic_relay(
     eprintln!("[quic] dialing {} (sni={})", socket_addr, sni_name);
     let setup = runtime.block_on(async move {
         tokio::time::timeout(QUIC_CONNECT_TIMEOUT, async {
+            let mut root_store = rustls::RootCertStore::empty();
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             let mut tls = rustls::ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
+                .with_root_certificates(root_store)
                 .with_no_client_auth();
             tls.alpn_protocols = vec![b"h3".to_vec()];
 

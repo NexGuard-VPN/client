@@ -35,9 +35,10 @@ pub fn connect_relay(
 ) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
+        .with_root_certificates(root_store)
         .with_no_client_auth();
 
     let host = relay_addr.split(':').next().unwrap_or(TLS_SNI);
@@ -100,43 +101,6 @@ pub fn connect_relay(
 
     tls.sock.set_read_timeout(Some(TLS_READ_TIMEOUT)).ok();
     Ok(tls)
-}
-
-#[derive(Debug)]
-struct InsecureVerifier;
-
-impl rustls::client::danger::ServerCertVerifier for InsecureVerifier {
-    fn verify_server_cert(
-        &self,
-        _: &rustls::pki_types::CertificateDer,
-        _: &[rustls::pki_types::CertificateDer],
-        _: &rustls::pki_types::ServerName,
-        _: &[u8],
-        _: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(
-        &self,
-        _: &[u8],
-        _: &rustls::pki_types::CertificateDer,
-        _: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn verify_tls13_signature(
-        &self,
-        _: &[u8],
-        _: &rustls::pki_types::CertificateDer,
-        _: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
 }
 
 pub struct RekeyCtx {

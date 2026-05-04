@@ -2550,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "nexguard"
-version = "1.9.32"
+version = "1.9.33"
 dependencies = [
  "base64 0.22.1",
  "boringtun",

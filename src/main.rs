@@ -356,14 +356,16 @@ fn save_relay_mode(mode: &str) {
 
 fn dirs_next() -> Option<std::path::PathBuf> {
     let home = std::env::var("SUDO_USER").ok()
+        .filter(|u| u.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'))
         .and_then(|u| {
             #[cfg(unix)]
             {
-                let out = std::process::Command::new("sh")
-                    .args(["-c", &format!("eval echo ~{}", u)])
+                let out = std::process::Command::new("getent")
+                    .args(["passwd", &u])
                     .output().ok()?;
-                let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if h.is_empty() || h.starts_with('~') { None } else { Some(h) }
+                let line = String::from_utf8_lossy(&out.stdout);
+                let h = line.split(':').nth(5)?.trim().to_string();
+                if h.is_empty() { None } else { Some(h) }
             }
             #[cfg(not(unix))]
             { None }

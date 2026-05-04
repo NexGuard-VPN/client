@@ -295,9 +295,9 @@ fn setup_style(ctx: &egui::Context) {
     let t = theme();
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    style.spacing.button_padding = egui::vec2(16.0, 8.0);
+    style.spacing.button_padding = egui::vec2(10.0, 5.0);
     style.spacing.text_edit_width = 400.0;
-    style.spacing.interact_size.y = 36.0;
+    style.spacing.interact_size.y = 28.0;
     style.visuals.window_corner_radius = cr(12);
 
     for w in [&mut style.visuals.widgets.noninteractive, &mut style.visuals.widgets.inactive, &mut style.visuals.widgets.hovered, &mut style.visuals.widgets.active] {
@@ -516,6 +516,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
         draw_add_server(ui, app);
         return;
     } else {
+        let mut connect_idx: Option<usize> = None;
         for (i, profile) in app.profiles.iter().enumerate() {
             let is_selected = app.selected == Some(i);
             let fill = if is_selected { t.surface_hover } else { t.surface };
@@ -523,8 +524,8 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
 
             let card = egui::Frame::default()
                 .fill(fill)
-                .corner_radius(cr(12))
-                .inner_margin(14.0)
+                .corner_radius(cr(10))
+                .inner_margin(12.0)
                 .stroke(egui::Stroke::new(if is_selected { 1.5 } else { 1.0 }, stroke_color))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -537,15 +538,34 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                             ui.label(egui::RichText::new(desc).size(11.0).color(t.text_muted));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let del_btn = egui::Button::new(
-                                egui::RichText::new("Remove").size(11.0).color(t.danger)
+                            let menu_btn = egui::Button::new(
+                                egui::RichText::new("⋯").size(14.0).color(t.text_muted)
                             )
                             .fill(egui::Color32::TRANSPARENT)
-                            .stroke(egui::Stroke::new(1.0, t.danger))
-                            .min_size(egui::vec2(60.0, 22.0));
-                            let resp = ui.add(del_btn).on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if resp.clicked() {
-                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_confirm_idx"), i));
+                            .stroke(egui::Stroke::NONE)
+                            .min_size(egui::vec2(24.0, 24.0));
+                            let menu_resp = ui.add(menu_btn).on_hover_cursor(egui::CursorIcon::PointingHand);
+                            let popup_id = egui::Id::new(("server_menu", i));
+                            if menu_resp.clicked() {
+                                ui.memory_mut(|m| m.toggle_popup(popup_id));
+                            }
+                            egui::popup_below_widget(ui, popup_id, &menu_resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                                ui.set_min_width(120.0);
+                                if ui.add(egui::Button::new(
+                                    egui::RichText::new("Remove").size(12.0).color(t.danger)
+                                ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(110.0, 24.0))).clicked() {
+                                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_confirm_idx"), i));
+                                }
+                            });
+
+                            ui.add_space(4.0);
+                            let connect_btn = egui::Button::new(
+                                egui::RichText::new("Connect").size(11.0).color(t.text)
+                            )
+                            .fill(t.accent)
+                            .min_size(egui::vec2(70.0, 24.0));
+                            if ui.add(connect_btn).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                connect_idx = Some(i);
                             }
                         });
                     });
@@ -558,6 +578,11 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             }
 
             ui.add_space(3.0);
+        }
+
+        if let Some(idx) = connect_idx {
+            app.selected = Some(idx);
+            app.connect_selected();
         }
     }
 
@@ -613,23 +638,6 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
         }
     }
 
-    let t = theme();
-    let current_state = app.state.lock().unwrap().clone();
-    let is_connected = matches!(current_state, ConnectionState::Connected);
-    let is_connecting = matches!(current_state, ConnectionState::Connecting);
-
-    if !is_connected && !is_connecting {
-        ui.add_space(10.0);
-        ui.vertical_centered(|ui| {
-            let can_connect = app.selected.is_some() && !app.profiles.is_empty();
-            let btn = egui::Button::new(egui::RichText::new("Connect").size(14.0).strong().color(t.text))
-                .fill(if can_connect { t.accent } else { t.surface_hover })
-                .min_size(egui::vec2(200.0, 40.0));
-            if ui.add_enabled(can_connect, btn).clicked() {
-                app.connect_selected();
-            }
-        });
-    }
 }
 
 fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {

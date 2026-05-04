@@ -95,16 +95,17 @@ pub fn try_join_server_with_routes(
     let fp = crate::fingerprint::collect();
     let device_id_path = crate::dirs_next().map(|d| d.join("device-hwid")).unwrap_or_default();
     let saved_device_id = std::fs::read_to_string(&device_id_path).unwrap_or_default().trim().to_string();
-    let routes_json = if advertise_routes.is_empty() {
-        String::new()
-    } else {
-        let routes: Vec<String> = advertise_routes.iter().map(|r| format!(r#""{}""#, r)).collect();
-        format!(r#","advertise_routes":[{}]"#, routes.join(","))
-    };
-    let body = format!(
-        r#"{{"public_key":"{}","name":"{}","version":"{}","fingerprint":"{}","device_id":"{}"{}}}"#,
-        pub_key, name, ver, fp.replace('"', ""), saved_device_id, routes_json
-    );
+    let mut payload = serde_json::json!({
+        "public_key": pub_key,
+        "name": name,
+        "version": ver,
+        "fingerprint": fp,
+        "device_id": saved_device_id,
+    });
+    if !advertise_routes.is_empty() {
+        payload["advertise_routes"] = serde_json::json!(advertise_routes);
+    }
+    let body = serde_json::to_string(&payload).map_err(|e| format!("encode: {}", e))?;
     let req = format!(
         "POST /api/v1/join HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         host, token, body.len(), body
@@ -150,10 +151,10 @@ pub fn rekey(
     new_pub_key: &str,
 ) -> Result<(), String> {
     let host = control_host(server, control_port);
-    let body = format!(
-        r#"{{"old_public_key":"{}","new_public_key":"{}"}}"#,
-        old_pub_key, new_pub_key
-    );
+    let body = serde_json::to_string(&serde_json::json!({
+        "old_public_key": old_pub_key,
+        "new_public_key": new_pub_key,
+    })).map_err(|e| format!("encode: {}", e))?;
     let req = format!(
         "POST /api/v1/rekey HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         host, token, body.len(), body
@@ -186,32 +187,6 @@ fn try_http_request(host: &str, request: &str) -> Result<String, String> {
     let mut response = String::new();
     stream.read_to_string(&mut response).ok();
     Ok(response)
-}
-
-fn http_get(host: &str, path: &str) -> Option<String> {
-    let req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: nexguard\r\n\r\n",
-        path, host
-    );
-    let resp = try_http_request(&format!("{}:80", host), &req).ok()?;
-    let header_end = resp.find("\r\n\r\n")?;
-    let headers = &resp[..header_end];
-
-    if headers.contains("301") || headers.contains("302") || headers.contains("307") || headers.contains("308") {
-        for line in headers.lines() {
-            let lower = line.to_ascii_lowercase();
-            if lower.starts_with("location:") {
-                let url = line[9..].trim();
-                if url.starts_with("https://") {
-                    let stripped = &url[8..];
-                    let (h, p) = stripped.split_once('/').unwrap_or((stripped, "/"));
-                    return http_get_tls(h, &format!("/{}", p));
-                }
-            }
-        }
-    }
-
-    Some(resp[header_end + 4..].to_string())
 }
 
 fn ensure_crypto_provider() {
@@ -268,16 +243,17 @@ pub fn join_via_api_with_routes(url: &str, token: &str, pub_key: &str, name: &st
     let fp = crate::fingerprint::collect();
     let device_id_path = crate::dirs_next().map(|d| d.join("device-hwid")).unwrap_or_default();
     let saved_device_id = std::fs::read_to_string(&device_id_path).unwrap_or_default().trim().to_string();
-    let routes_json = if advertise_routes.is_empty() {
-        String::new()
-    } else {
-        let routes: Vec<String> = advertise_routes.iter().map(|r| format!(r#""{}""#, r)).collect();
-        format!(r#","advertise_routes":[{}]"#, routes.join(","))
-    };
-    let body = format!(
-        r#"{{"public_key":"{}","name":"{}","version":"{}","fingerprint":"{}","device_id":"{}"{}}}"#,
-        pub_key, name, ver, fp.replace('"', ""), saved_device_id, routes_json
-    );
+    let mut payload = serde_json::json!({
+        "public_key": pub_key,
+        "name": name,
+        "version": ver,
+        "fingerprint": fp,
+        "device_id": saved_device_id,
+    });
+    if !advertise_routes.is_empty() {
+        payload["advertise_routes"] = serde_json::json!(advertise_routes);
+    }
+    let body = serde_json::to_string(&payload).map_err(|e| format!("encode: {}", e))?;
 
     let parsed = url.strip_prefix("https://").ok_or("join_url must be https")?;
     let (host, path) = parsed.split_once('/').unwrap_or((parsed, "api/vpn/join"));
@@ -351,14 +327,14 @@ pub struct GeoInfo {
 }
 
 pub fn fetch_geo_info() -> Option<GeoInfo> {
-    let body = http_get("ip-api.com", "/json/?fields=query,country,city,regionName,isp")?;
+    let body = http_get_tls("ipapi.co", "/json/")?;
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
     Some(GeoInfo {
-        ip: v.get("query")?.as_str()?.to_string(),
-        country: v.get("country")?.as_str()?.to_string(),
-        city: v.get("city")?.as_str()?.to_string(),
-        region: v.get("regionName").and_then(|r| r.as_str()).unwrap_or("").to_string(),
-        isp: v.get("isp").and_then(|r| r.as_str()).unwrap_or("").to_string(),
+        ip: v.get("ip").and_then(|x| x.as_str())?.to_string(),
+        country: v.get("country_name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        city: v.get("city").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        region: v.get("region").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        isp: v.get("org").and_then(|x| x.as_str()).unwrap_or("").to_string(),
     })
 }
 
@@ -375,7 +351,7 @@ pub struct UpdateInfo {
 }
 
 pub fn check_update() -> Option<UpdateInfo> {
-    let body = http_get(VERSION_URL_HOST, VERSION_URL_PATH)?;
+    let body = http_get_tls(VERSION_URL_HOST, VERSION_URL_PATH)?;
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
     let latest = v.get("client")?.get("version")?.as_str()?;
     let min_version = v.get("client")?.get("min_version").and_then(|v| v.as_str()).unwrap_or("0.0.0");
@@ -485,16 +461,8 @@ pub fn self_update(url: &str) -> Result<(), String> {
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
     }
 
-    let backup = exe.with_extension("old");
-    let _ = std::fs::remove_file(&backup);
-    std::fs::rename(&exe, &backup)
-        .map_err(|e| format!("backup: {}", e))?;
     std::fs::rename(&tmp, &exe)
-        .map_err(|e| {
-            let _ = std::fs::rename(&backup, &exe);
-            format!("replace: {}", e)
-        })?;
-    let _ = std::fs::remove_file(&backup);
+        .map_err(|e| format!("replace: {}", e))?;
     Ok(())
 }
 
