@@ -8,7 +8,6 @@ pub mod tun;
 mod ui;
 mod vpn;
 mod wg;
-mod wg_quic;
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,6 +19,13 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    eprintln!(
+        "[nexguard] v{} ({}-{})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    );
 
     if args.iter().any(|a| a == "--install-service") {
         install_service(&args);
@@ -141,34 +147,53 @@ fn main() {
     }
 
     let exit_state = if args.internet {
-        let wg_ip = server_endpoint.ip().to_string();
-        let control_ip = if args.relay.is_some() {
-            wg_ip.clone()
-        } else {
-            use std::net::ToSocketAddrs;
-            let target = if args.server.contains(':') { args.server.clone() } else { format!("{}:9190", args.server) };
-            target.to_socket_addrs().ok().and_then(|mut a| a.next()).map(|a| a.ip().to_string()).unwrap_or_else(|| wg_ip.clone())
+        use std::collections::BTreeSet;
+        use std::net::ToSocketAddrs;
+
+        let mut preserve_set: BTreeSet<String> = BTreeSet::new();
+
+        let push_resolved = |set: &mut BTreeSet<String>, host: &str, default_port: u16| {
+            let target = if host.contains(':') { host.to_string() } else { format!("{}:{}", host, default_port) };
+            if let Ok(addrs) = target.to_socket_addrs() {
+                for a in addrs {
+                    if !a.ip().is_loopback() && !a.ip().is_unspecified() {
+                        set.insert(a.ip().to_string());
+                    }
+                }
+            }
         };
-        let relay_ip = args.relay.as_ref()
-            .and_then(|rs| rs.split(':').next().map(|s: &str| s.to_string()));
-        let mut preserve_ips: Vec<&str> = vec![&wg_ip];
-        if control_ip != wg_ip {
-            preserve_ips.push(&control_ip);
+
+        if !server_endpoint.ip().is_loopback() && !server_endpoint.ip().is_unspecified() {
+            preserve_set.insert(server_endpoint.ip().to_string());
         }
-        if let Some(ref rip) = relay_ip {
-            if rip != &wg_ip && rip != &control_ip {
-                preserve_ips.push(rip);
+
+        if let Some(ref relays) = args.relay {
+            for relay in relays.split(',') {
+                let r = relay.trim();
+                if !r.is_empty() {
+                    push_resolved(&mut preserve_set, r, 443);
+                }
             }
+        } else {
+            push_resolved(&mut preserve_set, &args.server, args.control_port);
         }
-        let has_v6 = join_resp.vpn_network_v6.is_some();
-        match route::ExitRouteState::setup_dual(&preserve_ips, tun_dev.name(), has_v6) {
-            Ok(state) => {
-                eprintln!("[vpn-client] internet routing enabled (v6={})", has_v6);
-                Some(state)
-            }
-            Err(e) => {
-                eprintln!("[vpn-client] internet setup failed: {}", e);
-                None
+
+        if preserve_set.is_empty() {
+            eprintln!("[vpn-client] internet setup failed: could not resolve any relay/server IP to preserve");
+            None
+        } else {
+            let preserve_ips: Vec<String> = preserve_set.into_iter().collect();
+            let preserve_refs: Vec<&str> = preserve_ips.iter().map(|s| s.as_str()).collect();
+            let has_v6 = join_resp.vpn_network_v6.is_some();
+            match route::ExitRouteState::setup_dual(&preserve_refs, tun_dev.name(), has_v6) {
+                Ok(state) => {
+                    eprintln!("[vpn-client] internet routing enabled (v6={}, preserved={})", has_v6, preserve_ips.join(","));
+                    Some(state)
+                }
+                Err(e) => {
+                    eprintln!("[vpn-client] internet setup failed: {}", e);
+                    None
+                }
             }
         }
     } else {
@@ -259,15 +284,6 @@ fn main() {
         return;
     }
 
-    let force_tls = std::env::var("NEXGUARD_FORCE_TLS").is_ok();
-    let mut skip_quic = force_tls || load_relay_mode().as_deref() == Some("tls");
-    let mut quic_failures: u32 = 0;
-    const QUIC_SKIP_THRESHOLD: u32 = 2;
-
-    if skip_quic && !force_tls {
-        eprintln!("[vpn-client] using TLS relay (cached preference)");
-    }
-
     loop {
         if SHUTDOWN.load(Ordering::Relaxed) { break; }
 
@@ -276,34 +292,11 @@ fn main() {
         for addr in &relays {
             if SHUTDOWN.load(Ordering::Relaxed) { break; }
 
-            if !skip_quic {
-                eprintln!("[vpn-client] connecting QUIC relay {}...", addr);
-                match wg_quic::connect_quic_relay(addr, &relay_target, &relay_auth_token) {
-                    Ok(quic) => {
-                        eprintln!("[vpn-client] relay connected via QUIC {}", addr);
-                        connected = true;
-                        quic_failures = 0;
-                        save_relay_mode("quic");
-                        wg_quic::run_data_plane_quic(&tun_dev, &quic, &tunnel, &tx, &rx, &SHUTDOWN);
-                        break;
-                    }
-                    Err(e) => {
-                        quic_failures += 1;
-                        eprintln!("[vpn-client] QUIC {} failed: {} — falling back to TLS", addr, e);
-                        if quic_failures >= QUIC_SKIP_THRESHOLD {
-                            eprintln!("[vpn-client] QUIC unreliable, switching to TLS for this session");
-                            skip_quic = true;
-                        }
-                    }
-                }
-            }
-
             eprintln!("[vpn-client] connecting TLS relay {}...", addr);
             match wg::connect_relay(addr, &relay_target, &relay_auth_token) {
                 Ok(mut stream) => {
                     eprintln!("[vpn-client] relay connected via TLS {}", addr);
                     connected = true;
-                    save_relay_mode("tls");
                     wg::run_data_plane_tls(&tun_dev, &mut stream, &tunnel, &tx, &rx, &SHUTDOWN,
                         mesh_ref, Some(&rekey_ctx));
                     break;
@@ -335,23 +328,6 @@ fn main() {
 fn key_path() -> std::path::PathBuf {
     let dir = dirs_next().unwrap_or_else(|| std::path::PathBuf::from("."));
     dir.join("client.key")
-}
-
-fn relay_mode_path() -> Option<std::path::PathBuf> {
-    Some(dirs_next()?.join("relay-mode"))
-}
-
-fn load_relay_mode() -> Option<String> {
-    let p = relay_mode_path()?;
-    std::fs::read_to_string(&p).ok().map(|s| s.trim().to_string())
-}
-
-fn save_relay_mode(mode: &str) {
-    if let Some(p) = relay_mode_path() {
-        if load_relay_mode().as_deref() != Some(mode) {
-            let _ = std::fs::write(&p, mode);
-        }
-    }
 }
 
 fn dirs_next() -> Option<std::path::PathBuf> {
