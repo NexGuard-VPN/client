@@ -1,6 +1,6 @@
 [package]
 name = "nexguard"
-version = "1.9.39"
+version = "1.9.43"
 edition = "2021"
 
 [[bin]]
@@ -23,6 +23,7 @@ hex = "0.4"
 tray-icon = "0.19"
 image = { version = "0.25", default-features = false, features = ["png"] }
 ed25519-dalek = "2.2.0"
+arboard = { version = "3", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

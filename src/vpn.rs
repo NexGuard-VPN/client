@@ -84,7 +84,7 @@ pub fn connect(
     config: VpnConfig,
     shutdown: Arc<AtomicBool>,
 ) -> Result<VpnStatus, String> {
-    let private_key = crate::generate_private_key();
+    let private_key = crate::load_or_generate_key();
     let secret = StaticSecret::from(private_key);
     let public_key = PublicKey::from(&secret);
     let pub_key_b64 = crate::b64_encode(public_key.as_bytes());
@@ -100,17 +100,39 @@ pub fn connect(
         Vec::new()
     };
 
-    let join_resp = if let Some(ref url) = config.join_url {
-        api::join_via_api_with_routes(url, &config.token, &pub_key_b64, &client_name, &advertise_routes)?
+    let cached_join: Option<api::JoinResponse> = crate::cache::load(&config.token)
+        .and_then(|e| {
+            if e.join_response.is_null() { return None; }
+            serde_json::from_value::<api::JoinResponse>(e.join_response).ok()
+        });
+
+    let join_resp = if let Some(jr) = cached_join {
+        jr
     } else {
-        api::try_join_server_with_routes(
-            &config.server,
-            config.control_port,
-            &config.token,
-            &pub_key_b64,
-            &client_name,
-            &advertise_routes,
-        )?
+        let fresh = if let Some(ref url) = config.join_url {
+            api::join_via_api_with_routes(url, &config.token, &pub_key_b64, &client_name, &advertise_routes)?
+        } else {
+            api::try_join_server_with_routes(
+                &config.server,
+                config.control_port,
+                &config.token,
+                &pub_key_b64,
+                &client_name,
+                &advertise_routes,
+            )?
+        };
+        if let Ok(jr_val) = serde_json::to_value(&fresh) {
+            let existing = crate::cache::load(&config.token);
+            crate::cache::save(
+                &config.token,
+                existing.as_ref().and_then(|e| e.server.clone()),
+                existing.as_ref().and_then(|e| e.relay.clone()),
+                existing.as_ref().and_then(|e| e.relay_name.clone()),
+                existing.as_ref().and_then(|e| e.join_url.clone()),
+                jr_val,
+            );
+        }
+        fresh
     };
 
     let assigned_addr = join_resp.address.clone();
@@ -208,7 +230,8 @@ pub fn connect(
     let relay_name = config.relay_name.clone();
 
     let server_pub = PublicKey::from(server_pub_key);
-    let tunn = Tunn::new(secret, server_pub, None, Some(25), 0, None);
+    let keepalive = crate::jittered_keepalive();
+    let tunn = Tunn::new(secret, server_pub, None, Some(keepalive), 0, None);
     let tunnel = Mutex::new(wg::WgState { tunn, server_pub_key: server_pub });
 
     let tx = Arc::new(AtomicU64::new(0));
@@ -269,6 +292,8 @@ pub fn connect(
     }
 
     let shutdown_dp = Arc::clone(&shutdown);
+    let rx_for_check = Arc::clone(&rx);
+    let token_for_cache = config.token.clone();
     std::thread::spawn(move || {
         let target = relay_name.as_deref().unwrap_or(&server_for_relay);
         match wg::connect_relay(&relay_addr, target, &token_for_relay) {
@@ -277,9 +302,13 @@ pub fn connect(
                     &tun_dev, &mut stream, &tunnel, &tx, &rx, &shutdown_dp,
                     mesh_mgr.as_ref().map(|m| m.as_ref()), None,
                 );
+                if rx_for_check.load(Ordering::Relaxed) == 0 {
+                    crate::cache::invalidate(&token_for_cache);
+                }
             }
             Err(e) => {
                 let _ = writeln!(std::io::stderr(), "[vpn-client] connection failed: {}", e);
+                crate::cache::invalidate(&token_for_cache);
             }
         }
         drop(exit_state);

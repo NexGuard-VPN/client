@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 #[allow(dead_code)]
 pub struct JoinResponse {
     pub address: String,
@@ -227,6 +227,7 @@ fn http_get_tls(host: &str, path: &str) -> Option<String> {
     Some(text[body_start..].to_string())
 }
 
+#[derive(Clone)]
 pub struct ConnectInfo {
     pub server: Option<String>,
     pub relay: Option<String>,

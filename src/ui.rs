@@ -92,21 +92,45 @@ impl VpnApp {
             let mut relay_name: Option<String> = None;
             let mut join_url: Option<String> = None;
 
+            let cached = if !profile.token.is_empty() {
+                crate::cache::load(&profile.token)
+            } else {
+                None
+            };
+
             if server.is_empty() && !profile.token.is_empty() {
-                match crate::api::fetch_connect_info(&profile.token) {
-                    Some(info) => {
-                        join_url = info.join_url;
-                        if let Some(s) = info.server {
-                            server = s;
-                        } else if let Some(r) = info.relay {
-                            relay = Some(r.clone());
-                            relay_name = info.relay_name;
-                            server = "relay".to_string();
-                        }
+                if let Some(ref c) = cached {
+                    server = c.server.clone().unwrap_or_default();
+                    relay = c.relay.clone();
+                    relay_name = c.relay_name.clone();
+                    join_url = c.join_url.clone();
+                    if server.is_empty() && relay.is_some() {
+                        server = "relay".to_string();
                     }
-                    None => {
-                        *state.lock().unwrap() = ConnectionState::Error("Cannot reach NexGuard API. Check your internet connection.".into());
-                        return;
+                } else {
+                    match crate::api::fetch_connect_info(&profile.token) {
+                        Some(info) => {
+                            join_url = info.join_url.clone();
+                            if let Some(s) = info.server.clone() {
+                                server = s;
+                            } else if let Some(r) = info.relay.clone() {
+                                relay = Some(r);
+                                relay_name = info.relay_name.clone();
+                                server = "relay".to_string();
+                            }
+                            crate::cache::save(
+                                &profile.token,
+                                info.server,
+                                info.relay,
+                                info.relay_name,
+                                info.join_url,
+                                serde_json::Value::Null,
+                            );
+                        }
+                        None => {
+                            *state.lock().unwrap() = ConnectionState::Error("Cannot reach NexGuard API. Check your internet connection.".into());
+                            return;
+                        }
                     }
                 }
             }
@@ -150,7 +174,7 @@ impl VpnApp {
         let state = Arc::clone(&self.state);
         *self.state.lock().unwrap() = ConnectionState::Connecting;
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(1500));
+            std::thread::sleep(std::time::Duration::from_millis(200));
             if let Some(status) = status_slot.lock().unwrap().take() {
                 if status.internet_mode {
                     crate::route::emergency_cleanup(&status.tun_name);
@@ -242,6 +266,21 @@ pub fn run_gui_with(token: Option<String>, name: Option<String>, internet: bool)
     eframe::run_native(APP_NAME, options, Box::new(move |cc| {
         setup_style(&cc.egui_ctx);
         let mut app = VpnApp::default();
+
+        let prefetch_hosts: Vec<String> = std::iter::once(
+            std::env::var("NEXGUARD_API_HOST").unwrap_or_else(|_| "api.nexguard.sh".to_string()),
+        )
+        .chain(app.profiles.iter().filter_map(|p| {
+            if p.server.is_empty() { None } else { Some(p.server.clone()) }
+        }))
+        .collect();
+        std::thread::spawn(move || {
+            use std::net::ToSocketAddrs;
+            for host in prefetch_hosts {
+                let target = if host.contains(':') { host } else { format!("{}:443", host) };
+                let _ = target.to_socket_addrs();
+            }
+        });
 
         app.tray = crate::tray::NexTray::new(
             Arc::clone(&app.status),
@@ -358,6 +397,10 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 
 fn lbl(t: &str) -> egui::RichText {
     egui::RichText::new(t).size(12.0).color(theme().text_muted)
+}
+
+fn read_clipboard() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
 impl eframe::App for VpnApp {
@@ -734,9 +777,26 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
                 if ui.small_button(if app.show_token { "Hide" } else { "Show" }).clicked() {
                     app.show_token = !app.show_token;
                 }
+                if ui.small_button("Paste").clicked() {
+                    if let Some(text) = read_clipboard() {
+                        app.new_token = text.trim().to_owned();
+                    }
+                }
             });
         });
-        ui.add(egui::TextEdit::singleline(&mut app.new_token).password(!app.show_token).hint_text("Paste token from dashboard").desired_width(f32::INFINITY).margin(egui::vec2(10.0, 10.0)));
+        let token_resp = ui.add(egui::TextEdit::singleline(&mut app.new_token).password(!app.show_token).hint_text("Paste token from dashboard").desired_width(f32::INFINITY).margin(egui::vec2(10.0, 10.0)));
+        token_resp.context_menu(|ui| {
+            if ui.button("Paste").clicked() {
+                if let Some(text) = read_clipboard() {
+                    app.new_token = text.trim().to_owned();
+                }
+                ui.close_menu();
+            }
+            if ui.button("Clear").clicked() {
+                app.new_token.clear();
+                ui.close_menu();
+            }
+        });
 
         ui.add_space(8.0);
         ui.checkbox(&mut app.new_internet, "Route all traffic through VPN");

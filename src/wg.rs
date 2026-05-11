@@ -19,9 +19,79 @@ const MAX_PACKET: usize = 65535;
 const WG_BUF_SIZE: usize = MAX_PACKET + 148;
 const TIMER_TICK_MS: u128 = 250;
 const STATS_INTERVAL_SECS: u64 = 30;
-const TLS_SNI: &str = "www.cloudflare.com";
 const TLS_READ_TIMEOUT: Duration = Duration::from_millis(5);
 const TLS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+const SNI_POOL: &[&str] = &[
+    "www.cloudflare.com",
+    "static.cloudflareinsights.com",
+    "ajax.cloudflare.com",
+    "cdn.shopify.com",
+    "fonts.googleapis.com",
+    "ajax.googleapis.com",
+    "i.ytimg.com",
+    "platform.twitter.com",
+    "connect.facebook.net",
+    "m.media-amazon.com",
+    "static.xx.fbcdn.net",
+    "cdn.jsdelivr.net",
+    "cdnjs.cloudflare.com",
+    "unpkg.com",
+];
+
+fn pseudo_random_index(n: usize) -> usize {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0) as usize;
+    let pid = std::process::id() as usize;
+    (nanos.wrapping_mul(2654435761).wrapping_add(pid)) % n.max(1)
+}
+
+fn pick_random_sni() -> &'static str {
+    SNI_POOL[pseudo_random_index(SNI_POOL.len())]
+}
+
+#[derive(Debug)]
+struct LooseHostnameVerifier {
+    inner: Arc<rustls::client::WebPkiServerVerifier>,
+    real_name: rustls::pki_types::ServerName<'static>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for LooseHostnameVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        self.inner.verify_server_cert(end_entity, intermediates, &self.real_name, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
 
 pub struct WgState {
     pub tunn: Tunn,
@@ -37,13 +107,31 @@ pub fn connect_relay(
 
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
+
+    let real_host = relay_addr.split(':').next().unwrap_or("");
+    let real_host_owned = if real_host.is_empty() || real_host.parse::<std::net::IpAddr>().is_ok() {
+        SNI_POOL[0].to_string()
+    } else {
+        real_host.to_string()
+    };
+    let real_name = rustls::pki_types::ServerName::try_from(real_host_owned.clone())
+        .map_err(|e| format!("real name: {}", e))?;
+
+    let inner_verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(root_store))
+        .build()
+        .map_err(|e| format!("verifier: {}", e))?;
+    let verifier = Arc::new(LooseHostnameVerifier {
+        inner: inner_verifier,
+        real_name,
+    });
+
+    let config = rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
 
-    let host = relay_addr.split(':').next().unwrap_or(TLS_SNI);
-    let sni_name = if host.parse::<std::net::IpAddr>().is_ok() { TLS_SNI } else { host };
-    let sni = rustls::pki_types::ServerName::try_from(sni_name.to_string())
+    let fake_sni = pick_random_sni();
+    let sni = rustls::pki_types::ServerName::try_from(fake_sni.to_string())
         .map_err(|e| format!("sni: {}", e))?;
     let conn = rustls::ClientConnection::new(Arc::new(config), sni)
         .map_err(|e| format!("tls: {}", e))?;
@@ -56,6 +144,10 @@ pub fn connect_relay(
             format!("{}:443", relay_addr).to_socket_addrs().map_err(|e| format!("{}", e)).and_then(|mut a| a.next().ok_or_else(|| "no address".into()))
         ).map_err(|e| format!("resolve relay {}: {}", relay_addr, e))?
     };
+
+    let jitter_ms = (pseudo_random_index(150) + 20) as u64;
+    std::thread::sleep(Duration::from_millis(jitter_ms));
+
     let tcp = TcpStream::connect_timeout(&socket_addr, TLS_CONNECT_TIMEOUT)
         .map_err(|e| format!("connect {}: {}", relay_addr, e))?;
     tcp.set_nodelay(true).ok();
@@ -320,7 +412,7 @@ fn do_rekey<S: Read + Write>(
                 wg.server_pub_key
             };
             let new_tunn = boringtun::noise::Tunn::new(
-                new_secret, server_pub, None, Some(25), 0, None,
+                new_secret, server_pub, None, Some(crate::jittered_keepalive()), 0, None,
             );
             {
                 let mut wg = tunnel.lock().unwrap();

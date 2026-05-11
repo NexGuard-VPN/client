@@ -1,4 +1,5 @@
 mod api;
+pub mod cache;
 pub mod fingerprint;
 pub mod mesh;
 mod profiles;
@@ -208,7 +209,7 @@ fn main() {
     );
 
     let server_pub = PublicKey::from(server_pub_key);
-    let tunn = Tunn::new(secret, server_pub, None, Some(25), 0, None);
+    let tunn = Tunn::new(secret, server_pub, None, Some(jittered_keepalive()), 0, None);
     let tunnel = Mutex::new(wg::WgState { tunn, server_pub_key: server_pub });
     let rekey_key = Arc::new(Mutex::new(private_key));
     let rekey_ctx = wg::RekeyCtx {
@@ -406,6 +407,14 @@ fn fix_ownership(path: &std::path::Path) {
                 .status();
         }
     }
+}
+
+pub fn jittered_keepalive() -> u16 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0) as u16;
+    18 + (nanos % 15)
 }
 
 pub fn generate_private_key() -> [u8; 32] {

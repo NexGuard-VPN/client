@@ -7,6 +7,7 @@ pub struct ExitRouteState {
     original_iface: String,
     tun_name: String,
     has_v6: bool,
+    v6_blackhole: bool,
 }
 
 impl ExitRouteState {
@@ -29,8 +30,11 @@ impl ExitRouteState {
             return Err(e);
         }
 
+        let mut v6_blackhole = false;
         if enable_v6 {
             let _ = add_default_v6_via_tun(tun_name);
+        } else {
+            v6_blackhole = add_v6_blackhole(tun_name).is_ok();
         }
 
         Ok(Self {
@@ -39,6 +43,7 @@ impl ExitRouteState {
             original_iface: iface,
             tun_name: tun_name.to_owned(),
             has_v6: enable_v6,
+            v6_blackhole,
         })
     }
 
@@ -46,6 +51,9 @@ impl ExitRouteState {
         remove_default_via_tun(&self.tun_name);
         if self.has_v6 {
             remove_default_v6_via_tun(&self.tun_name);
+        }
+        if self.v6_blackhole {
+            remove_v6_blackhole(&self.tun_name);
         }
         for ip in &self.preserved_ips {
             remove_host_route(ip, &self.original_gateway, &self.original_iface);
@@ -64,6 +72,7 @@ pub fn emergency_cleanup(tun_name: &str) {
     let _ = writeln!(std::io::stderr(), "[vpn-client] emergency route cleanup for {}", tun_name);
     remove_default_via_tun(tun_name);
     remove_default_v6_via_tun(tun_name);
+    remove_v6_blackhole(tun_name);
     cleanup_policy_routing();
     if let Ok((gw, _iface)) = detect_default_gateway() {
         if !gw.is_empty() {
@@ -238,6 +247,44 @@ fn remove_default_v6_via_tun(tun: &str) {
 }
 
 #[cfg(target_os = "linux")]
+fn add_v6_blackhole(_tun: &str) -> Result<(), String> {
+    run_cmd("ip", &["-6", "route", "add", "blackhole", "::/1", "metric", "1"])?;
+    run_cmd("ip", &["-6", "route", "add", "blackhole", "8000::/1", "metric", "1"])
+}
+
+#[cfg(target_os = "macos")]
+fn add_v6_blackhole(_tun: &str) -> Result<(), String> {
+    run_cmd("route", &["-n", "add", "-inet6", "-blackhole", "::/1", "::1"])?;
+    run_cmd("route", &["-n", "add", "-inet6", "-blackhole", "8000::/1", "::1"])
+}
+
+#[cfg(target_os = "windows")]
+fn add_v6_blackhole(tun: &str) -> Result<(), String> {
+    let idx = get_interface_index(tun).unwrap_or_default();
+    run_cmd("netsh", &["interface", "ipv6", "add", "route", "::/1", &format!("interface={}", idx), "metric=1"])?;
+    run_cmd("netsh", &["interface", "ipv6", "add", "route", "8000::/1", &format!("interface={}", idx), "metric=1"])
+}
+
+#[cfg(target_os = "linux")]
+fn remove_v6_blackhole(_tun: &str) {
+    let _ = run_cmd("ip", &["-6", "route", "del", "blackhole", "::/1"]);
+    let _ = run_cmd("ip", &["-6", "route", "del", "blackhole", "8000::/1"]);
+}
+
+#[cfg(target_os = "macos")]
+fn remove_v6_blackhole(_tun: &str) {
+    let _ = run_cmd("route", &["-n", "delete", "-inet6", "::/1"]);
+    let _ = run_cmd("route", &["-n", "delete", "-inet6", "8000::/1"]);
+}
+
+#[cfg(target_os = "windows")]
+fn remove_v6_blackhole(tun: &str) {
+    let idx = get_interface_index(tun).unwrap_or_default();
+    let _ = run_cmd("netsh", &["interface", "ipv6", "delete", "route", "::/1", &format!("interface={}", idx)]);
+    let _ = run_cmd("netsh", &["interface", "ipv6", "delete", "route", "8000::/1", &format!("interface={}", idx)]);
+}
+
+#[cfg(target_os = "linux")]
 fn remove_host_route(ip: &str, gw: &str, _iface: &str) {
     let _ = run_cmd("ip", &["route", "del", &format!("{}/32", ip), "via", gw]);
 }
@@ -406,6 +453,13 @@ fn activate_kill_switch(tun_name: &str, server_ips: &[&str]) -> Result<(), Strin
     run_cmd("iptables", &["-A", "NEXGUARD-KS", "-p", "udp", "--dport", "53", "-j", "ACCEPT"])?;
     run_cmd("iptables", &["-A", "NEXGUARD-KS", "-j", "DROP"])?;
     run_cmd("iptables", &["-I", "OUTPUT", "1", "-j", "NEXGUARD-KS"])?;
+
+    run_cmd("ip6tables", &["-N", "NEXGUARD-KS6"]).ok();
+    run_cmd("ip6tables", &["-F", "NEXGUARD-KS6"])?;
+    run_cmd("ip6tables", &["-A", "NEXGUARD-KS6", "-o", tun_name, "-j", "ACCEPT"])?;
+    run_cmd("ip6tables", &["-A", "NEXGUARD-KS6", "-o", "lo", "-j", "ACCEPT"])?;
+    run_cmd("ip6tables", &["-A", "NEXGUARD-KS6", "-j", "DROP"])?;
+    run_cmd("ip6tables", &["-I", "OUTPUT", "1", "-j", "NEXGUARD-KS6"])?;
     Ok(())
 }
 
@@ -414,6 +468,9 @@ fn deactivate_kill_switch() {
     let _ = run_cmd("iptables", &["-D", "OUTPUT", "-j", "NEXGUARD-KS"]);
     let _ = run_cmd("iptables", &["-F", "NEXGUARD-KS"]);
     let _ = run_cmd("iptables", &["-X", "NEXGUARD-KS"]);
+    let _ = run_cmd("ip6tables", &["-D", "OUTPUT", "-j", "NEXGUARD-KS6"]);
+    let _ = run_cmd("ip6tables", &["-F", "NEXGUARD-KS6"]);
+    let _ = run_cmd("ip6tables", &["-X", "NEXGUARD-KS6"]);
 }
 
 #[cfg(target_os = "windows")]

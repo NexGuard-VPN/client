@@ -2529,8 +2529,9 @@ dependencies = [
 
 [[package]]
 name = "nexguard"
-version = "1.9.39"
+version = "1.9.43"
 dependencies = [
+ "arboard",
  "base64 0.22.1",
  "boringtun",
  "ed25519-dalek",
