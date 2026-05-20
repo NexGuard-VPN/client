@@ -180,8 +180,8 @@ jobs:
             echo "::error::RELEASE_SIGNING_KEY secret is not set — in-app updater requires signatures"
             exit 1
           fi
-          umask 077
           KEY=$(mktemp)
+          chmod 600 "$KEY"
           printf '%s' "$RELEASE_SIGNING_KEY" > "$KEY"
           cd artifacts
           for f in \
@@ -193,6 +193,7 @@ jobs:
             if [ -f "$f" ]; then
               openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$f" -out "$f.sig.bin"
               xxd -p -c 256 < "$f.sig.bin" > "$f.sig"
+              chmod 644 "$f.sig"
               rm -f "$f.sig.bin"
               echo "signed: $f.sig"
             fi
