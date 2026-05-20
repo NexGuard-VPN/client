@@ -193,8 +193,100 @@ fn ensure_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+fn dechunk(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut pos = 0;
+    while pos < data.len() {
+        let line_end = match data[pos..].windows(2).position(|w| w == b"\r\n") {
+            Some(p) => pos + p,
+            None => break,
+        };
+        let size_hex = std::str::from_utf8(&data[pos..line_end])
+            .unwrap_or("")
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim();
+        let size = usize::from_str_radix(size_hex, 16).unwrap_or(0);
+        if size == 0 { break; }
+        let start = line_end + 2;
+        if start + size > data.len() { break; }
+        out.extend_from_slice(&data[start..start + size]);
+        pos = start + size + 2;
+    }
+    out
+}
+
+/// Reads a complete HTTP/1.1 response, honoring Content-Length and chunked
+/// transfer-encoding. Returns as soon as the body is complete instead of
+/// blocking on read-to-EOF: the download server replies `Connection:
+/// keep-alive` and never closes, so read-to-EOF stalled for the full
+/// socket read timeout on every request.
+fn read_http_response<R: std::io::Read>(mut r: R) -> Result<(u16, Vec<u8>), String> {
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 16384];
+
+    let header_end = loop {
+        if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break p + 4;
+        }
+        let n = r.read(&mut chunk).map_err(|e| format!("read: {}", e))?;
+        if n == 0 { return Err("connection closed before headers".into()); }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > 65536 { return Err("response headers too large".into()); }
+    };
+
+    let head = String::from_utf8_lossy(&buf[..header_end]);
+    let status: u16 = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .ok_or("malformed status line")?;
+
+    let mut content_length: Option<usize> = None;
+    let mut chunked = false;
+    for line in head.lines().skip(1) {
+        if line.is_empty() { break; }
+        let lower = line.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("content-length:") {
+            content_length = v.trim().parse().ok();
+        } else if lower.starts_with("transfer-encoding:") && lower.contains("chunked") {
+            chunked = true;
+        }
+    }
+
+    let mut body = buf[header_end..].to_vec();
+
+    if chunked {
+        while !body.ends_with(b"0\r\n\r\n") {
+            let n = r.read(&mut chunk).map_err(|e| format!("read: {}", e))?;
+            if n == 0 { break; }
+            body.extend_from_slice(&chunk[..n]);
+        }
+        body = dechunk(&body);
+    } else if let Some(cl) = content_length {
+        while body.len() < cl {
+            let n = r.read(&mut chunk).map_err(|e| format!("read: {}", e))?;
+            if n == 0 { break; }
+            body.extend_from_slice(&chunk[..n]);
+        }
+        body.truncate(cl);
+    } else {
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => body.extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    }
+
+    Ok((status, body))
+}
+
 fn http_get_tls(host: &str, path: &str) -> Option<String> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     ensure_crypto_provider();
 
     let addr = {
@@ -202,7 +294,7 @@ fn http_get_tls(host: &str, path: &str) -> Option<String> {
         format!("{}:443", host).to_socket_addrs().ok()?.next()?
     };
     let mut tcp = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)).ok()?;
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
 
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -220,11 +312,9 @@ fn http_get_tls(host: &str, path: &str) -> Option<String> {
         path, host
     );
     tls.write_all(req.as_bytes()).ok()?;
-    let mut resp = Vec::new();
-    let _ = tls.read_to_end(&mut resp);
-    let text = String::from_utf8_lossy(&resp);
-    let body_start = text.find("\r\n\r\n")? + 4;
-    Some(text[body_start..].to_string())
+    let (status, body) = read_http_response(&mut tls).ok()?;
+    if status != 200 { return None; }
+    Some(String::from_utf8_lossy(&body).into_owned())
 }
 
 #[derive(Clone)]
@@ -286,16 +376,16 @@ pub fn join_via_api_with_routes(url: &str, token: &str, pub_key: &str, name: &st
         "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         path, host, token, body.len(), body
     );
-    use std::io::{Read, Write};
+    use std::io::Write;
     tls.write_all(req.as_bytes()).map_err(|e| format!("write: {}", e))?;
-    let mut resp = Vec::new();
-    let _ = tls.read_to_end(&mut resp);
-    let text = String::from_utf8_lossy(&resp);
-    let body_start = text.find("\r\n\r\n")
-        .ok_or("invalid response")? + 4;
+    let (status, body_bytes) = read_http_response(&mut tls)?;
+    let body_text = String::from_utf8_lossy(&body_bytes);
+    if status != 200 {
+        return Err(format!("join failed: HTTP {} — {}", status, body_text));
+    }
 
-    let join_resp: JoinResponse = serde_json::from_str(&text[body_start..])
-        .map_err(|e| format!("join parse error: {} — {}", e, &text[body_start..]))?;
+    let join_resp: JoinResponse = serde_json::from_str(&body_text)
+        .map_err(|e| format!("join parse error: {} — {}", e, body_text))?;
 
     if let Some(ref did) = join_resp.device_id {
         if !did.is_empty() {
@@ -410,7 +500,7 @@ pub fn download_update(url: &str) -> Result<Vec<u8>, String> {
 }
 
 fn download_tls(host: &str, path: &str) -> Result<Vec<u8>, String> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     ensure_crypto_provider();
     let addr = {
         use std::net::ToSocketAddrs;
@@ -440,11 +530,11 @@ fn download_tls(host: &str, path: &str) -> Result<Vec<u8>, String> {
         path, host
     );
     tls.write_all(req.as_bytes()).map_err(|e| format!("write: {}", e))?;
-    let mut resp = Vec::new();
-    let _ = tls.read_to_end(&mut resp);
-    let text = String::from_utf8_lossy(&resp);
-    let body_start = text.find("\r\n\r\n").ok_or("no headers")? + 4;
-    Ok(resp[body_start..].to_vec())
+    let (status, body) = read_http_response(&mut tls)?;
+    if status != 200 {
+        return Err(format!("HTTP {}", status));
+    }
+    Ok(body)
 }
 
 pub fn self_update(url: &str) -> Result<(), String> {

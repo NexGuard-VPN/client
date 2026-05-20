@@ -172,14 +172,45 @@ jobs:
           done
           ls -la
 
+      - name: Sign artifacts
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "::error::RELEASE_SIGNING_KEY secret is not set — in-app updater requires signatures"
+            exit 1
+          fi
+          umask 077
+          KEY=$(mktemp)
+          printf '%s' "$RELEASE_SIGNING_KEY" > "$KEY"
+          cd artifacts
+          for f in \
+            nexguard-macos-${VERSION} \
+            nexguard-macos-intel-${VERSION} \
+            nexguard-linux-${VERSION} \
+            nexguard-linux-arm64-${VERSION} \
+            nexguard-windows-${VERSION}.exe; do
+            if [ -f "$f" ]; then
+              openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$f" -out "$f.sig.bin"
+              xxd -p -c 256 < "$f.sig.bin" > "$f.sig"
+              rm -f "$f.sig.bin"
+              echo "signed: $f.sig"
+            fi
+          done
+          rm -f "$KEY"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/nexguard-macos-${{ env.VERSION }}
+            artifacts/nexguard-macos-${{ env.VERSION }}.sig
             artifacts/nexguard-linux-${{ env.VERSION }}
+            artifacts/nexguard-linux-${{ env.VERSION }}.sig
             artifacts/nexguard-linux-arm64-${{ env.VERSION }}
+            artifacts/nexguard-linux-arm64-${{ env.VERSION }}.sig
             artifacts/nexguard-windows-${{ env.VERSION }}.exe
+            artifacts/nexguard-windows-${{ env.VERSION }}.exe.sig
             artifacts/NexGuard-${{ env.VERSION }}.dmg
             artifacts/version.json
           generate_release_notes: true
@@ -190,7 +221,7 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: root
           key: ${{ secrets.SSH_KEY }}
-          source: "artifacts/nexguard-macos-${{ env.VERSION }},artifacts/nexguard-macos-intel-${{ env.VERSION }},artifacts/nexguard-linux-${{ env.VERSION }},artifacts/nexguard-linux-arm64-${{ env.VERSION }},artifacts/nexguard-windows-${{ env.VERSION }}.exe,artifacts/NexGuard-${{ env.VERSION }}.dmg,artifacts/version.json"
+          source: "artifacts/nexguard-macos-${{ env.VERSION }},artifacts/nexguard-macos-${{ env.VERSION }}.sig,artifacts/nexguard-macos-intel-${{ env.VERSION }},artifacts/nexguard-macos-intel-${{ env.VERSION }}.sig,artifacts/nexguard-linux-${{ env.VERSION }},artifacts/nexguard-linux-${{ env.VERSION }}.sig,artifacts/nexguard-linux-arm64-${{ env.VERSION }},artifacts/nexguard-linux-arm64-${{ env.VERSION }}.sig,artifacts/nexguard-windows-${{ env.VERSION }}.exe,artifacts/nexguard-windows-${{ env.VERSION }}.exe.sig,artifacts/NexGuard-${{ env.VERSION }}.dmg,artifacts/version.json"
           target: /var/www/nexguard/download/
           strip_components: 1
           overwrite: true
