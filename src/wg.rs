@@ -386,6 +386,133 @@ pub fn run_data_plane_tls<S: Read + Write>(
     log!("[vpn-client] shutdown (tls)");
 }
 
+/// Relayless data plane: WireGuard straight to the server's UDP endpoint, no
+/// relay/QUIC/TLS framing. WireGuard packets are sent as raw UDP datagrams —
+/// lowest overhead, for clients that can reach the server over UDP directly.
+pub fn run_data_plane_udp(
+    tun: &TunDevice,
+    udp: &std::net::UdpSocket,
+    server_endpoint: std::net::SocketAddr,
+    tunnel: &Mutex<WgState>,
+    tx: &AtomicU64,
+    rx: &AtomicU64,
+    shutdown: &AtomicBool,
+    mesh: Option<&crate::mesh::MeshManager>,
+) {
+    let mut tun_buf = vec![0u8; MAX_PACKET];
+    let mut net_buf = vec![0u8; MAX_PACKET];
+    let mut enc_buf = vec![0u8; WG_BUF_SIZE];
+    let mut dec_buf = vec![0u8; WG_BUF_SIZE];
+    let mut last_tick = std::time::Instant::now();
+    let mut last_stats = std::time::Instant::now();
+
+    // Kick off the WireGuard handshake proactively.
+    {
+        let mut wg = tunnel.lock().unwrap();
+        if let TunnResult::WriteToNetwork(data) = wg.tunn.encapsulate(&[], &mut enc_buf) {
+            let _ = udp.send_to(data, server_endpoint);
+        }
+    }
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) { break; }
+        let mut did_work = false;
+
+        // TUN → WireGuard → UDP
+        for _ in 0..64 {
+            match tun.read_packet(&mut tun_buf) {
+                Ok(n) if n > 0 => {
+                    did_work = true;
+                    let sent_via_mesh = if let Some(m) = mesh {
+                        if n >= 20 {
+                            let dst_ip = u32::from_be_bytes([tun_buf[16], tun_buf[17], tun_buf[18], tun_buf[19]]);
+                            m.try_send(&tun_buf[..n], dst_ip)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !sent_via_mesh {
+                        let mut wg = tunnel.lock().unwrap();
+                        if let TunnResult::WriteToNetwork(data) = wg.tunn.encapsulate(&tun_buf[..n], &mut enc_buf) {
+                            let _ = udp.send_to(data, server_endpoint);
+                            tx.fetch_add(data.len() as u64, Ordering::Relaxed);
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        if let Some(m) = mesh {
+            m.recv_and_process(tun);
+        }
+
+        // UDP → WireGuard → TUN
+        match udp.recv_from(&mut net_buf) {
+            Ok((n, _from)) if n > 0 => {
+                did_work = true;
+                let mut wg = tunnel.lock().unwrap();
+                match wg.tunn.decapsulate(None, &net_buf[..n], &mut dec_buf) {
+                    TunnResult::WriteToTunnelV4(payload, _)
+                    | TunnResult::WriteToTunnelV6(payload, _) => {
+                        let _ = tun.write_packet(payload);
+                        rx.fetch_add(n as u64, Ordering::Relaxed);
+                    }
+                    TunnResult::WriteToNetwork(resp) => {
+                        let _ = udp.send_to(resp, server_endpoint);
+                        loop {
+                            match wg.tunn.decapsulate(None, &[], &mut dec_buf) {
+                                TunnResult::WriteToNetwork(d) => {
+                                    let _ = udp.send_to(d, server_endpoint);
+                                }
+                                TunnResult::WriteToTunnelV4(d, _)
+                                | TunnResult::WriteToTunnelV6(d, _) => {
+                                    let _ = tun.write_packet(d);
+                                    rx.fetch_add(n as u64, Ordering::Relaxed);
+                                    break;
+                                }
+                                _ => break,
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(_) => {}
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => {
+                log!("[vpn-client] udp recv error: {}", e);
+                break;
+            }
+        }
+
+        if last_tick.elapsed().as_millis() >= TIMER_TICK_MS {
+            last_tick = std::time::Instant::now();
+            let mut wg = tunnel.lock().unwrap();
+            if let TunnResult::WriteToNetwork(data) = wg.tunn.update_timers(&mut enc_buf) {
+                let _ = udp.send_to(data, server_endpoint);
+            }
+            drop(wg);
+            if let Some(m) = mesh {
+                m.tick();
+            }
+        }
+
+        if last_stats.elapsed().as_secs() >= STATS_INTERVAL_SECS {
+            last_stats = std::time::Instant::now();
+            log!("[vpn-client] tx={} rx={} (udp)", fmt_bytes(tx.load(Ordering::Relaxed)), fmt_bytes(rx.load(Ordering::Relaxed)));
+        }
+
+        if !did_work {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+    }
+    log!("[vpn-client] shutdown (udp)");
+}
+
 fn do_rekey<S: Read + Write>(
     tunnel: &Mutex<WgState>,
     ctx: &RekeyCtx,

@@ -280,7 +280,16 @@ fn main() {
     const MAX_BACKOFF_MS: u64 = 30_000;
 
     if relay_addrs.is_empty() {
-        eprintln!("[vpn-client] error: no relay address configured");
+        // Relayless / direct mode: WireGuard straight to the server's UDP
+        // endpoint, no relay hop. Used when --relay is not provided.
+        eprintln!("[vpn-client] relayless mode: direct WireGuard to {}", server_endpoint);
+        match std::net::UdpSocket::bind("0.0.0.0:0") {
+            Ok(udp) => {
+                let _ = udp.set_read_timeout(Some(std::time::Duration::from_millis(50)));
+                wg::run_data_plane_udp(&tun_dev, &udp, server_endpoint, &tunnel, &tx, &rx, &SHUTDOWN, mesh_ref);
+            }
+            Err(e) => eprintln!("[vpn-client] udp bind failed: {}", e),
+        }
         drop(exit_state);
         return;
     }
