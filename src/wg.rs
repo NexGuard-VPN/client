@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use boringtun::noise::{Tunn, TunnResult};
+use sha2::Digest;
 
 use crate::tun::TunDevice;
 
@@ -21,6 +22,9 @@ const TIMER_TICK_MS: u128 = 250;
 const STATS_INTERVAL_SECS: u64 = 30;
 const TLS_READ_TIMEOUT: Duration = Duration::from_millis(5);
 const TLS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+const RELAY_SPKI_PINS_ENV: &str = "NEXGUARD_RELAY_SPKI_PINS";
+const SPKI_PIN_LEN: usize = 32;
 
 const SNI_POOL: &[&str] = &[
     "www.cloudflare.com",
@@ -52,13 +56,96 @@ fn pick_random_sni() -> &'static str {
     SNI_POOL[pseudo_random_index(SNI_POOL.len())]
 }
 
-#[derive(Debug)]
-struct LooseHostnameVerifier {
-    inner: Arc<rustls::client::WebPkiServerVerifier>,
-    real_name: rustls::pki_types::ServerName<'static>,
+fn relay_host(relay_addr: &str) -> &str {
+    if let Some(rest) = relay_addr.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or("");
+    }
+    if relay_addr.parse::<std::net::IpAddr>().is_ok() {
+        return relay_addr;
+    }
+    relay_addr.rsplit_once(':').map(|(host, _)| host).unwrap_or(relay_addr)
 }
 
-impl rustls::client::danger::ServerCertVerifier for LooseHostnameVerifier {
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn decode_spki_pin(raw: &str) -> Option<[u8; SPKI_PIN_LEN]> {
+    use base64::Engine;
+    let bytes = hex::decode(raw)
+        .ok()
+        .or_else(|| base64::engine::general_purpose::STANDARD.decode(raw).ok())
+        .or_else(|| base64::engine::general_purpose::STANDARD_NO_PAD.decode(raw).ok())?;
+    bytes.try_into().ok()
+}
+
+fn configured_spki_pins() -> Result<Vec<[u8; SPKI_PIN_LEN]>, String> {
+    std::env::var(RELAY_SPKI_PINS_ENV)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|pin| !pin.is_empty())
+        .map(|pin| {
+            decode_spki_pin(pin)
+                .ok_or_else(|| format!("{}: not a {}-byte hex/base64 digest", RELAY_SPKI_PINS_ENV, SPKI_PIN_LEN))
+        })
+        .collect()
+}
+
+enum RelayTrust {
+    Hostname(rustls::pki_types::ServerName<'static>),
+    SpkiPins(Vec<[u8; SPKI_PIN_LEN]>),
+    TrustAnchorOnly,
+}
+
+struct RelayCertVerifier {
+    inner: Arc<rustls::client::WebPkiServerVerifier>,
+    roots: Arc<rustls::RootCertStore>,
+    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+    trust: RelayTrust,
+}
+
+impl std::fmt::Debug for RelayCertVerifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RelayCertVerifier")
+    }
+}
+
+impl RelayCertVerifier {
+    fn verify_chain(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<(), rustls::Error> {
+        let cert = rustls::server::ParsedCertificate::try_from(end_entity)?;
+        rustls::client::verify_server_cert_signed_by_trust_anchor(
+            &cert,
+            &self.roots,
+            intermediates,
+            now,
+            self.algorithms.all,
+        )
+    }
+
+    fn verify_pins(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        pins: &[[u8; SPKI_PIN_LEN]],
+    ) -> Result<(), rustls::Error> {
+        let cert = rustls::server::ParsedCertificate::try_from(end_entity)?;
+        let digest = sha2::Sha256::digest(cert.subject_public_key_info().as_ref());
+        if pins.iter().any(|pin| ct_eq(pin, digest.as_slice())) {
+            Ok(())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ))
+        }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for RelayCertVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &rustls::pki_types::CertificateDer<'_>,
@@ -67,7 +154,14 @@ impl rustls::client::danger::ServerCertVerifier for LooseHostnameVerifier {
         ocsp_response: &[u8],
         now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        self.inner.verify_server_cert(end_entity, intermediates, &self.real_name, ocsp_response, now)
+        match &self.trust {
+            RelayTrust::Hostname(name) => {
+                return self.inner.verify_server_cert(end_entity, intermediates, name, ocsp_response, now);
+            }
+            RelayTrust::SpkiPins(pins) => self.verify_pins(end_entity, pins)?,
+            RelayTrust::TrustAnchorOnly => self.verify_chain(end_entity, intermediates, now)?,
+        }
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -93,9 +187,38 @@ impl rustls::client::danger::ServerCertVerifier for LooseHostnameVerifier {
     }
 }
 
+fn relay_trust(relay_addr: &str) -> Result<RelayTrust, String> {
+    let host = relay_host(relay_addr);
+    if !host.is_empty() && host.parse::<std::net::IpAddr>().is_err() {
+        let name = rustls::pki_types::ServerName::try_from(host.to_string())
+            .map_err(|e| format!("relay name {}: {}", host, e))?;
+        return Ok(RelayTrust::Hostname(name));
+    }
+
+    let pins = configured_spki_pins()?;
+    if pins.is_empty() {
+        log!(
+            "[vpn-client] relay {} has no verifiable hostname and {} is unset: \
+             certificate chain is validated against the webpki roots without any name binding",
+            relay_addr,
+            RELAY_SPKI_PINS_ENV
+        );
+        Ok(RelayTrust::TrustAnchorOnly)
+    } else {
+        log!("[vpn-client] relay {} pinned to {} SPKI digest(s)", relay_addr, pins.len());
+        Ok(RelayTrust::SpkiPins(pins))
+    }
+}
+
 pub struct WgState {
     pub tunn: Tunn,
     pub server_pub_key: boringtun::x25519::PublicKey,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum LinkHealth {
+    Connected,
+    Degraded,
 }
 
 pub fn connect_relay(
@@ -107,22 +230,16 @@ pub fn connect_relay(
 
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let roots = Arc::new(root_store);
 
-    let real_host = relay_addr.split(':').next().unwrap_or("");
-    let real_host_owned = if real_host.is_empty() || real_host.parse::<std::net::IpAddr>().is_ok() {
-        SNI_POOL[0].to_string()
-    } else {
-        real_host.to_string()
-    };
-    let real_name = rustls::pki_types::ServerName::try_from(real_host_owned.clone())
-        .map_err(|e| format!("real name: {}", e))?;
-
-    let inner_verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(root_store))
+    let inner = rustls::client::WebPkiServerVerifier::builder(roots.clone())
         .build()
         .map_err(|e| format!("verifier: {}", e))?;
-    let verifier = Arc::new(LooseHostnameVerifier {
-        inner: inner_verifier,
-        real_name,
+    let verifier = Arc::new(RelayCertVerifier {
+        inner,
+        roots,
+        algorithms: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        trust: relay_trust(relay_addr)?,
     });
 
     let config = rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
@@ -213,6 +330,7 @@ pub fn run_data_plane_tls<S: Read + Write>(
     shutdown: &AtomicBool,
     mesh: Option<&crate::mesh::MeshManager>,
     rekey_ctx: Option<&RekeyCtx>,
+    on_health: Option<&dyn Fn(LinkHealth)>,
 ) {
     let mut tun_buf = vec![0u8; MAX_PACKET];
     let mut tls_buf = [0u8; MAX_PACKET];
@@ -226,6 +344,8 @@ pub fn run_data_plane_tls<S: Read + Write>(
     let mut last_health = std::time::Instant::now();
     let mut last_rx_check = rx.load(Ordering::Relaxed);
     let mut stall_count: u32 = 0;
+    let mut reported_connected = false;
+    let mut reported_degraded = false;
 
     loop {
         if shutdown.load(Ordering::Relaxed) { break; }
@@ -353,6 +473,11 @@ pub fn run_data_plane_tls<S: Read + Write>(
             log!("[vpn-client] tx={} rx={} (tls)", fmt_bytes(tx.load(Ordering::Relaxed)), fmt_bytes(rx.load(Ordering::Relaxed)));
         }
 
+        if !reported_connected && rx.load(Ordering::Relaxed) > 0 {
+            reported_connected = true;
+            if let Some(cb) = on_health { cb(LinkHealth::Connected); }
+        }
+
         if last_health.elapsed().as_secs() >= 10 {
             last_health = std::time::Instant::now();
             let current_rx = rx.load(Ordering::Relaxed);
@@ -363,10 +488,16 @@ pub fn run_data_plane_tls<S: Read + Write>(
                     log!("[vpn-client] connection stalled (no rx for 60s), reconnecting");
                     break;
                 }
-                if stall_count >= 3 {
+                if stall_count >= 3 && !reported_degraded {
+                    reported_degraded = true;
                     log!("[vpn-client] degraded connection (no rx for {}s)", stall_count * 10);
+                    if let Some(cb) = on_health { cb(LinkHealth::Degraded); }
                 }
             } else {
+                if reported_degraded {
+                    reported_degraded = false;
+                    if let Some(cb) = on_health { cb(LinkHealth::Connected); }
+                }
                 stall_count = 0;
             }
             last_rx_check = current_rx;

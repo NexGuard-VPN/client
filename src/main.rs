@@ -2,6 +2,7 @@ mod api;
 pub mod cache;
 pub mod fingerprint;
 pub mod mesh;
+mod paths;
 mod profiles;
 mod route;
 pub mod tray;
@@ -27,6 +28,23 @@ fn main() {
         std::env::consts::OS,
         std::env::consts::ARCH,
     );
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return;
+    }
+    if args.iter().any(|a| a == "--version" || a == "-v") {
+        eprintln!("nexguard {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
+    route::cleanup_orphaned();
+
+    if args.iter().any(|a| a == "--cleanup") {
+        route::cleanup_active_tuns();
+        eprintln!("[nexguard] cleanup complete");
+        std::process::exit(0);
+    }
 
     if args.iter().any(|a| a == "--install-service") {
         install_service(&args);
@@ -108,7 +126,13 @@ fn main() {
         api::parse_endpoint(&args.server)
     };
 
-    let tun_dev = tun::TunDevice::create(args.mtu);
+    let tun_dev = match tun::TunDevice::try_create(args.mtu) {
+        Ok(dev) => dev,
+        Err(e) => {
+            eprintln!("[vpn-client] tun creation failed: {}", e);
+            std::process::exit(1);
+        }
+    };
     tun_dev.set_address(ip, prefix);
 
     if let Some(ref v6) = join_resp.address_v6 {
@@ -147,43 +171,24 @@ fn main() {
         }
     }
 
+    let preserve_ips = if args.internet || args.kill_switch {
+        vpn::kill_switch_allow_ips(
+            Some(server_endpoint.ip()),
+            &args.server,
+            args.control_port,
+            args.relay.as_deref(),
+            args.join_url.as_deref(),
+        )
+    } else {
+        Vec::new()
+    };
+
     let exit_state = if args.internet {
-        use std::collections::BTreeSet;
-        use std::net::ToSocketAddrs;
-
-        let mut preserve_set: BTreeSet<String> = BTreeSet::new();
-
-        let push_resolved = |set: &mut BTreeSet<String>, host: &str, default_port: u16| {
-            let target = if host.contains(':') { host.to_string() } else { format!("{}:{}", host, default_port) };
-            if let Ok(addrs) = target.to_socket_addrs() {
-                for a in addrs {
-                    if !a.ip().is_loopback() && !a.ip().is_unspecified() {
-                        set.insert(a.ip().to_string());
-                    }
-                }
-            }
-        };
-
-        if !server_endpoint.ip().is_loopback() && !server_endpoint.ip().is_unspecified() {
-            preserve_set.insert(server_endpoint.ip().to_string());
-        }
-
-        if let Some(ref relays) = args.relay {
-            for relay in relays.split(',') {
-                let r = relay.trim();
-                if !r.is_empty() {
-                    push_resolved(&mut preserve_set, r, 443);
-                }
-            }
-        } else {
-            push_resolved(&mut preserve_set, &args.server, args.control_port);
-        }
-
-        if preserve_set.is_empty() {
+        if preserve_ips.is_empty() {
             eprintln!("[vpn-client] internet setup failed: could not resolve any relay/server IP to preserve");
-            None
+            finish_session(tun_dev.name(), args.internet);
+            std::process::exit(1);
         } else {
-            let preserve_ips: Vec<String> = preserve_set.into_iter().collect();
             let preserve_refs: Vec<&str> = preserve_ips.iter().map(|s| s.as_str()).collect();
             let has_v6 = join_resp.vpn_network_v6.is_some();
             match route::ExitRouteState::setup_dual(&preserve_refs, tun_dev.name(), has_v6) {
@@ -193,7 +198,8 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("[vpn-client] internet setup failed: {}", e);
-                    None
+                    finish_session(tun_dev.name(), args.internet);
+                    std::process::exit(1);
                 }
             }
         }
@@ -222,7 +228,7 @@ fn main() {
     let rx = AtomicU64::new(0);
 
     let mesh_mgr = if join_resp.mesh.unwrap_or(false) {
-        let mesh_port = args.listen_port.wrapping_add(1);
+        let mesh_port = vpn::mesh_port(args.listen_port);
         let mgr = Arc::new(mesh::MeshManager::new(private_key, mesh_port));
         if let Some(ref peers) = join_resp.mesh_peers {
             let parsed = api::parse_mesh_peers(peers);
@@ -264,9 +270,35 @@ fn main() {
 
     setup_signal_handler();
 
+    if args.internet || args.kill_switch {
+        route::register_active_tun(tun_dev.name());
+    }
+
     let _kill_switch = if args.kill_switch {
-        let server_ip = server_endpoint.ip().to_string();
-        Some(route::KillSwitch::activate(tun_dev.name(), &[&server_ip]))
+        let allow_refs: Vec<&str> = preserve_ips.iter().map(|s| s.as_str()).collect();
+        Some(route::KillSwitch::activate(tun_dev.name(), &allow_refs))
+    } else {
+        None
+    };
+
+    let _dns_state = if args.internet {
+        let servers = vpn::resolve_dns_servers(join_resp.dns.as_ref(), &args.dns);
+        if servers.is_empty() {
+            eprintln!("[vpn-client] warning: no DNS server provided — system resolvers left untouched, DNS may leak");
+            None
+        } else {
+            match route::DnsState::apply(tun_dev.name(), &servers) {
+                Ok(state) => {
+                    eprintln!("[vpn-client] dns set to {}", servers.join(","));
+                    Some(state)
+                }
+                Err(e) => {
+                    eprintln!("[vpn-client] dns setup failed: {}", e);
+                    finish_session(&tun_name_for_cleanup, has_internet);
+                    std::process::exit(1);
+                }
+            }
+        }
     } else {
         None
     };
@@ -291,6 +323,7 @@ fn main() {
             Err(e) => eprintln!("[vpn-client] udp bind failed: {}", e),
         }
         drop(exit_state);
+        finish_session(&tun_name_for_cleanup, has_internet);
         return;
     }
 
@@ -308,7 +341,7 @@ fn main() {
                     eprintln!("[vpn-client] relay connected via TLS {}", addr);
                     connected = true;
                     wg::run_data_plane_tls(&tun_dev, &mut stream, &tunnel, &tx, &rx, &SHUTDOWN,
-                        mesh_ref, Some(&rekey_ctx));
+                        mesh_ref, Some(&rekey_ctx), None);
                     break;
                 }
                 Err(e) => eprintln!("[vpn-client] TLS {} failed: {}", addr, e),
@@ -330,9 +363,15 @@ fn main() {
     eprintln!("[vpn-client] cleaning up routes...");
     drop(exit_state);
     drop(mesh_mgr);
-    if has_internet {
-        route::emergency_cleanup(&tun_name_for_cleanup);
+    finish_session(&tun_name_for_cleanup, has_internet);
+}
+
+fn finish_session(tun_name: &str, internet: bool) {
+    if internet {
+        route::emergency_cleanup(tun_name);
     }
+    route::unregister_active_tun(tun_name);
+    route::clear_active_session();
 }
 
 fn key_path() -> std::path::PathBuf {
@@ -340,27 +379,8 @@ fn key_path() -> std::path::PathBuf {
     dir.join("client.key")
 }
 
-fn dirs_next() -> Option<std::path::PathBuf> {
-    let home = std::env::var("SUDO_USER").ok()
-        .filter(|u| u.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'))
-        .and_then(|u| {
-            #[cfg(unix)]
-            {
-                let out = std::process::Command::new("getent")
-                    .args(["passwd", &u])
-                    .output().ok()?;
-                let line = String::from_utf8_lossy(&out.stdout);
-                let h = line.split(':').nth(5)?.trim().to_string();
-                if h.is_empty() { None } else { Some(h) }
-            }
-            #[cfg(not(unix))]
-            { None }
-        })
-        .or_else(|| std::env::var("HOME").ok())
-        .or_else(|| std::env::var("USERPROFILE").ok())?;
-    let dir = std::path::PathBuf::from(home).join(".nexguard");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
+pub fn dirs_next() -> Option<std::path::PathBuf> {
+    paths::storage_dir()
 }
 
 pub fn load_or_generate_key() -> [u8; 32] {
@@ -428,28 +448,7 @@ pub fn jittered_keepalive() -> u16 {
 
 pub fn generate_private_key() -> [u8; 32] {
     let mut key = [0u8; 32];
-    #[cfg(unix)]
-    {
-        let fd = unsafe { libc::open(b"/dev/urandom\0".as_ptr() as *const _, libc::O_RDONLY) };
-        if fd >= 0 {
-            unsafe {
-                libc::read(fd, key.as_mut_ptr() as *mut _, 32);
-                libc::close(fd);
-            }
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::Security::Cryptography::*;
-        unsafe {
-            BCryptGenRandom(
-                std::ptr::null_mut(),
-                key.as_mut_ptr(),
-                key.len() as u32,
-                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-            );
-        }
-    }
+    getrandom::fill(&mut key).expect("CSPRNG unavailable");
     key
 }
 
@@ -520,6 +519,28 @@ struct Args {
     join_url: Option<String>,
     advertise_routes: Vec<String>,
     kill_switch: bool,
+    dns: Vec<String>,
+}
+
+fn print_help() {
+    eprintln!("Usage: nexguard [OPTIONS]");
+    eprintln!("");
+    eprintln!("  nexguard                              Open GUI (default)");
+    eprintln!("  nexguard --server IP --token TOKEN    Open GUI with server pre-filled");
+    eprintln!("  nexguard --cli --server IP --token T  CLI mode (no GUI)");
+    eprintln!("");
+    eprintln!("Options:");
+    eprintln!("  -s, --server IP:PORT      VPN server address");
+    eprintln!("  -t, --token TOKEN         Auth token");
+    eprintln!("  -n, --name NAME           Client name");
+    eprintln!("  -r, --relay IP:443        Relay server (tunnel through nexguard relay)");
+    eprintln!("  --internet                Route all traffic through VPN");
+    eprintln!("  --dns IP[,IP]             DNS servers used while connected");
+    eprintln!("  --kill-switch             Block traffic outside the tunnel");
+    eprintln!("  --cleanup                 Remove leftover routes, DNS and kill-switch rules and exit");
+    eprintln!("  --cli, --no-gui           Force CLI mode");
+    eprintln!("  --gui                     Force GUI mode");
+    eprintln!("  -v, --version             Print version and exit");
 }
 
 fn parse_args() -> Args {
@@ -535,6 +556,7 @@ fn parse_args() -> Args {
     let mut relay = None;
     let mut advertise_routes = Vec::new();
     let mut kill_switch = false;
+    let mut dns: Vec<String> = Vec::new();
 
     let mut i = 1;
     while i < argv.len() {
@@ -555,26 +577,19 @@ fn parse_args() -> Args {
             }
             "--internet" | "--exit" => { internet = true; }
             "--kill-switch" | "--killswitch" => { kill_switch = true; }
-            "--gui" | "--cli" | "--no-gui" => {}
+            "--dns" => {
+                i += 1;
+                if i < argv.len() {
+                    dns = argv[i].split(api::DNS_LIST_SEPARATOR).map(|s| s.trim().to_string()).collect();
+                }
+            }
+            "--gui" | "--cli" | "--no-gui" | "--cleanup" => {}
             "--version" | "-v" => {
                 eprintln!("nexguard {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "--help" | "-h" => {
-                eprintln!("Usage: nexguard [OPTIONS]");
-                eprintln!("");
-                eprintln!("  nexguard                              Open GUI (default)");
-                eprintln!("  nexguard --server IP --token TOKEN    Open GUI with server pre-filled");
-                eprintln!("  nexguard --cli --server IP --token T  CLI mode (no GUI)");
-                eprintln!("");
-                eprintln!("Options:");
-                eprintln!("  -s, --server IP:PORT      VPN server address");
-                eprintln!("  -t, --token TOKEN         Auth token");
-                eprintln!("  -n, --name NAME           Client name");
-                eprintln!("  -r, --relay IP:443        Relay server (tunnel through nexguard relay)");
-                eprintln!("  --internet                Route all traffic through VPN");
-                eprintln!("  --cli, --no-gui           Force CLI mode");
-                eprintln!("  --gui                     Force GUI mode");
+                print_help();
                 std::process::exit(0);
             }
             _ => {
@@ -621,7 +636,7 @@ fn parse_args() -> Args {
 
     if relay.is_none() { relay = std::env::var("VPN_RELAY").ok(); }
 
-    Args { server, token, name, control_port, listen_port, mtu, vpn_network, internet, relay, relay_name, join_url, advertise_routes, kill_switch }
+    Args { server, token, name, control_port, listen_port, mtu, vpn_network, internet, relay, relay_name, join_url, advertise_routes, kill_switch, dns }
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
@@ -660,18 +675,7 @@ pub fn generate_client_name() -> String {
             else { "linux" };
 
         let mut seed = [0u8; 4];
-        #[cfg(unix)]
-        {
-            let fd = unsafe { libc::open(b"/dev/urandom\0".as_ptr() as *const _, libc::O_RDONLY) };
-            if fd >= 0 {
-                unsafe { libc::read(fd, seed.as_mut_ptr() as *mut _, 4); libc::close(fd); }
-            }
-        }
-        #[cfg(target_os = "windows")]
-        {
-            use windows_sys::Win32::Security::Cryptography::*;
-            unsafe { BCryptGenRandom(std::ptr::null_mut(), seed.as_mut_ptr(), 4, BCRYPT_USE_SYSTEM_PREFERRED_RNG); }
-        }
+        getrandom::fill(&mut seed).expect("CSPRNG unavailable");
 
         let name = format!("{}-{}-{:02x}{:02x}", hostname, os_name, seed[0], seed[1]);
         let _ = std::fs::write(&id_path, &name);
@@ -715,6 +719,7 @@ fn install_service(args: &[String]) {
             token: t.clone(),
             internet,
             share_lan: false,
+            kill_switch: false,
         };
         let mut profiles_list = crate::profiles::load();
         crate::profiles::add(&mut profiles_list, profile);

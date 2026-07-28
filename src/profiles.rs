@@ -9,20 +9,15 @@ pub struct ServerProfile {
     pub internet: bool,
     #[serde(default)]
     pub share_lan: bool,
+    #[serde(default)]
+    pub kill_switch: bool,
 }
+
+const PROFILES_FILE: &str = "servers.json";
 
 fn profiles_path() -> PathBuf {
-    let dir = dirs_next().unwrap_or_else(|| PathBuf::from("."));
-    dir.join("servers.json")
-}
-
-fn dirs_next() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    { std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".nexguard")) }
-    #[cfg(target_os = "linux")]
-    { std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".nexguard")) }
-    #[cfg(target_os = "windows")]
-    { std::env::var("APPDATA").ok().map(|h| PathBuf::from(h).join("NexGuard")) }
+    let dir = crate::dirs_next().unwrap_or_else(|| PathBuf::from("."));
+    dir.join(PROFILES_FILE)
 }
 
 pub fn load() -> Vec<ServerProfile> {
@@ -58,6 +53,7 @@ pub fn add(profiles: &mut Vec<ServerProfile>, profile: ServerProfile) {
         existing.name = profile.name;
         existing.internet = profile.internet;
         existing.share_lan = profile.share_lan;
+        existing.kill_switch = profile.kill_switch;
     } else {
         profiles.push(profile);
     }
@@ -66,7 +62,22 @@ pub fn add(profiles: &mut Vec<ServerProfile>, profile: ServerProfile) {
 
 pub fn remove(profiles: &mut Vec<ServerProfile>, index: usize) {
     if index < profiles.len() {
-        profiles.remove(index);
+        let removed = profiles.remove(index);
+        invalidate_cache(&removed);
         save(profiles);
+    }
+}
+
+pub fn clear_all(profiles: &mut Vec<ServerProfile>) {
+    for profile in profiles.iter() {
+        invalidate_cache(profile);
+    }
+    profiles.clear();
+    save(profiles);
+}
+
+fn invalidate_cache(profile: &ServerProfile) {
+    if !profile.token.is_empty() {
+        crate::cache::invalidate(&profile.token);
     }
 }

@@ -3,21 +3,14 @@ use std::net::Ipv4Addr;
 pub struct TunDevice {
     #[cfg(unix)]
     fd: i32,
+    #[cfg(windows)]
+    wintun: platform::WintunSession,
     name: String,
 }
 
 impl TunDevice {
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    pub fn try_create(mtu: usize) -> Result<Self, String> {
-        std::panic::catch_unwind(|| Self::create(mtu))
-            .map_err(|e| {
-                if let Some(s) = e.downcast_ref::<&str>() { s.to_string() }
-                else if let Some(s) = e.downcast_ref::<String>() { s.clone() }
-                else { "TUN device creation failed".to_string() }
-            })
     }
 
     pub fn set_address_v6(&self, ip: &str, prefix: u8) {
@@ -36,11 +29,13 @@ impl TunDevice {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod platform {
     use super::*;
 
     const TUNSETIFF: u64 = 0x400454CA;
+    const TUN_DEVICE_PATH: &[u8] = b"/dev/net/tun\0";
+    const IFNAME_LEN: usize = 16;
 
     #[repr(C)]
     struct IfReq {
@@ -57,30 +52,31 @@ mod platform {
     }
 
     impl TunDevice {
-        pub fn create(mtu: usize) -> Self {
-            let fd = unsafe { libc::open(b"/dev/net/tun\0".as_ptr() as *const _, libc::O_RDWR) };
+        pub fn try_create(mtu: usize) -> Result<Self, String> {
+            let fd = unsafe { libc::open(TUN_DEVICE_PATH.as_ptr() as *const _, libc::O_RDWR) };
             if fd < 0 {
-                panic!("failed to open /dev/net/tun: {}", std::io::Error::last_os_error());
+                return Err(format!("failed to open tun device: {}", std::io::Error::last_os_error()));
             }
 
             let mut ifr = IfReq {
-                ifr_name: [0u8; 16],
+                ifr_name: [0u8; IFNAME_LEN],
                 ifr_flags: (libc::IFF_TUN | libc::IFF_NO_PI) as i16,
                 _pad: [0u8; 22],
             };
 
             if unsafe { libc::ioctl(fd, TUNSETIFF, &mut ifr as *mut _) } < 0 {
+                let err = std::io::Error::last_os_error();
                 unsafe { libc::close(fd); }
-                panic!("TUNSETIFF failed: {}", std::io::Error::last_os_error());
+                return Err(format!("TUNSETIFF failed: {}", err));
             }
 
-            let name_end = ifr.ifr_name.iter().position(|&b| b == 0).unwrap_or(16);
+            let name_end = ifr.ifr_name.iter().position(|&b| b == 0).unwrap_or(IFNAME_LEN);
             let name = String::from_utf8_lossy(&ifr.ifr_name[..name_end]).into_owned();
 
             set_mtu(&name, mtu);
             set_nonblocking(fd);
 
-            Self { fd, name }
+            Ok(Self { fd, name })
         }
 
         pub fn set_address(&self, ip: Ipv4Addr, prefix: u8) {
@@ -125,6 +121,11 @@ mod platform {
             }
         }
 
+        pub fn from_raw_fd(fd: i32) -> Self {
+            set_nonblocking(fd);
+            Self { fd, name: String::new() }
+        }
+
         pub fn read_packet(&self, buf: &mut [u8]) -> std::io::Result<usize> {
             let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut _, buf.len()) };
             if n < 0 {
@@ -162,7 +163,7 @@ mod platform {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod platform {
     use super::*;
 
@@ -172,6 +173,17 @@ mod platform {
     const CTLIOCGINFO: u64 = 0xc0644e03;
     const AF_INET: [u8; 4] = [0, 0, 0, 2];
     const AF_INET6: [u8; 4] = [0, 0, 0, 30];
+    const AF_HEADER_LEN: usize = 4;
+    const SCRATCH_SIZE: usize = 65536 + AF_HEADER_LEN;
+    const MAX_UTUN_UNITS: u32 = 256;
+    const IP_VERSION_6: u8 = 6;
+
+    thread_local! {
+        static READ_SCRATCH: std::cell::RefCell<Vec<u8>> =
+            std::cell::RefCell::new(vec![0u8; SCRATCH_SIZE]);
+        static WRITE_SCRATCH: std::cell::RefCell<Vec<u8>> =
+            std::cell::RefCell::new(Vec::with_capacity(SCRATCH_SIZE));
+    }
 
     #[repr(C)]
     struct CtlInfo {
@@ -190,12 +202,12 @@ mod platform {
     }
 
     impl TunDevice {
-        pub fn create(mtu: usize) -> Self {
+        pub fn try_create(mtu: usize) -> Result<Self, String> {
             let fd = unsafe {
                 libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, SYSPROTO_CONTROL)
             };
             if fd < 0 {
-                panic!("failed to create utun socket: {}", std::io::Error::last_os_error());
+                return Err(format!("failed to create utun socket: {}", std::io::Error::last_os_error()));
             }
 
             let mut info = CtlInfo { ctl_id: 0, ctl_name: [0u8; 96] };
@@ -203,12 +215,13 @@ mod platform {
                 .copy_from_slice(UTUN_CONTROL_NAME);
 
             if unsafe { libc::ioctl(fd, CTLIOCGINFO, &mut info as *mut _) } < 0 {
+                let err = std::io::Error::last_os_error();
                 unsafe { libc::close(fd); }
-                panic!("CTLIOCGINFO failed: {}", std::io::Error::last_os_error());
+                return Err(format!("CTLIOCGINFO failed: {}", err));
             }
 
             let mut name = String::new();
-            for unit in 0..256u32 {
+            for unit in 0..MAX_UTUN_UNITS {
                 let addr = SockaddrCtl {
                     sc_len: std::mem::size_of::<SockaddrCtl>() as u8,
                     sc_family: libc::AF_SYSTEM as u8,
@@ -232,13 +245,13 @@ mod platform {
 
             if name.is_empty() {
                 unsafe { libc::close(fd); }
-                panic!("failed to create utun device");
+                return Err("failed to create utun device: no free unit".to_string());
             }
 
             set_nonblocking(fd);
             set_mtu_cmd(&name, mtu);
 
-            Self { fd, name }
+            Ok(Self { fd, name })
         }
 
         pub fn set_address(&self, ip: Ipv4Addr, prefix: u8) {
@@ -264,36 +277,46 @@ mod platform {
                 .status();
         }
 
+        pub fn from_raw_fd(fd: i32) -> Self {
+            set_nonblocking(fd);
+            Self { fd, name: String::new() }
+        }
+
         pub fn read_packet(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let mut hdr_buf = [0u8; 65539];
-            let read_len = (buf.len() + 4).min(hdr_buf.len());
-            let n = unsafe { libc::read(self.fd, hdr_buf.as_mut_ptr() as *mut _, read_len) };
-            if n < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let n = n as usize;
-            if n <= 4 {
-                return Ok(0);
-            }
-            let payload = (n - 4).min(buf.len());
-            buf[..payload].copy_from_slice(&hdr_buf[4..4 + payload]);
-            Ok(payload)
+            READ_SCRATCH.with(|scratch| {
+                let mut scratch = scratch.borrow_mut();
+                let read_len = (buf.len() + AF_HEADER_LEN).min(scratch.len());
+                let n = unsafe { libc::read(self.fd, scratch.as_mut_ptr() as *mut _, read_len) };
+                if n < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let n = n as usize;
+                if n <= AF_HEADER_LEN {
+                    return Ok(0);
+                }
+                let payload = (n - AF_HEADER_LEN).min(buf.len());
+                buf[..payload].copy_from_slice(&scratch[AF_HEADER_LEN..AF_HEADER_LEN + payload]);
+                Ok(payload)
+            })
         }
 
         pub fn write_packet(&self, buf: &[u8]) -> std::io::Result<usize> {
-            let af = if !buf.is_empty() && (buf[0] >> 4) == 6 {
+            let af = if !buf.is_empty() && (buf[0] >> 4) == IP_VERSION_6 {
                 AF_INET6
             } else {
                 AF_INET
             };
-            let mut pkt = Vec::with_capacity(4 + buf.len());
-            pkt.extend_from_slice(&af);
-            pkt.extend_from_slice(buf);
-            let n = unsafe { libc::write(self.fd, pkt.as_ptr() as *const _, pkt.len()) };
-            if n < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(if (n as usize) > 4 { n as usize - 4 } else { 0 })
+            WRITE_SCRATCH.with(|scratch| {
+                let mut pkt = scratch.borrow_mut();
+                pkt.clear();
+                pkt.extend_from_slice(&af);
+                pkt.extend_from_slice(buf);
+                let n = unsafe { libc::write(self.fd, pkt.as_ptr() as *const _, pkt.len()) };
+                if n < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok((n as usize).saturating_sub(AF_HEADER_LEN))
+            })
         }
     }
 
@@ -309,37 +332,49 @@ mod platform {
     use super::*;
     use std::sync::Arc;
 
-    static WINTUN_ADAPTER: std::sync::OnceLock<Arc<wintun::Adapter>> = std::sync::OnceLock::new();
-    static WINTUN_SESSION: std::sync::OnceLock<Arc<wintun::Session>> = std::sync::OnceLock::new();
+    const ADAPTER_NAME: &str = "NexGuard";
+    const TUNNEL_TYPE: &str = "NexGuard VPN";
+    const RING_CAPACITY: u32 = wintun::MAX_RING_CAPACITY;
+
+    pub struct WintunSession {
+        session: Arc<wintun::Session>,
+    }
+
+    unsafe impl Send for WintunSession {}
+    unsafe impl Sync for WintunSession {}
+
+    impl Drop for WintunSession {
+        fn drop(&mut self) {
+            let _ = self.session.shutdown();
+        }
+    }
 
     impl TunDevice {
-        pub fn create(mtu: usize) -> Self {
-            let wintun = unsafe { wintun::load() }.unwrap_or_else(|e| {
-                panic!("wintun.dll not found: {}. Download from https://www.wintun.net/", e);
-            });
+        pub fn try_create(mtu: usize) -> Result<Self, String> {
+            let wintun = unsafe { wintun::load() }
+                .map_err(|e| format!("failed to load wintun driver: {}", e))?;
 
-            let adapter = match wintun::Adapter::open(&wintun, "NexGuard") {
+            let adapter = match wintun::Adapter::open(&wintun, ADAPTER_NAME) {
                 Ok(a) => a,
-                Err(_) => wintun::Adapter::create(&wintun, "NexGuard", "NexGuard VPN", None)
-                    .unwrap_or_else(|e| panic!("failed to create adapter: {}", e)),
+                Err(_) => wintun::Adapter::create(&wintun, ADAPTER_NAME, TUNNEL_TYPE, None)
+                    .map_err(|e| format!("failed to create adapter: {}", e))?,
             };
 
-            let session = adapter.start_session(wintun::MAX_RING_CAPACITY)
-                .unwrap_or_else(|e| panic!("failed to start session: {}", e));
+            let session = adapter.start_session(RING_CAPACITY)
+                .map_err(|e| format!("failed to start session: {}", e))?;
 
-            let name = adapter.get_name().unwrap_or_else(|_| "NexGuard".to_string());
-
-            let adapter = Arc::new(adapter);
-            let session = Arc::new(session);
-            let _ = WINTUN_ADAPTER.set(Arc::clone(&adapter));
-            let _ = WINTUN_SESSION.set(Arc::clone(&session));
+            let name = adapter.get_name()
+                .unwrap_or_else(|_| ADAPTER_NAME.to_string());
 
             let _ = std::process::Command::new("netsh")
                 .args(["interface", "ipv4", "set", "interface", &name,
                        &format!("mtu={}", mtu)])
                 .status();
 
-            Self { name }
+            Ok(Self {
+                wintun: WintunSession { session: Arc::new(session) },
+                name,
+            })
         }
 
         pub fn set_address(&self, ip: Ipv4Addr, prefix: u8) {
@@ -355,9 +390,7 @@ mod platform {
         pub fn set_up(&self) {}
 
         pub fn read_packet(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let session = WINTUN_SESSION.get()
-                .ok_or_else(|| std::io::Error::other("no session"))?;
-            match session.try_receive() {
+            match self.wintun.session.try_receive() {
                 Ok(Some(packet)) => {
                     let data = packet.bytes();
                     let len = data.len().min(buf.len());
@@ -370,21 +403,12 @@ mod platform {
         }
 
         pub fn write_packet(&self, buf: &[u8]) -> std::io::Result<usize> {
-            let session = WINTUN_SESSION.get()
-                .ok_or_else(|| std::io::Error::other("no session"))?;
-            let mut packet = session.allocate_send_packet(buf.len() as u16)
+            let mut packet = self.wintun.session.allocate_send_packet(buf.len() as u16)
                 .map_err(|e| std::io::Error::other(format!("alloc: {}", e)))?;
             packet.bytes_mut().copy_from_slice(buf);
-            session.send_packet(packet);
+            self.wintun.session.send_packet(packet);
             Ok(buf.len())
         }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for TunDevice {
-    fn drop(&mut self) {
-        // Session and adapter dropped via OnceLock statics
     }
 }
 

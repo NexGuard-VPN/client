@@ -79,6 +79,11 @@ pub fn save(
     }
     if let Ok(s) = serde_json::to_string(&file) {
         let _ = std::fs::write(&path, s);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
     }
 }
 

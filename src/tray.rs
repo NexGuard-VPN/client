@@ -5,7 +5,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIconBuilder, TrayIcon};
 
 use crate::profiles::ServerProfile;
-use crate::vpn::VpnStatus;
+use crate::vpn::{ConnectionState, VpnStatus};
 
 const ICON_SIZE: u32 = 22;
 
@@ -24,6 +24,7 @@ pub struct NexTray {
     icon_off: Icon,
     was_connected: bool,
     status: Arc<Mutex<Option<VpnStatus>>>,
+    state: Arc<Mutex<ConnectionState>>,
     shutdown: Arc<AtomicBool>,
     connect_trigger: Arc<AtomicBool>,
     selected_server: Arc<AtomicUsize>,
@@ -35,6 +36,7 @@ pub struct NexTray {
 impl NexTray {
     pub fn new(
         status: Arc<Mutex<Option<VpnStatus>>>,
+        state: Arc<Mutex<ConnectionState>>,
         shutdown: Arc<AtomicBool>,
         connect_trigger: Arc<AtomicBool>,
         selected_server: Arc<AtomicUsize>,
@@ -102,6 +104,7 @@ impl NexTray {
             icon_off,
             was_connected: false,
             status,
+            state,
             shutdown,
             connect_trigger,
             selected_server,
@@ -128,11 +131,17 @@ impl NexTray {
         }
     }
 
+    fn session_active(&self) -> bool {
+        !matches!(
+            *self.state.lock().unwrap(),
+            ConnectionState::Disconnected | ConnectionState::Error(_)
+        )
+    }
+
     pub fn tick(&mut self) {
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == self.toggle_id {
-                let connected = self.status.lock().unwrap().is_some();
-                if connected {
+                if self.session_active() {
                     self.shutdown.store(true, Ordering::Relaxed);
                 } else {
                     self.connect_trigger.store(true, Ordering::Relaxed);
@@ -153,7 +162,10 @@ impl NexTray {
             }
         }
 
-        let connected = self.status.lock().unwrap().is_some();
+        let connected = matches!(
+            *self.state.lock().unwrap(),
+            ConnectionState::Connected | ConnectionState::Degraded
+        );
 
         if connected != self.was_connected || connected {
             if connected {
