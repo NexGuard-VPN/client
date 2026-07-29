@@ -595,8 +595,8 @@ fn parse_args() -> Args {
 
     if server.is_empty() && !token.is_empty() {
         eprintln!("[nexguard] resolving server from token...");
-        match crate::api::fetch_connect_info(&token) {
-            Some(info) => {
+        match crate::api::try_fetch_connect_info(&token) {
+            Ok(info) => {
                 join_url = info.join_url;
                 if let Some(s) = info.server {
                     server = s;
@@ -606,8 +606,8 @@ fn parse_args() -> Args {
                     server = r.split(':').next().unwrap_or(&r).to_string();
                 }
             }
-            None => {
-                eprintln!("Error: could not resolve server from token");
+            Err(e) => {
+                eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
         }

@@ -285,15 +285,20 @@ fn read_http_response<R: std::io::Read>(mut r: R) -> Result<(u16, Vec<u8>), Stri
     Ok((status, body))
 }
 
-fn http_get_tls(host: &str, path: &str) -> Option<String> {
+fn http_get_tls_status(host: &str, path: &str) -> Result<(u16, String), String> {
     use std::io::Write;
     ensure_crypto_provider();
 
     let addr = {
         use std::net::ToSocketAddrs;
-        format!("{}:443", host).to_socket_addrs().ok()?.next()?
+        format!("{}:443", host)
+            .to_socket_addrs()
+            .map_err(|e| format!("resolve {}: {}", host, e))?
+            .next()
+            .ok_or_else(|| format!("resolve {}: no address", host))?
     };
-    let mut tcp = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)).ok()?;
+    let mut tcp = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5))
+        .map_err(|e| format!("connect {}: {}", host, e))?;
     tcp.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
 
     let mut root_store = rustls::RootCertStore::empty();
@@ -303,18 +308,29 @@ fn http_get_tls(host: &str, path: &str) -> Option<String> {
             .with_root_certificates(root_store)
             .with_no_client_auth(),
     );
-    let server_name: rustls::pki_types::ServerName = host.to_string().try_into().ok()?;
-    let mut conn = rustls::ClientConnection::new(config, server_name).ok()?;
+    let server_name: rustls::pki_types::ServerName = host
+        .to_string()
+        .try_into()
+        .map_err(|_| format!("invalid host {}", host))?;
+    let mut conn = rustls::ClientConnection::new(config, server_name)
+        .map_err(|e| format!("tls {}: {}", host, e))?;
     let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
 
     let req = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: nexguard\r\n\r\n",
         path, host
     );
-    tls.write_all(req.as_bytes()).ok()?;
-    let (status, body) = read_http_response(&mut tls).ok()?;
-    if status != 200 { return None; }
-    Some(String::from_utf8_lossy(&body).into_owned())
+    tls.write_all(req.as_bytes()).map_err(|e| format!("send: {}", e))?;
+    let (status, body) = read_http_response(&mut tls).map_err(|e| format!("read: {}", e))?;
+    Ok((status, String::from_utf8_lossy(&body).into_owned()))
+}
+
+fn http_get_tls(host: &str, path: &str) -> Option<String> {
+    let (status, body) = http_get_tls_status(host, path).ok()?;
+    if status != 200 {
+        return None;
+    }
+    Some(body)
 }
 
 #[derive(Clone)]
@@ -395,17 +411,37 @@ pub fn join_via_api_with_routes(url: &str, token: &str, pub_key: &str, name: &st
     Ok(join_resp)
 }
 
-pub fn fetch_connect_info(token: &str) -> Option<ConnectInfo> {
+// try_fetch_connect_info reports why the lookup failed so the UI can tell a
+// billing refusal apart from an unreachable network.
+pub fn try_fetch_connect_info(token: &str) -> Result<ConnectInfo, String> {
     let api_host = std::env::var("NEXGUARD_API_HOST").unwrap_or_else(|_| "api.nexguard.sh".to_string());
     let path = format!("/api/vpn/connect-info?token={}", token);
-    let body = http_get_tls(&api_host, &path)?;
-    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
-    Some(ConnectInfo {
+    let (status, body) = http_get_tls_status(&api_host, &path)?;
+    if status != 200 {
+        return Err(connect_info_error(status, &body));
+    }
+    let json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| "Unexpected response from NexGuard API.".to_string())?;
+    Ok(ConnectInfo {
         server: json["server"].as_str().map(|s| s.to_string()),
         relay: json["relay"].as_str().map(|s| s.to_string()),
         relay_name: json["relay_name"].as_str().map(|s| s.to_string()),
         join_url: json["join_url"].as_str().map(|s| s.to_string()),
     })
+}
+
+fn connect_info_error(status: u16, body: &str) -> String {
+    let detail = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["error"].as_str().map(|s| s.to_string()))
+        .unwrap_or_default();
+    match status {
+        402 => "Subscription is not active. Renew your plan to reconnect.".to_string(),
+        401 => "This device token was revoked or has expired.".to_string(),
+        404 => "Server not found for this token.".to_string(),
+        _ if !detail.is_empty() => format!("NexGuard API error ({}): {}", status, detail),
+        _ => format!("NexGuard API error ({}).", status),
+    }
 }
 
 #[derive(Clone, Default)]

@@ -108,8 +108,8 @@ impl VpnApp {
                         server = "relay".to_string();
                     }
                 } else {
-                    match crate::api::fetch_connect_info(&profile.token) {
-                        Some(info) => {
+                    match crate::api::try_fetch_connect_info(&profile.token) {
+                        Ok(info) => {
                             join_url = info.join_url.clone();
                             if let Some(s) = info.server.clone() {
                                 server = s;
@@ -127,8 +127,8 @@ impl VpnApp {
                                 serde_json::Value::Null,
                             );
                         }
-                        None => {
-                            *state.lock().unwrap() = ConnectionState::Error("Cannot reach NexGuard API. Check your internet connection.".into());
+                        Err(e) => {
+                            *state.lock().unwrap() = ConnectionState::Error(e);
                             return;
                         }
                     }
