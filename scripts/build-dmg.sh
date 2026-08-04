@@ -51,7 +51,7 @@ cat >> "$BUILD_DIR/${BUNDLE}/Contents/Info.plist" << 'PLIST'
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>LSUIElement</key>
-    <false/>
+    <true/>
     <key>NSNetworkVolumes</key>
     <true/>
     <key>NSSystemAdministrationUsageDescription</key>
@@ -87,8 +87,12 @@ fi
 cat > "$BUILD_DIR/${BUNDLE}/Contents/MacOS/NexGuard" << 'LAUNCHER'
 #!/bin/bash
 DIR="$(cd "$(dirname "$0")" && pwd)"
+SOCK="${HOME}/.nexguard/gui.sock"
+if [ -S "$SOCK" ] && command -v nc >/dev/null 2>&1 && printf show | nc -U -w 1 "$SOCK" >/dev/null 2>&1; then
+    exit 0
+fi
 if [ "$(id -u)" -ne 0 ]; then
-    osascript -e "do shell script \"'$0'\" with administrator privileges"
+    (osascript -e "do shell script \"'$0'\" with administrator privileges" >/dev/null 2>&1 &)
     exit 0
 fi
 exec "${DIR}/nexguard-bin"

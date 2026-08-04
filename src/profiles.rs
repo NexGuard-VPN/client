@@ -16,6 +16,10 @@ fn profiles_path() -> PathBuf {
     dir.join("servers.json")
 }
 
+pub fn config_dir() -> Option<PathBuf> {
+    dirs_next()
+}
+
 fn dirs_next() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     { std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".nexguard")) }

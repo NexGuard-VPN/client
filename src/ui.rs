@@ -37,6 +37,8 @@ struct VpnApp {
     update_result: Arc<Mutex<Option<Result<(), String>>>>,
     confirm_delete: Option<usize>,
     editing_idx: Option<usize>,
+    reconnect_pending: bool,
+    quit_cleanup_done: bool,
 }
 
 impl Default for VpnApp {
@@ -72,6 +74,8 @@ impl Default for VpnApp {
             update_result: Arc::new(Mutex::new(None)),
             confirm_delete: None,
             editing_idx: None,
+            reconnect_pending: false,
+            quit_cleanup_done: false,
         }
     }
 }
@@ -184,6 +188,21 @@ impl VpnApp {
         });
     }
 
+    fn quit_cleanup(&mut self) {
+        if self.quit_cleanup_done { return; }
+        self.quit_cleanup_done = true;
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(status) = self.status.lock().unwrap().take() {
+            if status.internet_mode {
+                crate::route::emergency_cleanup(&status.tun_name);
+            }
+        }
+        #[cfg(unix)]
+        if let Some(dir) = crate::profiles::config_dir() {
+            let _ = std::fs::remove_file(dir.join(GUI_SOCK));
+        }
+    }
+
     fn save_new_server(&mut self) {
         let name = if self.new_name.is_empty() { "VPN Server".to_string() } else { self.new_name.clone() };
         let profile = ServerProfile {
@@ -253,12 +272,85 @@ impl VpnApp {
 
 const APP_NAME: &str = "NexGuard VPN";
 
+static SHOW_REQUEST: std::sync::atomic::AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+const GUI_SOCK: &str = "gui.sock";
+
+#[cfg(unix)]
+fn claim_single_instance() -> bool {
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let Some(dir) = crate::profiles::config_dir() else { return true };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(GUI_SOCK);
+    if let Ok(mut stream) = UnixStream::connect(&path) {
+        let _ = stream.write_all(b"show");
+        return false;
+    }
+    let _ = std::fs::remove_file(&path);
+    let Ok(listener) = UnixListener::bind(&path) else { return true };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666));
+    }
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            if let Ok(mut s) = stream {
+                let mut buf = [0u8; 16];
+                let _ = s.read(&mut buf);
+                SHOW_REQUEST.store(true, Ordering::Relaxed);
+            }
+        }
+    });
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn set_dock_visible(visible: bool) {
+    use std::os::raw::{c_char, c_void};
+    #[link(name = "objc")]
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+    }
+    unsafe {
+        let cls = objc_getClass(b"NSApplication\0".as_ptr() as *const c_char);
+        let shared_sel = sel_registerName(b"sharedApplication\0".as_ptr() as *const c_char);
+        let policy_sel = sel_registerName(b"setActivationPolicy:\0".as_ptr() as *const c_char);
+        if cls.is_null() || shared_sel.is_null() || policy_sel.is_null() { return; }
+        let send0: extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let app = send0(cls, shared_sel);
+        if app.is_null() { return; }
+        let send1: extern "C" fn(*mut c_void, *mut c_void, i64) -> bool =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let _ = send1(app, policy_sel, if visible { 0 } else { 1 });
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_dock_visible(_visible: bool) {}
+
+fn show_window(ctx: &egui::Context) {
+    set_dock_visible(true);
+    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+}
+
 pub fn run_gui_with(token: Option<String>, name: Option<String>, internet: bool) {
+    #[cfg(unix)]
+    if !claim_single_instance() {
+        return;
+    }
     let icon = generate_app_icon();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([420.0, 620.0])
             .with_min_inner_size([400.0, 560.0])
+            .with_maximize_button(false)
             .with_title(APP_NAME)
             .with_icon(std::sync::Arc::new(icon)),
         ..Default::default()
@@ -284,7 +376,6 @@ pub fn run_gui_with(token: Option<String>, name: Option<String>, internet: bool)
 
         app.tray = crate::tray::NexTray::new(
             Arc::clone(&app.status),
-            Arc::clone(&app.shutdown),
             Arc::clone(&app.connect_trigger),
             Arc::clone(&app.selected_server),
             &app.profiles,
@@ -399,21 +490,59 @@ fn lbl(t: &str) -> egui::RichText {
     egui::RichText::new(t).size(12.0).color(theme().text_muted)
 }
 
+fn status_dot(ui: &mut egui::Ui, filled: bool, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    if filled {
+        ui.painter().circle_filled(rect.center(), 4.5, color);
+    } else {
+        ui.painter().circle_stroke(rect.center(), 4.5, egui::Stroke::new(1.5, color));
+    }
+}
+
 fn read_clipboard() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
 impl eframe::App for VpnApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut tray_disconnect = false;
+        if let Some(ref mut tray) = self.tray {
+            tray.tick();
+            if tray.show_requested {
+                tray.show_requested = false;
+                show_window(ctx);
+            }
+            if tray.disconnect_requested {
+                tray.disconnect_requested = false;
+                tray_disconnect = true;
+            }
+        }
+        if tray_disconnect {
+            self.disconnect();
+        }
+
+        if SHOW_REQUEST.swap(false, Ordering::Relaxed) {
+            show_window(ctx);
+        }
+
         let quit = self.tray.as_ref().map_or(false, |t| t.quit_requested);
+        if quit && !self.quit_cleanup_done {
+            self.quit_cleanup();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
         if ctx.input(|i| i.viewport().close_requested()) {
             if quit {
-                self.disconnect();
                 return;
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+            if self.tray.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                set_dock_visible(false);
+            } else {
+                self.quit_cleanup();
+                return;
+            }
         }
 
         let state = self.state.lock().unwrap().clone();
@@ -449,12 +578,22 @@ impl eframe::App for VpnApp {
                     draw_header(ui);
                     draw_server_view(ui, self);
                     ui.add_space(6.0);
+                    let mut dismissed = false;
                     egui::Frame::default()
                         .fill(egui::Color32::from_rgba_premultiplied(239, 68, 68, 25))
                         .corner_radius(cr(10)).inner_margin(12.0)
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new(msg).size(12.0).color(t.danger));
+                            ui.add_space(4.0);
+                            if ui.add(egui::Button::new(egui::RichText::new("Dismiss").size(11.0).color(t.text_secondary))
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::new(1.0, t.danger))).clicked() {
+                                dismissed = true;
+                            }
                         });
+                    if dismissed {
+                        *self.state.lock().unwrap() = ConnectionState::Disconnected;
+                    }
                 }
                 ConnectionState::Disconnected => {
                     draw_header(ui);
@@ -465,25 +604,9 @@ impl eframe::App for VpnApp {
             });
         });
 
-        if let Some(ref mut tray) = self.tray {
-            tray.tick();
-
-            if tray.quit_requested {
-                self.disconnect();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                return;
-            }
-
-            if tray.show_requested {
-                tray.show_requested = false;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            }
-
-            if tray.reconnect_after_disconnect && matches!(state, ConnectionState::Disconnected | ConnectionState::Error(_)) {
-                tray.reconnect_after_disconnect = false;
-                self.connect_selected();
-            }
+        if self.reconnect_pending && matches!(state, ConnectionState::Disconnected | ConnectionState::Error(_)) {
+            self.reconnect_pending = false;
+            self.connect_selected();
         }
 
         let tray_server = self.selected_server.load(Ordering::Relaxed);
@@ -498,9 +621,7 @@ impl eframe::App for VpnApp {
         if self.connect_trigger.swap(false, Ordering::Relaxed) {
             if matches!(state, ConnectionState::Connected | ConnectionState::Connecting) {
                 self.disconnect();
-                if let Some(ref mut tray) = self.tray {
-                    tray.reconnect_after_disconnect = true;
-                }
+                self.reconnect_pending = true;
             } else {
                 self.connect_selected();
             }
@@ -540,7 +661,7 @@ fn draw_header_connected(ui: &mut egui::Ui, app: &mut VpnApp) {
                 ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(10.0).color(t.text_muted));
             });
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("●").size(12.0).color(t.success));
+                status_dot(ui, true, t.success);
                 ui.label(egui::RichText::new("Connected").size(12.0).strong().color(t.success));
             });
         });
@@ -599,9 +720,8 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                 .stroke(egui::Stroke::new(if is_selected { 1.5 } else { 1.0 }, stroke_color))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let dot = if is_selected { "●" } else { "○" };
                         let dot_color = if is_selected { t.accent } else { t.text_muted };
-                        ui.label(egui::RichText::new(dot).size(12.0).color(dot_color));
+                        status_dot(ui, is_selected, dot_color);
                         ui.vertical(|ui| {
                             ui.label(egui::RichText::new(&profile.name).size(13.0).strong().color(t.text));
                             let desc = if profile.server.is_empty() { "Token-based" } else { &profile.server };
@@ -614,8 +734,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                             let dot_color = if menu_resp_raw.hovered() { t.text } else { t.text_muted };
                             let cx = menu_rect.center().x;
                             let cy = menu_rect.center().y;
-                            for (i, dy) in [-7.0, 0.0, 7.0].iter().enumerate() {
-                                let _ = i;
+                            for dy in [-7.0, 0.0, 7.0] {
                                 ui.painter().circle_filled(
                                     egui::pos2(cx, cy + dy),
                                     1.8,
@@ -687,7 +806,13 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             app.start_edit(idx);
         } else if let Some(idx) = connect_idx {
             app.selected = Some(idx);
-            app.connect_selected();
+            app.sync_tray_servers();
+            if matches!(current_state, ConnectionState::Connected | ConnectionState::Connecting) {
+                app.disconnect();
+                app.reconnect_pending = true;
+            } else {
+                app.connect_selected();
+            }
         } else if let Some(idx) = select_idx {
             app.selected = Some(idx);
             app.sync_tray_servers();
@@ -696,14 +821,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
 
     if let Some(idx) = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("del_confirm_idx"))) {
         ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("del_confirm_idx")));
-        ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("sel_idx")));
         app.confirm_delete = Some(idx);
-    }
-    if let Some(sel) = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("sel_idx"))) {
-        ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("sel_idx")));
-        if app.confirm_delete.is_none() {
-            app.selected = Some(sel);
-        }
     }
 
     if let Some(idx) = app.confirm_delete {
@@ -738,6 +856,12 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                 });
             });
         if do_delete {
+            let deleting_active = app.selected == Some(idx)
+                && matches!(*app.state.lock().unwrap(), ConnectionState::Connected | ConnectionState::Connecting);
+            if deleting_active {
+                app.reconnect_pending = false;
+                app.disconnect();
+            }
             app.selected = Some(idx);
             app.remove_selected();
             app.confirm_delete = None;

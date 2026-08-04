@@ -24,18 +24,16 @@ pub struct NexTray {
     icon_off: Icon,
     was_connected: bool,
     status: Arc<Mutex<Option<VpnStatus>>>,
-    shutdown: Arc<AtomicBool>,
     connect_trigger: Arc<AtomicBool>,
     selected_server: Arc<AtomicUsize>,
     pub quit_requested: bool,
-    pub reconnect_after_disconnect: bool,
+    pub disconnect_requested: bool,
     pub show_requested: bool,
 }
 
 impl NexTray {
     pub fn new(
         status: Arc<Mutex<Option<VpnStatus>>>,
-        shutdown: Arc<AtomicBool>,
         connect_trigger: Arc<AtomicBool>,
         selected_server: Arc<AtomicUsize>,
         profiles: &[ServerProfile],
@@ -76,12 +74,13 @@ impl NexTray {
         let icon_off = make_icon(false);
         let icon_on = make_icon(true);
 
-        let tray = TrayIconBuilder::new()
+        let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("NexGuard VPN")
-            .with_icon(icon_off.clone())
-            .build()
-            .ok()?;
+            .with_icon(icon_off.clone());
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_icon_as_template(true);
+        let tray = builder.build().ok()?;
 
         let toggle_id = item_toggle.id().clone();
         let show_id = item_show.id().clone();
@@ -102,11 +101,10 @@ impl NexTray {
             icon_off,
             was_connected: false,
             status,
-            shutdown,
             connect_trigger,
             selected_server,
             quit_requested: false,
-            reconnect_after_disconnect: false,
+            disconnect_requested: false,
             show_requested: false,
         })
     }
@@ -133,14 +131,13 @@ impl NexTray {
             if event.id == self.toggle_id {
                 let connected = self.status.lock().unwrap().is_some();
                 if connected {
-                    self.shutdown.store(true, Ordering::Relaxed);
+                    self.disconnect_requested = true;
                 } else {
                     self.connect_trigger.store(true, Ordering::Relaxed);
                 }
             } else if event.id == self.show_id {
                 self.show_requested = true;
             } else if event.id == self.quit_id {
-                self.shutdown.store(true, Ordering::Relaxed);
                 self.quit_requested = true;
             } else {
                 for (item, idx) in &self.server_items {
@@ -187,6 +184,16 @@ fn make_icon(connected: bool) -> Icon {
     let resized = image::imageops::resize(&img, size as u32, size as u32, image::imageops::FilterType::Lanczos3);
     let mut rgba = resized.into_raw();
 
+    #[cfg(target_os = "macos")]
+    for i in (0..rgba.len()).step_by(4) {
+        let a = rgba[i + 3] as u16;
+        rgba[i] = 255;
+        rgba[i + 1] = 255;
+        rgba[i + 2] = 255;
+        rgba[i + 3] = if connected { a as u8 } else { (a * 2 / 5) as u8 };
+    }
+
+    #[cfg(not(target_os = "macos"))]
     if !connected {
         for i in (0..rgba.len()).step_by(4) {
             if rgba[i + 3] > 0 {
