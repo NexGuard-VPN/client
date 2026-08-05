@@ -69,7 +69,13 @@ impl Default for VpnApp {
             });
         }
         let profiles = crate::profiles::load();
+        let settings = crate::profiles::load_settings();
         let view = if profiles.is_empty() { View::Login } else { View::ServerList };
+        let connection_mode = match settings.connection_mode.as_str() {
+            "direct" => ConnectionMode::DirectUdp,
+            "tls" => ConnectionMode::TlsRelay,
+            _ => ConnectionMode::Auto,
+        };
         Self {
             selected: if profiles.is_empty() { None } else { Some(0) },
             profiles,
@@ -96,12 +102,12 @@ impl Default for VpnApp {
             login_in_progress: false,
             login_result: Arc::new(Mutex::new(None)),
             login_error: None,
-            settings_connection_mode: ConnectionMode::Auto,
-            settings_kill_switch: false,
-            settings_dns_leak: false,
-            settings_advertise_routes: String::new(),
+            settings_connection_mode: connection_mode,
+            settings_kill_switch: settings.kill_switch,
+            settings_dns_leak: settings.dns_leak_protection,
+            settings_advertise_routes: settings.advertise_routes,
             new_auto_connect: false,
-            auto_reconnect: true,
+            auto_reconnect: settings.auto_reconnect,
         }
     }
 }
@@ -124,7 +130,9 @@ impl VpnApp {
         let status_slot = Arc::clone(&self.status);
         let shutdown = Arc::clone(&self.shutdown);
         let force_direct = self.settings_connection_mode == ConnectionMode::DirectUdp;
+        let force_relay = self.settings_connection_mode == ConnectionMode::TlsRelay;
         let kill_switch = self.settings_kill_switch;
+        let dns_leak = self.settings_dns_leak;
         let extra_routes: Vec<String> = if self.settings_advertise_routes.is_empty() {
             Vec::new()
         } else {
@@ -185,7 +193,7 @@ impl VpnApp {
             }
             if server.is_empty() { server = "api-proxy".to_string(); }
 
-            let effective_relay = if force_direct { None } else { relay };
+            let effective_relay = if force_direct { None } else if force_relay { relay.or_else(|| relay_name.clone()) } else { relay };
 
             let config = VpnConfig {
                 server,
@@ -196,6 +204,7 @@ impl VpnApp {
                 relay_name,
                 join_url,
                 kill_switch,
+                dns_leak_protection: dns_leak,
                 extra_routes,
                 ..VpnConfig::default()
             };
@@ -521,7 +530,7 @@ fn dark_theme() -> Theme {
         text_muted: egui::Color32::from_rgb(113, 113, 122),
         accent: egui::Color32::from_rgb(56, 189, 248),
         accent_hover: egui::Color32::from_rgb(125, 211, 252),
-        success: egui::Color32::from_rgb(56, 189, 248),
+        success: egui::Color32::from_rgb(34, 197, 94),
         danger: egui::Color32::from_rgb(239, 68, 68),
         warning: egui::Color32::from_rgb(234, 179, 8),
         input_bg: egui::Color32::from_rgb(15, 15, 18),
@@ -1213,6 +1222,7 @@ fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
         ui.add_space(6.0);
         ui.checkbox(&mut app.settings_kill_switch, "Kill switch (block traffic on disconnect)");
         ui.checkbox(&mut app.settings_dns_leak, "DNS leak protection (route DNS through tunnel)");
+        ui.checkbox(&mut app.auto_reconnect, "Auto-reconnect on connection drop");
     });
 
     ui.add_space(6.0);
@@ -1225,6 +1235,20 @@ fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
             .desired_width(f32::INFINITY)
             .margin(egui::vec2(10.0, 10.0)));
     });
+
+    let mode_str = match app.settings_connection_mode {
+        ConnectionMode::Auto => "auto",
+        ConnectionMode::DirectUdp => "direct",
+        ConnectionMode::TlsRelay => "tls",
+    };
+    let settings = crate::profiles::AppSettings {
+        connection_mode: mode_str.to_string(),
+        kill_switch: app.settings_kill_switch,
+        dns_leak_protection: app.settings_dns_leak,
+        advertise_routes: app.settings_advertise_routes.clone(),
+        auto_reconnect: app.auto_reconnect,
+    };
+    crate::profiles::save_settings(&settings);
 }
 
 fn draw_connected(ui: &mut egui::Ui, status: &Option<VpnStatus>) {

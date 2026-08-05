@@ -79,3 +79,55 @@ pub fn remove(profiles: &mut Vec<ServerProfile>, index: usize) {
         save(profiles);
     }
 }
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    #[serde(default)]
+    pub connection_mode: String,
+    #[serde(default)]
+    pub kill_switch: bool,
+    #[serde(default)]
+    pub dns_leak_protection: bool,
+    #[serde(default)]
+    pub advertise_routes: String,
+    #[serde(default)]
+    pub auto_reconnect: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            connection_mode: "auto".to_string(),
+            kill_switch: false,
+            dns_leak_protection: false,
+            advertise_routes: String::new(),
+            auto_reconnect: true,
+        }
+    }
+}
+
+fn settings_path() -> PathBuf {
+    dirs_next().unwrap_or_else(|| PathBuf::from(".")).join("settings.json")
+}
+
+pub fn load_settings() -> AppSettings {
+    match std::fs::read_to_string(settings_path()) {
+        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+        Err(_) => AppSettings::default(),
+    }
+}
+
+pub fn save_settings(settings: &AppSettings) {
+    let path = settings_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(settings) {
+        let _ = std::fs::write(&path, json);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}

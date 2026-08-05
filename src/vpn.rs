@@ -23,6 +23,7 @@ pub struct VpnConfig {
     pub join_url: Option<String>,
     pub share_lan: bool,
     pub kill_switch: bool,
+    pub dns_leak_protection: bool,
     pub extra_routes: Vec<String>,
 }
 
@@ -42,6 +43,7 @@ impl Default for VpnConfig {
             join_url: None,
             share_lan: false,
             kill_switch: false,
+            dns_leak_protection: false,
             extra_routes: Vec::new(),
         }
     }
@@ -301,7 +303,7 @@ pub fn connect(
         None
     };
 
-    let dns_guard = if mesh_mgr.is_some() {
+    let dns_guard = if mesh_mgr.is_some() || config.dns_leak_protection {
         let upstream = std::env::var("NEXGUARD_DNS_UPSTREAM")
             .unwrap_or_else(|_| "1.1.1.1".to_string());
         if let Some(resolver) = dns::DnsResolver::try_start(&upstream, Arc::clone(&dns_peer_map)) {
