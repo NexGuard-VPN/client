@@ -9,6 +9,10 @@ pub struct ServerProfile {
     pub internet: bool,
     #[serde(default)]
     pub share_lan: bool,
+    #[serde(default)]
+    pub auto_connect: bool,
+    #[serde(default)]
+    pub last_used: u64,
 }
 
 fn profiles_path() -> PathBuf {
@@ -62,6 +66,7 @@ pub fn add(profiles: &mut Vec<ServerProfile>, profile: ServerProfile) {
         existing.name = profile.name;
         existing.internet = profile.internet;
         existing.share_lan = profile.share_lan;
+        if profile.auto_connect { existing.auto_connect = true; }
     } else {
         profiles.push(profile);
     }

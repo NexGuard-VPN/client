@@ -653,6 +653,133 @@ fn control_host(server: &str, control_port: u16) -> String {
     format!("{}:{}", server, control_port)
 }
 
+#[derive(serde::Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct DeviceLoginResp {
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub login_url: String,
+    #[serde(default)]
+    pub expires: u64,
+}
+
+#[derive(serde::Deserialize, Clone)]
+pub struct DeviceCheckResp {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub server_id: String,
+    #[serde(default)]
+    pub tunnel_name: String,
+    #[serde(default)]
+    pub tunnel_server: String,
+    #[serde(default)]
+    pub email: String,
+}
+
+#[derive(serde::Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct DeviceTokenResp {
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct ConnectBundle {
+    pub device_jwt: String,
+    pub server_id: String,
+    pub relay: String,
+    pub relay_name: String,
+    pub email: String,
+}
+
+fn api_host() -> String {
+    std::env::var("NEXGUARD_API_HOST").unwrap_or_else(|_| "api.nexguard.sh".to_string())
+}
+
+fn http_post_tls_json(host: &str, path: &str, body: &str, auth_token: Option<&str>) -> Result<(u16, String), String> {
+    use std::io::Write;
+    ensure_crypto_provider();
+
+    let addr = {
+        use std::net::ToSocketAddrs;
+        format!("{}:443", host).to_socket_addrs()
+            .map_err(|e| format!("resolve {}: {}", host, e))?
+            .next().ok_or_else(|| format!("no address for {}", host))?
+    };
+    let mut tcp = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(10))
+        .map_err(|e| format!("connect {}: {}", host, e))?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
+
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = std::sync::Arc::new(
+        rustls::ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth(),
+    );
+    let server_name: rustls::pki_types::ServerName = host.to_string().try_into()
+        .map_err(|_| format!("invalid hostname {}", host))?;
+    let mut conn = rustls::ClientConnection::new(config, server_name)
+        .map_err(|e| format!("tls: {}", e))?;
+    let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
+
+    let auth_header = match auth_token {
+        Some(t) => format!("Authorization: Bearer {}\r\n", t),
+        None => String::new(),
+    };
+    let req = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nUser-Agent: nexguard\r\n\r\n{}",
+        path, host, auth_header, body.len(), body
+    );
+    tls.write_all(req.as_bytes()).map_err(|e| format!("write: {}", e))?;
+    let (status, body_bytes) = read_http_response(&mut tls)?;
+    Ok((status, String::from_utf8_lossy(&body_bytes).into_owned()))
+}
+
+pub fn request_device_login() -> Result<DeviceLoginResp, String> {
+    let host = api_host();
+    let (status, body) = http_post_tls_json(&host, "/api/auth/device", "{}", None)?;
+    if status != 200 {
+        return Err(format!("device login failed: HTTP {} — {}", status, body));
+    }
+    serde_json::from_str(&body).map_err(|e| format!("parse device login: {} — {}", e, body))
+}
+
+pub fn poll_device_login(device_token: &str) -> Result<Option<ConnectBundle>, String> {
+    let host = api_host();
+    let path = format!("/api/auth/device/check?token={}", device_token);
+    let (status, body) = http_get_tls_status(&host, &path)?;
+    if status != 200 {
+        return Err(format!("device check failed: HTTP {} — {}", status, body));
+    }
+    let resp: DeviceCheckResp = serde_json::from_str(&body)
+        .map_err(|e| format!("parse device check: {} — {}", e, body))?;
+    if resp.status != "confirmed" {
+        return Ok(None);
+    }
+    let device_name = crate::generate_client_name();
+    let create_body = serde_json::json!({ "name": device_name }).to_string();
+    let create_path = format!("/api/vpn/servers/{}/devices", resp.server_id);
+    let (status, body) = http_post_tls_json(&host, &create_path, &create_body, Some(&resp.token))?;
+    if status != 201 && status != 200 {
+        return Err(format!("create device token failed: HTTP {} — {}", status, body));
+    }
+    let dev_resp: DeviceTokenResp = serde_json::from_str(&body)
+        .map_err(|e| format!("parse device token: {} — {}", e, body))?;
+    Ok(Some(ConnectBundle {
+        device_jwt: dev_resp.token,
+        server_id: resp.server_id,
+        relay: resp.tunnel_server,
+        relay_name: resp.tunnel_name,
+        email: resp.email,
+    }))
+}
+
 pub fn try_parse_endpoint(server: &str) -> Result<SocketAddr, String> {
     use std::net::ToSocketAddrs;
     if let Ok(addr) = server.parse::<SocketAddr>() {
@@ -664,6 +791,22 @@ pub fn try_parse_endpoint(server: &str) -> Result<SocketAddr, String> {
         .next()
         .ok_or_else(|| format!("no address for {}", server))?;
     Ok(SocketAddr::new(addr.ip(), 51820))
+}
+
+pub fn report_endpoint(server: &str, control_port: u16, token: &str, pub_key: &str, endpoint: &str) -> Result<(), String> {
+    let host = control_host(server, control_port);
+    let body = serde_json::json!({ "endpoint": endpoint }).to_string();
+    let path = format!("/api/v1/peers/{}/endpoint", pub_key);
+    let req = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        path, host, token, body.len(), body
+    );
+    let resp = try_http_request(&host, &req)?;
+    if resp.contains("\"updated\"") || resp.contains("200") {
+        Ok(())
+    } else {
+        Err(format!("report endpoint failed: {}", resp))
+    }
 }
 
 pub fn parse_endpoint(server: &str) -> SocketAddr {

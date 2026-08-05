@@ -14,7 +14,7 @@ enum ConnectionState {
     Error(String),
 }
 
-enum View { ServerList, AddServer }
+enum View { ServerList, AddServer, Login, Settings }
 
 struct VpnApp {
     profiles: Vec<ServerProfile>,
@@ -39,6 +39,22 @@ struct VpnApp {
     editing_idx: Option<usize>,
     reconnect_pending: bool,
     quit_cleanup_done: bool,
+    login_in_progress: bool,
+    login_result: Arc<Mutex<Option<Result<crate::api::ConnectBundle, String>>>>,
+    login_error: Option<String>,
+    settings_connection_mode: ConnectionMode,
+    settings_kill_switch: bool,
+    settings_dns_leak: bool,
+    settings_advertise_routes: String,
+    new_auto_connect: bool,
+    auto_reconnect: bool,
+}
+
+#[derive(Clone, PartialEq)]
+enum ConnectionMode {
+    Auto,
+    DirectUdp,
+    TlsRelay,
 }
 
 impl Default for VpnApp {
@@ -53,10 +69,11 @@ impl Default for VpnApp {
             });
         }
         let profiles = crate::profiles::load();
+        let view = if profiles.is_empty() { View::Login } else { View::ServerList };
         Self {
             selected: if profiles.is_empty() { None } else { Some(0) },
             profiles,
-            view: View::ServerList,
+            view,
             new_name: String::new(),
             new_server: String::new(),
             new_token: String::new(),
@@ -76,6 +93,15 @@ impl Default for VpnApp {
             editing_idx: None,
             reconnect_pending: false,
             quit_cleanup_done: false,
+            login_in_progress: false,
+            login_result: Arc::new(Mutex::new(None)),
+            login_error: None,
+            settings_connection_mode: ConnectionMode::Auto,
+            settings_kill_switch: false,
+            settings_dns_leak: false,
+            settings_advertise_routes: String::new(),
+            new_auto_connect: false,
+            auto_reconnect: true,
         }
     }
 }
@@ -85,11 +111,25 @@ impl VpnApp {
         let Some(idx) = self.selected else { return };
         let Some(profile) = self.profiles.get(idx) else { return };
         let profile = profile.clone();
+        if let Some(p) = self.profiles.get_mut(idx) {
+            p.last_used = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            crate::profiles::save(&self.profiles);
+        }
         self.shutdown = Arc::new(AtomicBool::new(false));
         *self.state.lock().unwrap() = ConnectionState::Connecting;
         let state = Arc::clone(&self.state);
         let status_slot = Arc::clone(&self.status);
         let shutdown = Arc::clone(&self.shutdown);
+        let force_direct = self.settings_connection_mode == ConnectionMode::DirectUdp;
+        let kill_switch = self.settings_kill_switch;
+        let extra_routes: Vec<String> = if self.settings_advertise_routes.is_empty() {
+            Vec::new()
+        } else {
+            self.settings_advertise_routes.split(',').map(|s| s.trim().to_string()).collect()
+        };
         std::thread::spawn(move || {
             let mut server = profile.server.clone();
             let mut relay: Option<String> = None;
@@ -145,14 +185,18 @@ impl VpnApp {
             }
             if server.is_empty() { server = "api-proxy".to_string(); }
 
+            let effective_relay = if force_direct { None } else { relay };
+
             let config = VpnConfig {
                 server,
                 token: profile.token.clone(),
                 internet: profile.internet,
                 share_lan: profile.share_lan,
-                relay,
+                relay: effective_relay,
                 relay_name,
                 join_url,
+                kill_switch,
+                extra_routes,
                 ..VpnConfig::default()
             };
             match crate::vpn::connect(config, Arc::clone(&shutdown)) {
@@ -211,6 +255,8 @@ impl VpnApp {
             token: self.new_token.clone(),
             internet: self.new_internet,
             share_lan: self.new_share_lan,
+            auto_connect: self.new_auto_connect,
+            last_used: 0,
         };
         if let Some(idx) = self.editing_idx.take() {
             if idx < self.profiles.len() {
@@ -228,6 +274,7 @@ impl VpnApp {
         self.new_token.clear();
         self.new_internet = true;
         self.new_share_lan = false;
+        self.new_auto_connect = false;
         self.view = View::ServerList;
     }
 
@@ -238,6 +285,7 @@ impl VpnApp {
             self.new_token = p.token.clone();
             self.new_internet = p.internet;
             self.new_share_lan = p.share_lan;
+            self.new_auto_connect = p.auto_connect;
             self.editing_idx = Some(idx);
             self.view = View::AddServer;
         }
@@ -268,9 +316,44 @@ impl VpnApp {
             updating.store(false, Ordering::Relaxed);
         });
     }
+
+    fn start_login(&mut self) {
+        if self.login_in_progress { return; }
+        self.login_in_progress = true;
+        self.login_error = None;
+        *self.login_result.lock().unwrap() = None;
+        let result = Arc::clone(&self.login_result);
+        std::thread::spawn(move || {
+            match crate::api::request_device_login() {
+                Ok(resp) => {
+                    let _ = open::that(&resp.login_url);
+                    let max_polls = 200u32;
+                    for _ in 0..max_polls {
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        match crate::api::poll_device_login(&resp.token) {
+                            Ok(Some(bundle)) => {
+                                *result.lock().unwrap() = Some(Ok(bundle));
+                                return;
+                            }
+                            Ok(None) => continue,
+                            Err(e) => {
+                                *result.lock().unwrap() = Some(Err(e));
+                                return;
+                            }
+                        }
+                    }
+                    *result.lock().unwrap() = Some(Err("Login timed out".into()));
+                }
+                Err(e) => {
+                    *result.lock().unwrap() = Some(Err(e));
+                }
+            }
+        });
+    }
 }
 
 const APP_NAME: &str = "NexGuard VPN";
+const DEPLOY_URL: &str = "https://nexguard.sh/deploy";
 
 static SHOW_REQUEST: std::sync::atomic::AtomicBool = AtomicBool::new(false);
 
@@ -389,9 +472,15 @@ pub fn run_gui_with(token: Option<String>, name: Option<String>, internet: bool)
                 token: t,
                 internet,
                 share_lan: false,
+                auto_connect: false,
+                last_used: 0,
             };
             crate::profiles::add(&mut app.profiles, profile);
             app.selected = Some(app.profiles.len() - 1);
+            app.connect_selected();
+        } else if let Some(idx) = app.profiles.iter().position(|p| p.auto_connect) {
+            app.selected = Some(idx);
+            app.view = View::ServerList;
             app.connect_selected();
         }
         Ok(Box::new(app))
@@ -457,21 +546,21 @@ fn setup_style(ctx: &egui::Context) {
     }
 
     style.visuals.widgets.inactive.bg_fill = t.input_bg;
-    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, t.border);
-    style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, t.text_secondary);
+    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, t.border);
+    style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, t.text_secondary);
     style.visuals.widgets.hovered.bg_fill = t.surface_hover;
-    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, t.border_active);
-    style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, t.text);
+    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5_f32, t.border_active);
+    style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, t.text);
     style.visuals.widgets.active.bg_fill = t.surface_hover;
-    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, t.accent);
-    style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, t.text);
+    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5_f32, t.accent);
+    style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, t.text);
     style.visuals.widgets.noninteractive.bg_fill = t.surface;
-    style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, t.text_secondary);
+    style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, t.text_secondary);
     style.visuals.extreme_bg_color = t.input_bg;
     style.visuals.panel_fill = t.bg;
     style.visuals.window_fill = t.bg;
     style.visuals.selection.bg_fill = t.accent.linear_multiply(0.3);
-    style.visuals.selection.stroke = egui::Stroke::new(1.0, t.accent);
+    style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, t.accent);
 
     ctx.set_style(style);
 }
@@ -482,7 +571,7 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         .fill(t.surface)
         .corner_radius(cr(12))
         .inner_margin(16.0)
-        .stroke(egui::Stroke::new(1.0, t.border))
+        .stroke(egui::Stroke::new(1.0_f32, t.border))
         .show(ui, add);
 }
 
@@ -495,7 +584,7 @@ fn status_dot(ui: &mut egui::Ui, filled: bool, color: egui::Color32) {
     if filled {
         ui.painter().circle_filled(rect.center(), 4.5, color);
     } else {
-        ui.painter().circle_stroke(rect.center(), 4.5, egui::Stroke::new(1.5, color));
+        ui.painter().circle_stroke(rect.center(), 4.5, egui::Stroke::new(1.5_f32, color));
     }
 }
 
@@ -587,7 +676,7 @@ impl eframe::App for VpnApp {
                             ui.add_space(4.0);
                             if ui.add(egui::Button::new(egui::RichText::new("Dismiss").size(11.0).color(t.text_secondary))
                                 .fill(egui::Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::new(1.0, t.danger))).clicked() {
+                                .stroke(egui::Stroke::new(1.0_f32, t.danger))).clicked() {
                                 dismissed = true;
                             }
                         });
@@ -624,6 +713,51 @@ impl eframe::App for VpnApp {
                 self.reconnect_pending = true;
             } else {
                 self.connect_selected();
+            }
+        }
+
+        if self.login_in_progress {
+            let login_done = self.login_result.lock().unwrap().clone();
+            if let Some(result) = login_done {
+                self.login_in_progress = false;
+                match result {
+                    Ok(bundle) => {
+                        let profile = ServerProfile {
+                            name: if bundle.email.is_empty() { "My VPN".into() } else { bundle.email },
+                            server: String::new(),
+                            token: bundle.device_jwt,
+                            internet: true,
+                            share_lan: false,
+                            auto_connect: true,
+                            last_used: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                        };
+                        crate::profiles::add(&mut self.profiles, profile);
+                        self.selected = Some(self.profiles.len() - 1);
+                        self.sync_tray_servers();
+                        self.view = View::ServerList;
+                        self.connect_selected();
+                    }
+                    Err(e) => { self.login_error = Some(e); }
+                }
+            }
+        }
+
+        if let Some(ref st) = status {
+            if st.connection_dropped.swap(false, Ordering::Relaxed) {
+                if let Some(st) = self.status.lock().unwrap().take() {
+                    if st.internet_mode {
+                        crate::route::emergency_cleanup(&st.tun_name);
+                    }
+                }
+                if self.auto_reconnect && !self.shutdown.load(Ordering::Relaxed) {
+                    *self.state.lock().unwrap() = ConnectionState::Connecting;
+                    self.connect_selected();
+                } else {
+                    *self.state.lock().unwrap() = ConnectionState::Disconnected;
+                }
             }
         }
 
@@ -680,6 +814,8 @@ fn draw_server_view(ui: &mut egui::Ui, app: &mut VpnApp) {
     match app.view {
         View::ServerList => draw_server_list(ui, app),
         View::AddServer => draw_add_server(ui, app),
+        View::Login => draw_login(ui, app),
+        View::Settings => draw_settings(ui, app),
     }
 }
 
@@ -688,18 +824,24 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Servers").size(14.0).strong().color(t.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Button::new(egui::RichText::new("+ Add").size(12.0).color(t.accent)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, t.accent))).clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new("⚙").size(14.0).color(t.text_muted)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                app.view = View::Settings;
+            }
+            if ui.add(egui::Button::new(egui::RichText::new("Login").size(12.0).color(t.accent)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0_f32, t.accent))).clicked() {
+                app.view = View::Login;
+            }
+            if ui.add(egui::Button::new(egui::RichText::new("+ Add").size(12.0).color(t.accent)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0_f32, t.accent))).clicked() {
                 app.view = View::AddServer;
             }
-            if ui.add(egui::Button::new(egui::RichText::new("Deploy server ↗").size(11.0).color(t.accent)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
-                let _ = open::that("https://nexguard.sh/deploy");
+            if ui.add(egui::Button::new(egui::RichText::new("Deploy ↗").size(11.0).color(t.accent)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
+                let _ = open::that(DEPLOY_URL);
             }
         });
     });
     ui.add_space(6.0);
 
     if app.profiles.is_empty() {
-        draw_add_server(ui, app);
+        draw_login(ui, app);
         return;
     } else {
         let mut connect_idx: Option<usize> = None;
@@ -717,7 +859,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                 .fill(fill)
                 .corner_radius(cr(10))
                 .inner_margin(12.0)
-                .stroke(egui::Stroke::new(if is_selected { 1.5 } else { 1.0 }, stroke_color))
+                .stroke(egui::Stroke::new(if is_selected { 1.5_f32 } else { 1.0_f32 }, stroke_color))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let dot_color = if is_selected { t.accent } else { t.text_muted };
@@ -883,6 +1025,7 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
             app.new_token.clear();
             app.new_internet = true;
             app.new_share_lan = false;
+            app.new_auto_connect = false;
             app.view = View::ServerList;
         }
         let title = if editing { "Edit Server" } else { "Add Server" };
@@ -925,6 +1068,7 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
         ui.add_space(8.0);
         ui.checkbox(&mut app.new_internet, "Route all traffic through VPN");
         ui.checkbox(&mut app.new_share_lan, "Allow other peers to access my local network");
+        ui.checkbox(&mut app.new_auto_connect, "Connect automatically on startup");
     });
 
     ui.add_space(10.0);
@@ -951,16 +1095,139 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
         ui.add_space(6.0);
         if ui.add(egui::Button::new(egui::RichText::new("Deploy VPN Server").size(12.0).color(t.accent))
             .fill(egui::Color32::TRANSPARENT)
-            .stroke(egui::Stroke::new(1.0, t.accent))
+            .stroke(egui::Stroke::new(1.0_f32, t.accent))
             .min_size(egui::vec2(200.0, 36.0))).clicked() {
-            let _ = open::that("https://nexguard.sh/deploy");
+            let _ = open::that(DEPLOY_URL);
         }
+    });
+}
+
+fn draw_login(ui: &mut egui::Ui, app: &mut VpnApp) {
+    let t = theme();
+    ui.horizontal(|ui| {
+        if !app.profiles.is_empty() {
+            if ui.small_button("< Back").clicked() {
+                app.view = View::ServerList;
+            }
+        }
+        ui.label(egui::RichText::new("Login").size(14.0).strong().color(t.text));
+    });
+    ui.add_space(6.0);
+
+    if app.login_in_progress {
+        card(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(10.0);
+                ui.spinner();
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Waiting for authentication...").size(14.0).color(t.text));
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Complete login in your browser").size(11.0).color(t.text_muted));
+                ui.add_space(10.0);
+            });
+        });
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+        return;
+    }
+
+    if let Some(ref err) = app.login_error {
+        ui.add_space(6.0);
+        egui::Frame::default()
+            .fill(egui::Color32::from_rgba_premultiplied(239, 68, 68, 25))
+            .corner_radius(cr(10)).inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new(err).size(12.0).color(t.danger));
+            });
+        ui.add_space(6.0);
+    }
+
+    card(ui, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(10.0);
+            draw_logo(ui);
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Sign in to NexGuard").size(16.0).strong().color(t.text));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("Authenticate via browser to auto-configure your VPN").size(11.0).color(t.text_muted));
+            ui.add_space(14.0);
+            let btn = egui::Button::new(egui::RichText::new("Login with Browser").size(14.0).strong().color(t.text))
+                .fill(t.accent)
+                .min_size(egui::vec2(220.0, 42.0));
+            if ui.add(btn).clicked() {
+                app.start_login();
+            }
+            ui.add_space(10.0);
+        });
+    });
+
+    ui.add_space(14.0);
+    ui.separator();
+    ui.add_space(10.0);
+    ui.vertical_centered(|ui| {
+        ui.label(egui::RichText::new("Have a token?").size(12.0).color(t.text_muted));
+        ui.add_space(4.0);
+        if ui.add(egui::Button::new(egui::RichText::new("Add Manually").size(12.0).color(t.accent))
+            .fill(egui::Color32::TRANSPARENT)
+            .stroke(egui::Stroke::new(1.0_f32, t.accent))
+            .min_size(egui::vec2(160.0, 32.0))).clicked() {
+            app.view = View::AddServer;
+        }
+    });
+}
+
+fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
+    let t = theme();
+    ui.horizontal(|ui| {
+        if ui.small_button("< Back").clicked() {
+            app.view = View::ServerList;
+        }
+        ui.label(egui::RichText::new("Settings").size(14.0).strong().color(t.text));
+    });
+    ui.add_space(6.0);
+
+    card(ui, |ui| {
+        ui.label(egui::RichText::new("Connection").size(13.0).strong().color(t.text));
+        ui.add_space(6.0);
+        ui.label(lbl("Connection Mode"));
+        ui.horizontal(|ui| {
+            let modes = [("Auto", ConnectionMode::Auto), ("Direct UDP", ConnectionMode::DirectUdp), ("TLS Relay", ConnectionMode::TlsRelay)];
+            for (label, mode) in modes {
+                let selected = app.settings_connection_mode == mode;
+                let fill = if selected { t.accent } else { t.surface };
+                let txt_color = if selected { t.text } else { t.text_secondary };
+                if ui.add(egui::Button::new(egui::RichText::new(label).size(11.0).color(txt_color))
+                    .fill(fill)
+                    .stroke(egui::Stroke::new(1.0_f32, if selected { t.accent } else { t.border }))
+                    .min_size(egui::vec2(80.0, 28.0))).clicked() {
+                    app.settings_connection_mode = mode;
+                }
+            }
+        });
+    });
+
+    ui.add_space(6.0);
+    card(ui, |ui| {
+        ui.label(egui::RichText::new("Security").size(13.0).strong().color(t.text));
+        ui.add_space(6.0);
+        ui.checkbox(&mut app.settings_kill_switch, "Kill switch (block traffic on disconnect)");
+        ui.checkbox(&mut app.settings_dns_leak, "DNS leak protection (route DNS through tunnel)");
+    });
+
+    ui.add_space(6.0);
+    card(ui, |ui| {
+        ui.label(egui::RichText::new("Advanced").size(13.0).strong().color(t.text));
+        ui.add_space(6.0);
+        ui.label(lbl("Advertise Routes (comma-separated CIDRs)"));
+        ui.add(egui::TextEdit::singleline(&mut app.settings_advertise_routes)
+            .hint_text("e.g. 192.168.1.0/24, 10.0.0.0/8")
+            .desired_width(f32::INFINITY)
+            .margin(egui::vec2(10.0, 10.0)));
     });
 }
 
 fn draw_connected(ui: &mut egui::Ui, status: &Option<VpnStatus>) {
     let t = theme();
-    let Some(ref st) = status else { return };
+    let Some(ref st) = status else { return; };
     let ip_only = st.address.split('/').next().unwrap_or(&st.address);
     let geo = st.geo.lock().unwrap().clone();
 
@@ -1051,7 +1318,7 @@ fn draw_update_banner(ui: &mut egui::Ui, app: &mut VpnApp) {
 fn mini_stat(ui: &mut egui::Ui, label: &str, value: &str, color: egui::Color32) {
     let t = theme();
     egui::Frame::default().fill(t.surface).corner_radius(cr(10)).inner_margin(10.0)
-        .stroke(egui::Stroke::new(1.0, t.border))
+        .stroke(egui::Stroke::new(1.0_f32, t.border))
         .show(ui, |ui| {
             ui.label(egui::RichText::new(label).size(10.0).color(t.text_muted));
             ui.label(egui::RichText::new(value).size(14.0).strong().color(color));

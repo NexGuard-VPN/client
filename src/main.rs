@@ -1,9 +1,11 @@
 mod api;
 pub mod cache;
+mod dns;
 pub mod fingerprint;
 pub mod mesh;
 mod profiles;
 mod route;
+mod stun;
 pub mod tray;
 pub mod tun;
 mod ui;
@@ -221,11 +223,16 @@ fn main() {
     let tx = AtomicU64::new(0);
     let rx = AtomicU64::new(0);
 
+    let dns_peer_map: Arc<std::sync::RwLock<std::collections::HashMap<String, Ipv4Addr>>> =
+        Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+
     let mesh_mgr = if join_resp.mesh.unwrap_or(false) {
         let mesh_port = args.listen_port.wrapping_add(1);
         let mgr = Arc::new(mesh::MeshManager::new(private_key, mesh_port));
         if let Some(ref peers) = join_resp.mesh_peers {
             let parsed = api::parse_mesh_peers(peers);
+            let map = dns::extract_peer_map(&parsed);
+            *dns_peer_map.write().unwrap() = map;
             mgr.update_peers(&parsed, &pub_key_b64);
         }
         eprintln!("[vpn-client] mesh mode enabled, port={}, peers={}",
@@ -237,16 +244,56 @@ fn main() {
         let refresh_port = args.control_port;
         let refresh_token = args.token.clone();
         let refresh_pub_key = pub_key_b64.clone();
+        let dns_map_ref = Arc::clone(&dns_peer_map);
         std::thread::spawn(move || {
             let interval = std::time::Duration::from_secs(30);
             loop {
                 std::thread::sleep(interval);
                 if SHUTDOWN.load(Ordering::Relaxed) { break; }
                 let peers = api::get_mesh_peers(&refresh_server, refresh_port, &refresh_token);
+                let map = dns::extract_peer_map(&peers);
+                *dns_map_ref.write().unwrap() = map;
                 refresh_mgr.update_peers(&peers, &refresh_pub_key);
             }
         });
         Some(mgr)
+    } else {
+        None
+    };
+
+    let dns_guard = if mesh_mgr.is_some() {
+        let upstream = std::env::var("NEXGUARD_DNS_UPSTREAM")
+            .unwrap_or_else(|_| "1.1.1.1".to_string());
+        if let Some(resolver) = dns::DnsResolver::try_start(&upstream, Arc::clone(&dns_peer_map)) {
+            std::thread::spawn(move || {
+                resolver.run_with_shutdown(&SHUTDOWN);
+            });
+        }
+
+        let _ = route::add_route(Ipv4Addr::new(100, 100, 100, 100), 32, tun_dev.name());
+
+        let nat_mgr = mesh_mgr.clone();
+        let nat_server = args.server.clone();
+        let nat_port = args.control_port;
+        let nat_token = args.token.clone();
+        let nat_pub_key = pub_key_b64.clone();
+        std::thread::spawn(move || {
+            let interval = std::time::Duration::from_secs(300);
+            loop {
+                if SHUTDOWN.load(Ordering::Relaxed) { break; }
+                if let Some(ref mgr) = nat_mgr {
+                    let local_port = mgr.local_port();
+                    if local_port > 0 {
+                        if let Some(ep) = stun::discover_public_endpoint_on_port(local_port) {
+                            let _ = api::report_endpoint(&nat_server, nat_port, &nat_token, &nat_pub_key, &ep.to_string());
+                        }
+                    }
+                }
+                std::thread::sleep(interval);
+            }
+        });
+
+        route::set_system_dns("100.100.100.100")
     } else {
         None
     };
@@ -291,6 +338,7 @@ fn main() {
             Err(e) => eprintln!("[vpn-client] udp bind failed: {}", e),
         }
         drop(exit_state);
+        drop(dns_guard);
         return;
     }
 
@@ -330,6 +378,7 @@ fn main() {
     eprintln!("[vpn-client] cleaning up routes...");
     drop(exit_state);
     drop(mesh_mgr);
+    drop(dns_guard);
     if has_internet {
         route::emergency_cleanup(&tun_name_for_cleanup);
     }
@@ -715,6 +764,8 @@ fn install_service(args: &[String]) {
             token: t.clone(),
             internet,
             share_lan: false,
+            auto_connect: false,
+            last_used: 0,
         };
         let mut profiles_list = crate::profiles::load();
         crate::profiles::add(&mut profiles_list, profile);

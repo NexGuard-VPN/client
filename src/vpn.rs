@@ -1,12 +1,13 @@
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+use std::collections::HashMap;
 
 use boringtun::noise::Tunn;
 use boringtun::x25519::{PublicKey, StaticSecret};
 
-use crate::{api, mesh, route, tun, wg};
+use crate::{api, dns, mesh, route, stun, tun, wg};
 
 pub struct VpnConfig {
     pub server: String,
@@ -21,6 +22,8 @@ pub struct VpnConfig {
     pub relay_name: Option<String>,
     pub join_url: Option<String>,
     pub share_lan: bool,
+    pub kill_switch: bool,
+    pub extra_routes: Vec<String>,
 }
 
 impl Default for VpnConfig {
@@ -38,6 +41,8 @@ impl Default for VpnConfig {
             relay_name: None,
             join_url: None,
             share_lan: false,
+            kill_switch: false,
+            extra_routes: Vec::new(),
         }
     }
 }
@@ -55,6 +60,7 @@ pub struct VpnStatus {
     pub tun_name: String,
     pub internet_mode: bool,
     pub geo: Arc<Mutex<Option<api::GeoInfo>>>,
+    pub connection_dropped: Arc<AtomicBool>,
 }
 
 fn try_b64_decode(s: &str) -> Result<[u8; 32], String> {
@@ -94,11 +100,12 @@ pub fn connect(
         client_name = crate::generate_client_name();
     }
 
-    let advertise_routes: Vec<String> = if config.share_lan {
+    let mut advertise_routes: Vec<String> = if config.share_lan {
         crate::route::detect_local_subnets()
     } else {
         Vec::new()
     };
+    advertise_routes.extend(config.extra_routes.iter().cloned());
 
     let cached_join: Option<api::JoinResponse> = crate::cache::load(&config.token)
         .and_then(|e| {
@@ -238,6 +245,7 @@ pub fn connect(
     let rx = Arc::new(AtomicU64::new(0));
 
     let geo: Arc<Mutex<Option<api::GeoInfo>>> = Arc::new(Mutex::new(None));
+    let connection_dropped = Arc::new(AtomicBool::new(false));
 
     let status = VpnStatus {
         tx: Arc::clone(&tx),
@@ -253,13 +261,18 @@ pub fn connect(
         tun_name: tun_dev.name().to_string(),
         internet_mode: config.internet,
         geo,
+        connection_dropped: Arc::clone(&connection_dropped),
     };
+
+    let dns_peer_map: Arc<RwLock<HashMap<String, Ipv4Addr>>> = Arc::new(RwLock::new(HashMap::new()));
 
     let mesh_mgr = if join_resp.mesh.unwrap_or(false) {
         let mesh_port = config.listen_port.wrapping_add(1);
         let mgr = Arc::new(mesh::MeshManager::new(private_key, mesh_port));
         if let Some(ref peers) = join_resp.mesh_peers {
             let parsed = api::parse_mesh_peers(peers);
+            let map = dns::extract_peer_map(&parsed);
+            *dns_peer_map.write().unwrap() = map;
             mgr.update_peers(&parsed, &pub_key_b64);
         }
 
@@ -269,12 +282,15 @@ pub fn connect(
         let refresh_token = config.token.clone();
         let refresh_pub_key = pub_key_b64.clone();
         let shutdown_ref = Arc::clone(&shutdown);
+        let dns_map_ref = Arc::clone(&dns_peer_map);
         std::thread::spawn(move || {
             let interval = std::time::Duration::from_secs(30);
             loop {
                 std::thread::sleep(interval);
                 if shutdown_ref.load(Ordering::Relaxed) { break; }
                 let peers = api::get_mesh_peers(&refresh_server, refresh_port, &refresh_token);
+                let map = dns::extract_peer_map(&peers);
+                *dns_map_ref.write().unwrap() = map;
                 refresh_mgr.update_peers(&peers, &refresh_pub_key);
             }
         });
@@ -283,17 +299,93 @@ pub fn connect(
         None
     };
 
+    let dns_guard = if mesh_mgr.is_some() {
+        let upstream = std::env::var("NEXGUARD_DNS_UPSTREAM")
+            .unwrap_or_else(|_| "1.1.1.1".to_string());
+        if let Some(resolver) = dns::DnsResolver::try_start(&upstream, Arc::clone(&dns_peer_map)) {
+            let shutdown_ref = Arc::clone(&shutdown);
+            std::thread::spawn(move || {
+                resolver.run_with_shutdown(&shutdown_ref);
+            });
+        }
+
+        let _ = route::add_route(Ipv4Addr::new(100, 100, 100, 100), 32, tun_dev.name());
+
+        let nat_mgr = mesh_mgr.clone();
+        let nat_server = config.server.clone();
+        let nat_port = config.control_port;
+        let nat_token = config.token.clone();
+        let nat_pub_key = pub_key_b64.clone();
+        let nat_shutdown = Arc::clone(&shutdown);
+        std::thread::spawn(move || {
+            let interval = std::time::Duration::from_secs(300);
+            loop {
+                if nat_shutdown.load(Ordering::Relaxed) { break; }
+                if let Some(ref mgr) = nat_mgr {
+                    let local_port = mgr.local_port();
+                    if local_port > 0 {
+                        if let Some(ep) = stun::discover_public_endpoint_on_port(local_port) {
+                            let _ = api::report_endpoint(&nat_server, nat_port, &nat_token, &nat_pub_key, &ep.to_string());
+                        }
+                    }
+                }
+                std::thread::sleep(interval);
+            }
+        });
+
+        route::set_system_dns("100.100.100.100")
+    } else {
+        None
+    };
+
     let relay_addr = config.relay.clone().unwrap_or_default();
     let server_for_relay = config.server.clone();
     let token_for_relay = config.token.clone();
 
-    if relay_addr.is_empty() {
-        return Err("no relay address configured".into());
-    }
+    let kill_switch = if config.kill_switch {
+        let server_ip = server_endpoint.ip().to_string();
+        Some(route::KillSwitch::activate(tun_dev.name(), &[&server_ip]))
+    } else {
+        None
+    };
 
     let shutdown_dp = Arc::clone(&shutdown);
     let rx_for_check = Arc::clone(&rx);
     let token_for_cache = config.token.clone();
+
+    if relay_addr.is_empty() {
+        let direct_endpoint = server_endpoint;
+        let mesh_for_direct = mesh_mgr.clone();
+        let dropped_flag = Arc::clone(&connection_dropped);
+        std::thread::spawn(move || {
+            match std::net::UdpSocket::bind("0.0.0.0:0") {
+                Ok(udp) => {
+                    let _ = udp.set_read_timeout(Some(std::time::Duration::from_millis(50)));
+                    wg::run_data_plane_udp(
+                        &tun_dev, &udp, direct_endpoint, &tunnel, &tx, &rx, &shutdown_dp,
+                        mesh_for_direct.as_ref().map(|m| m.as_ref()),
+                    );
+                    if rx_for_check.load(Ordering::Relaxed) == 0 {
+                        crate::cache::invalidate(&token_for_cache);
+                    }
+                }
+                Err(e) => {
+                    let _ = writeln!(std::io::stderr(), "[vpn-client] udp bind failed: {}", e);
+                    crate::cache::invalidate(&token_for_cache);
+                }
+            }
+            if !shutdown_dp.load(Ordering::Relaxed) {
+                dropped_flag.store(true, Ordering::Relaxed);
+            }
+            drop(exit_state);
+            drop(mesh_mgr);
+            drop(kill_switch);
+            drop(dns_guard);
+        });
+        return Ok(status);
+    }
+
+    let dropped_flag = Arc::clone(&connection_dropped);
     std::thread::spawn(move || {
         let target = relay_name.as_deref().unwrap_or(&server_for_relay);
         match wg::connect_relay(&relay_addr, target, &token_for_relay) {
@@ -313,6 +405,11 @@ pub fn connect(
         }
         drop(exit_state);
         drop(mesh_mgr);
+        drop(kill_switch);
+        drop(dns_guard);
+        if !shutdown_dp.load(Ordering::Relaxed) {
+            dropped_flag.store(true, Ordering::Relaxed);
+        }
     });
 
     Ok(status)

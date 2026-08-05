@@ -10,6 +10,7 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 use crate::tun::TunDevice;
 
 const PROBE_INTERVAL_SECS: u64 = 10;
+const PUNCH_INTERVAL_SECS: u64 = 3;
 const DIRECT_TIMEOUT_SECS: u64 = 30;
 
 struct MeshTunnel {
@@ -49,6 +50,12 @@ impl MeshManager {
         }
     }
 
+    pub fn local_port(&self) -> u16 {
+        self.udp.local_addr()
+            .map(|a| a.port())
+            .unwrap_or(0)
+    }
+
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Relaxed)
     }
@@ -82,6 +89,23 @@ impl MeshManager {
         let mut buf = [0u8; 65535];
         let mut dec = [0u8; 65535];
         while let Ok((n, from)) = self.udp.recv_from(&mut buf) {
+            if n <= 14 && &buf[..n.min(14)] == b"nexguard-punch" {
+                let peers = self.peers.lock().unwrap();
+                for peer in peers.iter() {
+                    let mut t = peer.tunnel.lock().unwrap();
+                    if t.endpoint == Some(from) {
+                        let mut handshake_buf = [0u8; 65535];
+                        if let TunnResult::WriteToNetwork(data) = t.tunn.update_timers(&mut handshake_buf) {
+                            let _ = self.udp.send_to(data, from);
+                        }
+                        peer.direct_ok.store(true, Ordering::Relaxed);
+                        *peer.last_direct_rx.lock().unwrap() = Instant::now();
+                        break;
+                    }
+                }
+                continue;
+            }
+
             let peers = self.peers.lock().unwrap();
             for peer in peers.iter() {
                 let mut t = peer.tunnel.lock().unwrap();
@@ -135,12 +159,18 @@ impl MeshManager {
                     &peer.public_key_b64[..8]);
             }
 
-            let should_probe = peer.last_probe.lock().unwrap().elapsed().as_secs() >= PROBE_INTERVAL_SECS;
+            let direct = peer.direct_ok.load(Ordering::Relaxed);
+            let interval = if direct { PROBE_INTERVAL_SECS } else { PUNCH_INTERVAL_SECS };
+            let should_probe = peer.last_probe.lock().unwrap().elapsed().as_secs() >= interval;
             if should_probe {
                 *peer.last_probe.lock().unwrap() = now;
                 if let TunnResult::WriteToNetwork(data) = t.tunn.update_timers(&mut buf) {
                     if let Some(ep) = t.endpoint {
                         let _ = self.udp.send_to(data, ep);
+                    }
+                } else if !direct {
+                    if let Some(ep) = t.endpoint {
+                        let _ = self.udp.send_to(b"nexguard-punch", ep);
                     }
                 }
             }

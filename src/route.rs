@@ -554,3 +554,138 @@ pub fn detect_local_subnets() -> Vec<String> {
     subnets.into_iter().take(3).collect()
 }
 
+pub fn set_system_dns(dns_ip: &str) -> Option<DnsGuard> {
+    #[cfg(target_os = "macos")]
+    {
+        let iface = detect_active_network_service()?;
+        let out = std::process::Command::new("networksetup")
+            .args(["-getdnsservers", &iface])
+            .output()
+            .ok()?;
+        let original = String::from_utf8_lossy(&out.stdout).to_string();
+
+        let _ = std::process::Command::new("networksetup")
+            .args(["-setdnsservers", &iface, dns_ip])
+            .status();
+
+        Some(DnsGuard { iface, original })
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let iface = detect_active_interface_linux()?;
+        let out = std::process::Command::new("resolvectl")
+            .args(["dns", &iface])
+            .output()
+            .ok()?;
+        let original = String::from_utf8_lossy(&out.stdout).to_string();
+
+        let _ = std::process::Command::new("resolvectl")
+            .args(["dns", &iface, dns_ip])
+            .status();
+
+        Some(DnsGuard { iface, original })
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let iface = detect_active_interface_windows()?;
+        let _ = std::process::Command::new("netsh")
+            .args(["interface", "ip", "set", "dns", &iface, "static", dns_ip])
+            .status();
+        Some(DnsGuard { iface: iface, original: String::new() })
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = dns_ip;
+        None
+    }
+}
+
+pub struct DnsGuard {
+    iface: String,
+    original: String,
+}
+
+impl Drop for DnsGuard {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            if self.original.trim() == "There aren't any DNS Servers set on Wi-Fi." || self.original.trim().is_empty() {
+                let _ = std::process::Command::new("networksetup")
+                    .args(["-setdnsservers", &self.iface, "empty"])
+                    .status();
+            } else {
+                let servers: Vec<&str> = self.original.lines().take(3).collect();
+                let mut args = vec!["-setdnsservers", &self.iface];
+                args.extend(servers);
+                let _ = std::process::Command::new("networksetup")
+                    .args(&args)
+                    .status();
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("resolvectl")
+                .args(["revert", &self.iface])
+                .status();
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("netsh")
+                .args(["interface", "ip", "set", "dns", &self.iface, "dhcp"])
+                .status();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn detect_active_network_service() -> Option<String> {
+    let out = std::process::Command::new("networksetup")
+        .args(["-listallnetworkservices"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let line = line.trim();
+        if line == "Wi-Fi" || line == "Ethernet" {
+            return Some(line.to_string());
+        }
+    }
+    text.lines().nth(1).map(|s| s.trim().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn detect_active_interface_linux() -> Option<String> {
+    let out = std::process::Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for part in text.split_whitespace() {
+        if !part.is_empty() && part != "default" && part != "via" && !part.contains('.') {
+            return Some(part.to_string());
+        }
+    }
+    Some("eth0".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn detect_active_interface_windows() -> Option<String> {
+    let out = std::process::Command::new("netsh")
+        .args(["interface", "show", "interface"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if line.contains("Connected") && (line.contains("Wi-Fi") || line.contains("Ethernet") || line.contains("Local Area")) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            return parts.last().map(|s| s.to_string());
+        }
+    }
+    Some("Ethernet".to_string())
+}
+
