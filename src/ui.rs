@@ -202,11 +202,13 @@ impl VpnApp {
             match crate::vpn::connect(config, Arc::clone(&shutdown)) {
                 Ok(st) => {
                     let geo_slot = Arc::clone(&st.geo);
+                    let geo_server = st.server.clone();
+                    let geo_port = st.control_port;
+                    let geo_token = profile.token.clone();
                     *status_slot.lock().unwrap() = Some(st);
                     *state.lock().unwrap() = ConnectionState::Connected;
                     std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        if let Some(info) = crate::api::fetch_geo_info() {
+                        if let Some(info) = crate::api::fetch_geo_info(&geo_server, geo_port, &geo_token) {
                             *geo_slot.lock().unwrap() = Some(info);
                         }
                     });

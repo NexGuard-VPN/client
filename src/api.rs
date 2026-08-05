@@ -453,15 +453,21 @@ pub struct GeoInfo {
     pub isp: String,
 }
 
-pub fn fetch_geo_info() -> Option<GeoInfo> {
-    let body = http_get_tls("ipapi.co", "/json/")?;
-    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+pub fn fetch_geo_info(server: &str, control_port: u16, token: &str) -> Option<GeoInfo> {
+    let host = control_host(server, control_port);
+    let path = "/api/v1/geo";
+    let req = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        path, host, token,
+    );
+    let resp = try_http_request(&host, &req).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&resp).ok()?;
     Some(GeoInfo {
-        ip: v.get("ip").and_then(|x| x.as_str())?.to_string(),
-        country: v.get("country_name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        ip: v.get("ip").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        country: v.get("country").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         city: v.get("city").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         region: v.get("region").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        isp: v.get("org").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        isp: v.get("isp").and_then(|x| x.as_str()).unwrap_or("").to_string(),
     })
 }
 
