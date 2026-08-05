@@ -510,8 +510,6 @@ struct Theme {
     text_secondary: egui::Color32,
     text_muted: egui::Color32,
     accent: egui::Color32,
-    #[allow(dead_code)]
-    accent_hover: egui::Color32,
     success: egui::Color32,
     danger: egui::Color32,
     warning: egui::Color32,
@@ -529,7 +527,6 @@ fn dark_theme() -> Theme {
         text_secondary: egui::Color32::from_rgb(161, 161, 170),
         text_muted: egui::Color32::from_rgb(113, 113, 122),
         accent: egui::Color32::from_rgb(56, 189, 248),
-        accent_hover: egui::Color32::from_rgb(125, 211, 252),
         success: egui::Color32::from_rgb(34, 197, 94),
         danger: egui::Color32::from_rgb(239, 68, 68),
         warning: egui::Color32::from_rgb(234, 179, 8),
