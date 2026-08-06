@@ -844,28 +844,21 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             if ui.add(egui::Button::new(egui::RichText::new("⚙").size(14.0).color(t.text_muted)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Settings").clicked() {
                 app.view = View::Settings;
             }
-            let add_btn = egui::Button::new(egui::RichText::new("+").size(16.0).strong().color(t.accent))
-                .fill(egui::Color32::TRANSPARENT)
-                .stroke(egui::Stroke::new(1.0_f32, t.accent))
-                .min_size(egui::vec2(28.0, 24.0));
-            let add_resp = ui.add(add_btn).on_hover_cursor(egui::CursorIcon::PointingHand);
-            let add_popup_id = egui::Id::new("add_server_menu");
-            if add_resp.clicked() {
-                ui.memory_mut(|m| m.toggle_popup(add_popup_id));
+            ui.add_space(4.0);
+            let login_btn = egui::Button::new(egui::RichText::new("Login").size(12.0).strong().color(egui::Color32::WHITE))
+                .fill(t.accent)
+                .min_size(egui::vec2(60.0, 24.0));
+            if ui.add(login_btn).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Add another account").clicked() {
+                app.view = View::Login;
             }
-            egui::popup_below_widget(ui, add_popup_id, &add_resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
-                ui.set_min_width(160.0);
-                if ui.add(egui::Button::new(egui::RichText::new("Login with Browser").size(12.0).color(t.text))
-                    .fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(150.0, 28.0))).clicked() {
-                    ui.memory_mut(|m| m.close_popup());
-                    app.view = View::Login;
-                }
-                if ui.add(egui::Button::new(egui::RichText::new("Add Manually").size(12.0).color(t.text))
-                    .fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(150.0, 28.0))).clicked() {
-                    ui.memory_mut(|m| m.close_popup());
-                    app.view = View::AddServer;
-                }
-            });
+            ui.add_space(4.0);
+            let add_btn = egui::Button::new(egui::RichText::new("+").size(16.0).strong().color(t.text_secondary))
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::new(1.0_f32, t.border))
+                .min_size(egui::vec2(28.0, 24.0));
+            if ui.add(add_btn).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Add manually").clicked() {
+                app.view = View::AddServer;
+            }
         });
     });
     ui.add_space(6.0);
@@ -1218,9 +1211,15 @@ fn draw_login(ui: &mut egui::Ui, app: &mut VpnApp) {
             ui.add_space(10.0);
             draw_logo(ui);
             ui.add_space(8.0);
-            ui.label(egui::RichText::new("Sign in to NexGuard").size(16.0).strong().color(t.text));
+            let title = if app.profiles.is_empty() { "Sign in to NexGuard" } else { "Add Another Account" };
+            ui.label(egui::RichText::new(title).size(16.0).strong().color(t.text));
             ui.add_space(4.0);
-            ui.label(egui::RichText::new("Authenticate via browser to auto-configure your VPN").size(11.0).color(t.text_muted));
+            let subtitle = if app.profiles.is_empty() {
+                "Authenticate via browser to auto-configure your VPN"
+            } else {
+                "Each login creates a separate server profile"
+            };
+            ui.label(egui::RichText::new(subtitle).size(11.0).color(t.text_muted));
             ui.add_space(14.0);
             let btn = egui::Button::new(egui::RichText::new("Login with Browser").size(14.0).strong().color(t.text))
                 .fill(t.accent)
