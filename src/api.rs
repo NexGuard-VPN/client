@@ -786,6 +786,45 @@ pub fn poll_device_login(device_token: &str) -> Result<Option<ConnectBundle>, St
     }))
 }
 
+#[derive(serde::Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct SyncedProfile {
+    #[serde(default)]
+    pub server_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub server_type: String,
+    #[serde(default)]
+    pub device_jwt: String,
+    #[serde(default)]
+    pub relay: String,
+    #[serde(default)]
+    pub relay_name: String,
+    #[serde(default)]
+    pub email: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ProfilesResponse {
+    #[serde(default)]
+    profiles: Vec<SyncedProfile>,
+}
+
+pub fn fetch_profiles(device_jwt: &str) -> Result<Vec<SyncedProfile>, String> {
+    let host = api_host();
+    let path = format!("/api/vpn/my-profiles?token={}", device_jwt);
+    let (status, body) = http_get_tls_status(&host, &path)?;
+    if status != 200 {
+        return Err(format!("fetch profiles failed: HTTP {} — {}", status, body));
+    }
+    let resp: ProfilesResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("parse profiles: {} — {}", e, body))?;
+    Ok(resp.profiles)
+}
+
 pub fn try_parse_endpoint(server: &str) -> Result<SocketAddr, String> {
     use std::net::ToSocketAddrs;
     if let Ok(addr) = server.parse::<SocketAddr>() {

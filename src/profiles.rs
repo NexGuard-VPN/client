@@ -6,6 +6,8 @@ pub struct ServerProfile {
     pub name: String,
     pub server: String,
     pub token: String,
+    #[serde(default)]
+    pub server_id: String,
     pub internet: bool,
     #[serde(default)]
     pub share_lan: bool,
@@ -59,11 +61,13 @@ pub fn save(profiles: &[ServerProfile]) {
 pub fn add(profiles: &mut Vec<ServerProfile>, profile: ServerProfile) {
     let existing = profiles.iter_mut().find(|p| {
         (!p.token.is_empty() && p.token == profile.token)
+            || (!p.server_id.is_empty() && !profile.server_id.is_empty() && p.server_id == profile.server_id)
             || (!p.server.is_empty() && !profile.server.is_empty() && p.server == profile.server)
     });
     if let Some(existing) = existing {
         existing.token = profile.token;
         existing.name = profile.name;
+        existing.server_id = profile.server_id;
         existing.internet = profile.internet;
         existing.share_lan = profile.share_lan;
         if profile.auto_connect { existing.auto_connect = true; }

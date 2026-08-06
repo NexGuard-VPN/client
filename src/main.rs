@@ -762,6 +762,7 @@ fn install_service(args: &[String]) {
             name: profile_name.clone(),
             server: String::new(),
             token: t.clone(),
+            server_id: String::new(),
             internet,
             share_lan: false,
             auto_connect: false,

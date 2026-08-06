@@ -48,6 +48,9 @@ struct VpnApp {
     settings_advertise_routes: String,
     new_auto_connect: bool,
     auto_reconnect: bool,
+    sync_in_progress: bool,
+    sync_result: Arc<Mutex<Option<Result<Vec<crate::api::SyncedProfile>, String>>>>,
+    sync_error: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -71,11 +74,21 @@ impl Default for VpnApp {
         let profiles = crate::profiles::load();
         let settings = crate::profiles::load_settings();
         let view = if profiles.is_empty() { View::Login } else { View::ServerList };
+        let sync_result: Arc<Mutex<Option<Result<Vec<crate::api::SyncedProfile>, String>>>> = Arc::new(Mutex::new(None));
+        if !profiles.is_empty() {
+            let token = profiles[0].token.clone();
+            let slot = Arc::clone(&sync_result);
+            std::thread::spawn(move || {
+                let result = crate::api::fetch_profiles(&token);
+                *slot.lock().unwrap() = Some(result);
+            });
+        }
         let connection_mode = match settings.connection_mode.as_str() {
             "direct" => ConnectionMode::DirectUdp,
             "tls" => ConnectionMode::TlsRelay,
             _ => ConnectionMode::Auto,
         };
+        let has_profiles = !profiles.is_empty();
         Self {
             selected: if profiles.is_empty() { None } else { Some(0) },
             profiles,
@@ -108,6 +121,9 @@ impl Default for VpnApp {
             settings_advertise_routes: settings.advertise_routes,
             new_auto_connect: false,
             auto_reconnect: settings.auto_reconnect,
+            sync_in_progress: has_profiles,
+            sync_result,
+            sync_error: None,
         }
     }
 }
@@ -264,6 +280,7 @@ impl VpnApp {
             name,
             server: self.new_server.clone(),
             token: self.new_token.clone(),
+            server_id: String::new(),
             internet: self.new_internet,
             share_lan: self.new_share_lan,
             auto_connect: self.new_auto_connect,
@@ -359,6 +376,22 @@ impl VpnApp {
                     *result.lock().unwrap() = Some(Err(e));
                 }
             }
+        });
+    }
+
+    fn start_sync(&mut self) {
+        let token = match self.profiles.first() {
+            Some(p) if !p.token.is_empty() => p.token.clone(),
+            _ => return,
+        };
+        if self.sync_in_progress { return; }
+        self.sync_in_progress = true;
+        self.sync_error = None;
+        *self.sync_result.lock().unwrap() = None;
+        let slot = Arc::clone(&self.sync_result);
+        std::thread::spawn(move || {
+            let result = crate::api::fetch_profiles(&token);
+            *slot.lock().unwrap() = Some(result);
         });
     }
 }
@@ -481,6 +514,7 @@ pub fn run_gui_with(token: Option<String>, name: Option<String>, internet: bool)
                 name: profile_name,
                 server: String::new(),
                 token: t,
+                server_id: String::new(),
                 internet,
                 share_lan: false,
                 auto_connect: false,
@@ -734,6 +768,7 @@ impl eframe::App for VpnApp {
                             name: if bundle.email.is_empty() { "My VPN".into() } else { bundle.email },
                             server: String::new(),
                             token: bundle.device_jwt,
+                            server_id: bundle.server_id,
                             internet: true,
                             share_lan: false,
                             auto_connect: true,
@@ -749,6 +784,43 @@ impl eframe::App for VpnApp {
                         self.connect_selected();
                     }
                     Err(e) => { self.login_error = Some(e); }
+                }
+            }
+        }
+
+        if self.sync_in_progress {
+            let sync_done = self.sync_result.lock().unwrap().clone();
+            if let Some(result) = sync_done {
+                self.sync_in_progress = false;
+                match result {
+                    Ok(synced) => {
+                        for sp in synced {
+                            let existing = self.profiles.iter().find(|p| {
+                                (!p.server_id.is_empty() && p.server_id == sp.server_id)
+                                    || (!p.token.is_empty() && p.token == sp.device_jwt)
+                            });
+                            if existing.is_none() {
+                                let profile = ServerProfile {
+                                    name: if sp.email.is_empty() { sp.name.clone() } else { sp.email.clone() },
+                                    server: String::new(),
+                                    token: sp.device_jwt.clone(),
+                                    server_id: sp.server_id.clone(),
+                                    internet: true,
+                                    share_lan: false,
+                                    auto_connect: false,
+                                    last_used: 0,
+                                };
+                                crate::profiles::add(&mut self.profiles, profile);
+                            } else if let Some(p) = self.profiles.iter_mut().find(|p| !p.server_id.is_empty() && p.server_id == sp.server_id) {
+                                if p.token != sp.device_jwt {
+                                    p.token = sp.device_jwt;
+                                }
+                            }
+                        }
+                        crate::profiles::save(&self.profiles);
+                        self.sync_tray_servers();
+                    }
+                    Err(e) => { self.sync_error = Some(e); }
                 }
             }
         }
@@ -843,6 +915,13 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add(egui::Button::new(egui::RichText::new("⚙").size(14.0).color(t.text_muted)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Settings").clicked() {
                 app.view = View::Settings;
+            }
+            ui.add_space(4.0);
+            let sync_icon = if app.sync_in_progress { "⟳" } else { "↻" };
+            let sync_btn = egui::Button::new(egui::RichText::new(sync_icon).size(14.0).color(t.text_muted))
+                .fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE);
+            if ui.add(sync_btn).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Sync from cloud").clicked() {
+                app.start_sync();
             }
             ui.add_space(4.0);
             let login_btn = egui::Button::new(egui::RichText::new("Login").size(12.0).strong().color(egui::Color32::WHITE))
