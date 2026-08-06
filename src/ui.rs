@@ -829,132 +829,140 @@ fn draw_server_view(ui: &mut egui::Ui, app: &mut VpnApp) {
 
 fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
     let t = theme();
+    let current_state = app.state.lock().unwrap().clone();
+    let is_connected = matches!(current_state, ConnectionState::Connected);
+    let is_connecting = matches!(current_state, ConnectionState::Connecting);
+
+    if app.profiles.is_empty() {
+        draw_empty_state(ui, app);
+        return;
+    }
+
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Servers").size(14.0).strong().color(t.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Button::new(egui::RichText::new("⚙").size(14.0).color(t.text_muted)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new("⚙").size(14.0).color(t.text_muted)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Settings").clicked() {
                 app.view = View::Settings;
             }
-            if ui.add(egui::Button::new(egui::RichText::new("Login").size(12.0).color(t.accent)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0_f32, t.accent))).clicked() {
-                app.view = View::Login;
+            let add_btn = egui::Button::new(egui::RichText::new("+").size(16.0).strong().color(t.accent))
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::new(1.0_f32, t.accent))
+                .min_size(egui::vec2(28.0, 24.0));
+            let add_resp = ui.add(add_btn).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let add_popup_id = egui::Id::new("add_server_menu");
+            if add_resp.clicked() {
+                ui.memory_mut(|m| m.toggle_popup(add_popup_id));
             }
-            if ui.add(egui::Button::new(egui::RichText::new("+ Add").size(12.0).color(t.accent)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0_f32, t.accent))).clicked() {
-                app.view = View::AddServer;
-            }
-            if ui.add(egui::Button::new(egui::RichText::new("Deploy ↗").size(11.0).color(t.accent)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
-                let _ = open::that(DEPLOY_URL);
-            }
+            egui::popup_below_widget(ui, add_popup_id, &add_resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                ui.set_min_width(160.0);
+                if ui.add(egui::Button::new(egui::RichText::new("Login with Browser").size(12.0).color(t.text))
+                    .fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(150.0, 28.0))).clicked() {
+                    ui.memory_mut(|m| m.close_popup());
+                    app.view = View::Login;
+                }
+                if ui.add(egui::Button::new(egui::RichText::new("Add Manually").size(12.0).color(t.text))
+                    .fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(150.0, 28.0))).clicked() {
+                    ui.memory_mut(|m| m.close_popup());
+                    app.view = View::AddServer;
+                }
+            });
         });
     });
     ui.add_space(6.0);
 
-    if app.profiles.is_empty() {
-        draw_login(ui, app);
-        return;
-    } else {
-        let mut connect_idx: Option<usize> = None;
-        let mut edit_idx: Option<usize> = None;
-        let mut select_idx: Option<usize> = None;
-        let mut disconnect_now = false;
-        let current_state = app.state.lock().unwrap().clone();
-        let is_connected = matches!(current_state, ConnectionState::Connected);
-        for (i, profile) in app.profiles.iter().enumerate() {
-            let is_selected = app.selected == Some(i);
-            let fill = if is_selected { t.surface_hover } else { t.surface };
-            let stroke_color = if is_selected { t.accent } else { t.border };
+    let mut action_idx: Option<ServerAction> = None;
+    let mut edit_idx: Option<usize> = None;
 
-            let card = egui::Frame::default()
-                .fill(fill)
-                .corner_radius(cr(10))
-                .inner_margin(12.0)
-                .stroke(egui::Stroke::new(if is_selected { 1.5_f32 } else { 1.0_f32 }, stroke_color))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let dot_color = if is_selected { t.accent } else { t.text_muted };
-                        status_dot(ui, is_selected, dot_color);
-                        ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(&profile.name).size(13.0).strong().color(t.text));
-                            let desc = if profile.server.is_empty() { "Token-based" } else { &profile.server };
-                            ui.label(egui::RichText::new(desc).size(11.0).color(t.text_muted));
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let (menu_rect, menu_resp_raw) = ui.allocate_exact_size(
-                                egui::vec2(24.0, 28.0), egui::Sense::click()
-                            );
-                            let dot_color = if menu_resp_raw.hovered() { t.text } else { t.text_muted };
-                            let cx = menu_rect.center().x;
-                            let cy = menu_rect.center().y;
-                            for dy in [-7.0, 0.0, 7.0] {
-                                ui.painter().circle_filled(
-                                    egui::pos2(cx, cy + dy),
-                                    1.8,
-                                    dot_color,
-                                );
-                            }
-                            let menu_resp = menu_resp_raw.on_hover_cursor(egui::CursorIcon::PointingHand);
-                            let popup_id = egui::Id::new(("server_menu", i));
-                            if menu_resp.clicked() {
-                                ui.memory_mut(|m| m.toggle_popup(popup_id));
-                            }
-                            egui::popup_below_widget(ui, popup_id, &menu_resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
-                                ui.set_min_width(120.0);
-                                if ui.add(egui::Button::new(
-                                    egui::RichText::new("Edit").size(12.0).color(t.text)
-                                ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(110.0, 24.0))).clicked() {
-                                    edit_idx = Some(i);
-                                }
-                                if ui.add(egui::Button::new(
-                                    egui::RichText::new("Delete").size(12.0).color(t.danger)
-                                ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(110.0, 24.0))).clicked() {
-                                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_confirm_idx"), i));
-                                }
-                            });
+    for (i, profile) in app.profiles.iter().enumerate() {
+        let is_selected = app.selected == Some(i);
+        let is_active = (is_connected || is_connecting) && app.selected == Some(i);
 
-                            ui.add_space(4.0);
-                            let active = is_connected && app.selected == Some(i);
-                            let (label, fill_color) = if active {
-                                ("Disconnect", t.danger)
+        let (fill, stroke_color, stroke_width) = if is_active {
+            (t.surface_hover, t.success, 1.5_f32)
+        } else if is_selected {
+            (t.surface_hover, t.accent, 1.5_f32)
+        } else {
+            (t.surface, t.border, 1.0_f32)
+        };
+
+        let card = egui::Frame::default()
+            .fill(fill)
+            .corner_radius(cr(10))
+            .inner_margin(12.0)
+            .stroke(egui::Stroke::new(stroke_width, stroke_color))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if is_active {
+                        status_dot(ui, true, t.success);
+                    }
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(&profile.name).size(13.0).strong().color(t.text));
+                        let desc = if profile.server.is_empty() { "Auto-configured" } else { &profile.server };
+                        ui.label(egui::RichText::new(desc).size(11.0).color(t.text_muted));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if is_active {
+                            let (label, color) = if is_connecting {
+                                ("Connecting...", t.warning)
                             } else {
-                                ("Connect", t.accent)
+                                ("Connected", t.success)
                             };
-                            let action_btn = egui::Button::new(
-                                egui::RichText::new(label).size(11.0).color(t.text)
-                            )
-                            .fill(fill_color)
-                            .min_size(egui::vec2(82.0, 24.0));
-                            if ui.add(action_btn).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                                if active {
-                                    disconnect_now = true;
-                                } else {
-                                    connect_idx = Some(i);
-                                }
+                            ui.label(egui::RichText::new(label).size(11.0).strong().color(color));
+                        } else if is_selected && !is_connected {
+                            ui.label(egui::RichText::new("Tap to connect").size(10.0).color(t.text_muted));
+                        }
+
+                        ui.add_space(8.0);
+
+                        let menu_size = egui::vec2(24.0, 28.0);
+                        let (menu_rect, menu_resp_raw) = ui.allocate_exact_size(menu_size, egui::Sense::click());
+                        let menu_visible = menu_resp_raw.hovered() || ui.memory(|m| m.is_popup_open(egui::Id::new(("server_menu", i))));
+                        let dot_color = if menu_visible { t.text } else { t.text_muted };
+                        let cx = menu_rect.center().x;
+                        let cy = menu_rect.center().y;
+                        for dy in [-6.0, 0.0, 6.0] {
+                            ui.painter().circle_filled(egui::pos2(cx, cy + dy), 1.8, dot_color);
+                        }
+                        let menu_resp = menu_resp_raw.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        let popup_id = egui::Id::new(("server_menu", i));
+                        if menu_resp.clicked() {
+                            ui.memory_mut(|m| m.toggle_popup(popup_id));
+                        }
+                        egui::popup_below_widget(ui, popup_id, &menu_resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                            ui.set_min_width(120.0);
+                            if ui.add(egui::Button::new(
+                                egui::RichText::new("Edit").size(12.0).color(t.text)
+                            ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(110.0, 24.0))).clicked() {
+                                edit_idx = Some(i);
+                            }
+                            if ui.add(egui::Button::new(
+                                egui::RichText::new("Delete").size(12.0).color(t.danger)
+                            ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(110.0, 24.0))).clicked() {
+                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_confirm_idx"), i));
                             }
                         });
                     });
                 });
+            });
 
-            let card_rect = card.response.rect;
-            const RIGHT_AREA: f32 = 140.0;
-            let click_rect = egui::Rect::from_min_max(
-                card_rect.min,
-                egui::pos2((card_rect.max.x - RIGHT_AREA).max(card_rect.min.x), card_rect.max.y),
-            );
-            let card_id = egui::Id::new(("server_card_select", i));
-            if ui.interact(click_rect, card_id, egui::Sense::click())
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
-            {
-                select_idx = Some(i);
+        let card_rect = card.response.rect;
+        let card_id = egui::Id::new(("server_card_click", i));
+        if ui.interact(card_rect, card_id, egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            if is_active {
+                action_idx = Some(ServerAction::Disconnect);
+            } else {
+                action_idx = Some(ServerAction::Connect(i));
             }
-
-            ui.add_space(3.0);
         }
 
-        if disconnect_now {
-            app.disconnect();
-        } else if let Some(idx) = edit_idx {
-            app.start_edit(idx);
-        } else if let Some(idx) = connect_idx {
+        ui.add_space(3.0);
+    }
+
+    match action_idx {
+        Some(ServerAction::Connect(idx)) => {
             app.selected = Some(idx);
             app.sync_tray_servers();
             if matches!(current_state, ConnectionState::Connected | ConnectionState::Connecting) {
@@ -963,10 +971,15 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             } else {
                 app.connect_selected();
             }
-        } else if let Some(idx) = select_idx {
-            app.selected = Some(idx);
-            app.sync_tray_servers();
         }
+        Some(ServerAction::Disconnect) => {
+            app.disconnect();
+        }
+        None => {}
+    }
+
+    if let Some(idx) = edit_idx {
+        app.start_edit(idx);
     }
 
     if let Some(idx) = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("del_confirm_idx"))) {
@@ -1019,7 +1032,58 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
             app.confirm_delete = None;
         }
     }
+}
 
+enum ServerAction {
+    Connect(usize),
+    Disconnect,
+}
+
+fn draw_empty_state(ui: &mut egui::Ui, app: &mut VpnApp) {
+    let t = theme();
+    ui.add_space(20.0);
+    ui.vertical_centered(|ui| {
+        draw_logo(ui);
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("Welcome to NexGuard").size(18.0).strong().color(t.text));
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Add a server to get started").size(12.0).color(t.text_muted));
+        ui.add_space(20.0);
+    });
+
+    card(ui, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(6.0);
+            let btn = egui::Button::new(egui::RichText::new("Login with Browser").size(14.0).strong().color(t.text))
+                .fill(t.accent)
+                .min_size(egui::vec2(220.0, 40.0));
+            if ui.add(btn).clicked() {
+                app.view = View::Login;
+            }
+            ui.add_space(8.0);
+            if ui.add(egui::Button::new(egui::RichText::new("Add Manually").size(12.0).color(t.accent))
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::new(1.0_f32, t.accent))
+                .min_size(egui::vec2(220.0, 36.0))).clicked() {
+                app.view = View::AddServer;
+            }
+            ui.add_space(6.0);
+        });
+    });
+
+    ui.add_space(14.0);
+    ui.separator();
+    ui.add_space(10.0);
+    ui.vertical_centered(|ui| {
+        ui.label(egui::RichText::new("Don't have a server?").size(12.0).color(t.text_muted));
+        ui.add_space(6.0);
+        if ui.add(egui::Button::new(egui::RichText::new("Deploy VPN Server ↗").size(12.0).color(t.accent))
+            .fill(egui::Color32::TRANSPARENT)
+            .stroke(egui::Stroke::new(1.0_f32, t.accent))
+            .min_size(egui::vec2(200.0, 36.0))).clicked() {
+            let _ = open::that(DEPLOY_URL);
+        }
+    });
 }
 
 fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
