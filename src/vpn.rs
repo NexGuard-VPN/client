@@ -64,6 +64,52 @@ pub struct VpnStatus {
     pub internet_mode: bool,
     pub geo: Arc<Mutex<Option<api::GeoInfo>>>,
     pub connection_dropped: Arc<AtomicBool>,
+    /// Address whose host route bypasses the tunnel (relay, or the server in
+    /// direct mode) — the right probe target for network-change detection.
+    pub net_target: String,
+    pub peers: Arc<Mutex<Vec<PeerView>>>,
+}
+
+/// One device on the mesh, as shown in the UI.
+#[derive(Clone)]
+pub struct PeerView {
+    pub key: String,
+    pub name: String,
+    pub ip: String,
+    pub direct: bool,
+}
+
+fn build_peer_views(
+    peers: &[api::MeshPeerInfo],
+    mgr: Option<&Arc<mesh::MeshManager>>,
+) -> Vec<PeerView> {
+    let direct_by_key: HashMap<String, bool> = mgr
+        .map(|m| {
+            m.peer_stats()
+                .into_iter()
+                .map(|(key, direct, _, _)| (key, direct))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut views: Vec<PeerView> = peers
+        .iter()
+        .map(|p| PeerView {
+            key: p.public_key.clone(),
+            name: if p.name.is_empty() {
+                p.public_key.chars().take(8).collect()
+            } else {
+                p.name.clone()
+            },
+            ip: p
+                .allowed_ips
+                .first()
+                .map(|c| c.split('/').next().unwrap_or(c).to_string())
+                .unwrap_or_default(),
+            direct: direct_by_key.get(&p.public_key).copied().unwrap_or(false),
+        })
+        .collect();
+    views.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    views
 }
 
 fn try_b64_decode(s: &str) -> Result<[u8; 32], String> {
@@ -249,6 +295,7 @@ pub fn connect(
 
     let geo: Arc<Mutex<Option<api::GeoInfo>>> = Arc::new(Mutex::new(None));
     let connection_dropped = Arc::new(AtomicBool::new(false));
+    let peer_views: Arc<Mutex<Vec<PeerView>>> = Arc::new(Mutex::new(Vec::new()));
 
     let status = VpnStatus {
         tx: Arc::clone(&tx),
@@ -266,6 +313,11 @@ pub fn connect(
         internet_mode: config.internet,
         geo,
         connection_dropped: Arc::clone(&connection_dropped),
+        net_target: match config.relay.as_deref() {
+            Some(r) if !r.is_empty() => r.split(',').next().unwrap_or(r).trim().to_string(),
+            _ => server_endpoint.to_string(),
+        },
+        peers: Arc::clone(&peer_views),
     };
 
     let dns_peer_map: Arc<RwLock<HashMap<String, Ipv4Addr>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -278,6 +330,7 @@ pub fn connect(
             let map = dns::extract_peer_map(&parsed);
             *dns_peer_map.write().unwrap() = map;
             mgr.update_peers(&parsed, &pub_key_b64);
+            *peer_views.lock().unwrap() = build_peer_views(&parsed, Some(&mgr));
         }
 
         let refresh_mgr = Arc::clone(&mgr);
@@ -287,15 +340,37 @@ pub fn connect(
         let refresh_pub_key = pub_key_b64.clone();
         let shutdown_ref = Arc::clone(&shutdown);
         let dns_map_ref = Arc::clone(&dns_peer_map);
+        let views_ref = Arc::clone(&peer_views);
         std::thread::spawn(move || {
-            let interval = std::time::Duration::from_secs(30);
+            // Peer directory refreshes on a slow tick; direct/relay state flips
+            // fast, so it is re-read every few seconds in between.
+            let directory_every = 10;
+            let mut tick: u32 = 0;
             loop {
-                std::thread::sleep(interval);
+                std::thread::sleep(std::time::Duration::from_secs(3));
                 if shutdown_ref.load(Ordering::Relaxed) { break; }
-                let peers = api::get_mesh_peers(&refresh_server, refresh_port, &refresh_token);
-                let map = dns::extract_peer_map(&peers);
-                *dns_map_ref.write().unwrap() = map;
-                refresh_mgr.update_peers(&peers, &refresh_pub_key);
+                if tick % directory_every == 0 {
+                    let peers = api::get_mesh_peers(&refresh_server, refresh_port, &refresh_token);
+                    if !peers.is_empty() {
+                        let map = dns::extract_peer_map(&peers);
+                        *dns_map_ref.write().unwrap() = map;
+                        refresh_mgr.update_peers(&peers, &refresh_pub_key);
+                        *views_ref.lock().unwrap() = build_peer_views(&peers, Some(&refresh_mgr));
+                    }
+                } else {
+                    let direct: HashMap<String, bool> = refresh_mgr
+                        .peer_stats()
+                        .into_iter()
+                        .map(|(k, d, _, _)| (k, d))
+                        .collect();
+                    let mut views = views_ref.lock().unwrap();
+                    for v in views.iter_mut() {
+                        if let Some(d) = direct.get(&v.key) {
+                            v.direct = *d;
+                        }
+                    }
+                }
+                tick = tick.wrapping_add(1);
             }
         });
         Some(mgr)

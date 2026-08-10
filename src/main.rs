@@ -1,8 +1,10 @@
 mod api;
+pub mod autostart;
 pub mod cache;
 mod dns;
 pub mod fingerprint;
 pub mod mesh;
+pub mod netmon;
 mod profiles;
 mod route;
 mod stun;
@@ -20,8 +22,39 @@ use boringtun::noise::Tunn;
 use boringtun::x25519::{PublicKey, StaticSecret};
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+fn print_help() {
+    println!("Usage: nexguard [OPTIONS]");
+    println!();
+    println!("  nexguard                              Open GUI (default)");
+    println!("  nexguard --server IP --token TOKEN    Open GUI with server pre-filled");
+    println!("  nexguard --cli --server IP --token T  CLI mode (no GUI)");
+    println!();
+    println!("Options:");
+    println!("  -s, --server IP:PORT      VPN server address");
+    println!("  -t, --token TOKEN         Auth token");
+    println!("  -n, --name NAME           Client name");
+    println!("  -r, --relay IP:443        Relay server (tunnel through nexguard relay)");
+    println!("  --internet                Route all traffic through VPN");
+    println!("  --cli, --no-gui           Force CLI mode");
+    println!("  --gui                     Force GUI mode");
+    println!("  --cleanup                 Remove stale routes from a crashed session");
+    println!("  --install-service         Start automatically on boot (needs root)");
+    println!("  --uninstall-service       Remove the boot service");
+    println!("  -v, --version             Print version and exit");
+    println!("  -h, --help                Print this help and exit");
+}
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|a| a == "--version" || a == "-v") {
+        println!("nexguard {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return;
+    }
 
     eprintln!(
         "[nexguard] v{} ({}-{})",
@@ -326,6 +359,13 @@ fn main() {
     let mut backoff_ms: u64 = 1000;
     const MAX_BACKOFF_MS: u64 = 30_000;
 
+    let net = netmon::NetMonitor::start();
+    if let Some(first_relay) = relay_addrs.split(',').next().filter(|s| !s.is_empty()) {
+        net.set_target(first_relay.trim());
+    } else {
+        net.set_target(&server_endpoint.to_string());
+    }
+
     if relay_addrs.is_empty() {
         // Relayless / direct mode: WireGuard straight to the server's UDP
         // endpoint, no relay hop. Used when --relay is not provided.
@@ -371,8 +411,12 @@ fn main() {
         } else {
             eprintln!("[vpn-client] reconnecting in {}s...", backoff_ms / 1000);
         }
-        std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+        if net.wait(std::time::Duration::from_millis(backoff_ms)) {
+            eprintln!("[vpn-client] network changed — reconnecting now");
+            backoff_ms = 1000;
+        } else {
+            backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+        }
     }
 
     eprintln!("[vpn-client] cleaning up routes...");
@@ -605,27 +649,7 @@ fn parse_args() -> Args {
             "--internet" | "--exit" => { internet = true; }
             "--kill-switch" | "--killswitch" => { kill_switch = true; }
             "--gui" | "--cli" | "--no-gui" => {}
-            "--version" | "-v" => {
-                eprintln!("nexguard {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
-            }
-            "--help" | "-h" => {
-                eprintln!("Usage: nexguard [OPTIONS]");
-                eprintln!("");
-                eprintln!("  nexguard                              Open GUI (default)");
-                eprintln!("  nexguard --server IP --token TOKEN    Open GUI with server pre-filled");
-                eprintln!("  nexguard --cli --server IP --token T  CLI mode (no GUI)");
-                eprintln!("");
-                eprintln!("Options:");
-                eprintln!("  -s, --server IP:PORT      VPN server address");
-                eprintln!("  -t, --token TOKEN         Auth token");
-                eprintln!("  -n, --name NAME           Client name");
-                eprintln!("  -r, --relay IP:443        Relay server (tunnel through nexguard relay)");
-                eprintln!("  --internet                Route all traffic through VPN");
-                eprintln!("  --cli, --no-gui           Force CLI mode");
-                eprintln!("  --gui                     Force GUI mode");
-                std::process::exit(0);
-            }
+            "--version" | "-v" | "--help" | "-h" => {}
             _ => {
                 if server.is_empty() {
                     server = argv[i].clone();

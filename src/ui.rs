@@ -51,6 +51,10 @@ struct VpnApp {
     sync_in_progress: bool,
     sync_result: Arc<Mutex<Option<Result<Vec<crate::api::SyncedProfile>, String>>>>,
     sync_error: Option<String>,
+    netmon: crate::netmon::NetMonitor,
+    last_net_epoch: u64,
+    connected_frame_since: Option<std::time::Instant>,
+    settings_start_login: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -124,6 +128,10 @@ impl Default for VpnApp {
             sync_in_progress: has_profiles,
             sync_result,
             sync_error: None,
+            netmon: crate::netmon::NetMonitor::start(),
+            last_net_epoch: 0,
+            connected_frame_since: None,
+            settings_start_login: crate::autostart::is_enabled(),
         }
     }
 }
@@ -825,6 +833,34 @@ impl eframe::App for VpnApp {
             }
         }
 
+        let now_connected = matches!(state, ConnectionState::Connected);
+        if now_connected {
+            if self.connected_frame_since.is_none() {
+                self.connected_frame_since = Some(std::time::Instant::now());
+            }
+            if let Some(ref st) = status {
+                if !st.net_target.is_empty() {
+                    self.netmon.set_target(&st.net_target);
+                }
+            }
+        } else {
+            self.connected_frame_since = None;
+        }
+        let net_epoch = self.netmon.epoch();
+        if net_epoch != self.last_net_epoch {
+            self.last_net_epoch = net_epoch;
+            // Route flips caused by our own tunnel setup land within the first
+            // seconds of a session — only real roaming/wake events after that
+            // should force a restart.
+            let grace_over = self
+                .connected_frame_since
+                .map(|t| t.elapsed().as_secs() >= 6)
+                .unwrap_or(false);
+            if now_connected && grace_over && self.auto_reconnect {
+                self.reconnect_pending = true;
+                self.disconnect();
+            }
+        }
         if let Some(ref st) = status {
             if st.connection_dropped.swap(false, Ordering::Relaxed) {
                 if let Some(st) = self.status.lock().unwrap().take() {
@@ -1357,6 +1393,21 @@ fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
 
     ui.add_space(6.0);
     card(ui, |ui| {
+        ui.label(egui::RichText::new("General").size(13.0).strong().color(t.text));
+        ui.add_space(6.0);
+        if ui.checkbox(&mut app.settings_start_login, "Start NexGuard at login").changed() {
+            if let Err(e) = crate::autostart::set_enabled(app.settings_start_login) {
+                app.settings_start_login = crate::autostart::is_enabled();
+                let _ = std::io::Write::write_fmt(
+                    &mut std::io::stderr(),
+                    format_args!("[autostart] failed: {}\n", e),
+                );
+            }
+        }
+    });
+
+    ui.add_space(6.0);
+    card(ui, |ui| {
         ui.label(egui::RichText::new("Security").size(13.0).strong().color(t.text));
         ui.add_space(6.0);
         ui.checkbox(&mut app.settings_kill_switch, "Kill switch (block traffic on disconnect)");
@@ -1436,6 +1487,41 @@ fn draw_connected(ui: &mut egui::Ui, status: &Option<VpnStatus>) {
         row(ui, "Endpoint", &st.endpoint);
         row(ui, "Interface", &st.tun_name);
     });
+
+    let peers = st.peers.lock().unwrap().clone();
+    if !peers.is_empty() {
+        ui.add_space(6.0);
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Devices").size(12.0).strong().color(t.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let direct = peers.iter().filter(|p| p.direct).count();
+                    ui.label(
+                        egui::RichText::new(format!("{} direct · {} relayed", direct, peers.len() - direct))
+                            .size(10.0)
+                            .color(t.text_muted),
+                    );
+                });
+            });
+            ui.add_space(4.0);
+            for p in &peers {
+                ui.horizontal(|ui| {
+                    let (dot, tip) = if p.direct {
+                        (t.success, "Direct peer-to-peer connection")
+                    } else {
+                        (t.text_muted, "Relayed through the server")
+                    };
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 3.5, dot);
+                    ui.label(egui::RichText::new(&p.name).size(12.0).color(t.text))
+                        .on_hover_text(tip);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(&p.ip).size(11.0).color(t.text_secondary));
+                    });
+                });
+            }
+        });
+    }
 }
 
 fn draw_update_banner(ui: &mut egui::Ui, app: &mut VpnApp) {
