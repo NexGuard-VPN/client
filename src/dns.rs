@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-const MAGIC_DNS_IP: &str = "100.100.100.100";
+pub const MAGIC_DNS_IP: &str = "100.100.100.100";
 const DNS_PORT: u16 = 53;
 const UPSTREAM_TIMEOUT_MS: u64 = 3000;
 const DNS_SUFFIX: &str = ".nexguard";

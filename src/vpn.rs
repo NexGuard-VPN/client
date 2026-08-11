@@ -412,7 +412,7 @@ pub fn connect(
             }
         });
 
-        route::set_system_dns("100.100.100.100")
+        route::set_system_dns(crate::dns::MAGIC_DNS_IP)
     } else {
         None
     };

@@ -1,6 +1,14 @@
 use std::io::Write;
 use std::net::Ipv4Addr;
 
+const DNS_STATE_FILE: &str = "dns-restore.json";
+
+#[cfg(target_os = "macos")]
+const DNS_MACOS_CLEAR: &str = "empty";
+
+#[cfg(target_os = "windows")]
+const DNS_WINDOWS_DHCP: &str = "dhcp";
+
 pub struct ExitRouteState {
     preserved_ips: Vec<String>,
     original_gateway: String,
@@ -74,6 +82,7 @@ pub fn emergency_cleanup(tun_name: &str) {
     remove_default_v6_via_tun(tun_name);
     remove_v6_blackhole(tun_name);
     cleanup_policy_routing();
+    restore_orphaned_dns();
     if let Ok((gw, _iface)) = detect_default_gateway() {
         if !gw.is_empty() {
             let _ = run_cmd("route", &["delete", "default"]);
@@ -555,108 +564,234 @@ pub fn detect_local_subnets() -> Vec<String> {
 }
 
 pub fn set_system_dns(dns_ip: &str) -> Option<DnsGuard> {
-    #[cfg(target_os = "macos")]
-    {
-        let iface = detect_active_network_service()?;
-        let out = std::process::Command::new("networksetup")
-            .args(["-getdnsservers", &iface])
-            .output()
-            .ok()?;
-        let original = String::from_utf8_lossy(&out.stdout).to_string();
-
-        let _ = std::process::Command::new("networksetup")
-            .args(["-setdnsservers", &iface, dns_ip])
-            .status();
-
-        Some(DnsGuard { iface, original })
+    let targets = dns_targets();
+    if targets.is_empty() {
+        return None;
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        let iface = detect_active_interface_linux()?;
-        let out = std::process::Command::new("resolvectl")
-            .args(["dns", &iface])
-            .output()
-            .ok()?;
-        let original = String::from_utf8_lossy(&out.stdout).to_string();
+    let entries: Vec<DnsEntry> = targets
+        .into_iter()
+        .map(|iface| {
+            let servers = dns_capture(&iface);
+            DnsEntry { iface, servers }
+        })
+        .collect();
 
-        let _ = std::process::Command::new("resolvectl")
-            .args(["dns", &iface, dns_ip])
-            .status();
+    persist_dns_state(&entries);
 
-        Some(DnsGuard { iface, original })
+    let tunnel_dns = [dns_ip.to_owned()];
+    for entry in &entries {
+        let _ = dns_apply(&entry.iface, &tunnel_dns);
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        let iface = detect_active_interface_windows()?;
-        let _ = std::process::Command::new("netsh")
-            .args(["interface", "ip", "set", "dns", &iface, "static", dns_ip])
-            .status();
-        Some(DnsGuard { iface: iface, original: String::new() })
-    }
+    Some(DnsGuard { entries })
+}
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        let _ = dns_ip;
-        None
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct DnsEntry {
+    iface: String,
+    servers: Vec<String>,
+}
+
+fn dns_state_path() -> Option<std::path::PathBuf> {
+    crate::dirs_next().map(|d| d.join(DNS_STATE_FILE))
+}
+
+fn persist_dns_state(entries: &[DnsEntry]) {
+    let Some(path) = dns_state_path() else { return };
+    if let Ok(data) = serde_json::to_vec(entries) {
+        let _ = std::fs::write(path, data);
     }
 }
 
+fn clear_dns_state() {
+    if let Some(path) = dns_state_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+pub fn restore_orphaned_dns() {
+    let Some(path) = dns_state_path() else { return };
+    let Ok(data) = std::fs::read(&path) else { return };
+    let Ok(entries) = serde_json::from_slice::<Vec<DnsEntry>>(&data) else {
+        let _ = std::fs::remove_file(&path);
+        return;
+    };
+    if entries.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let _ = writeln!(
+        std::io::stderr(),
+        "[vpn-client] restoring DNS left behind by a previous session"
+    );
+    if restore_dns_entries(&entries) {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        let _ = writeln!(
+            std::io::stderr(),
+            "[vpn-client] DNS restore incomplete (needs root); rerun with --cleanup"
+        );
+    }
+}
+
+pub fn cleanup_stale_session() {
+    restore_orphaned_dns();
+    remove_v6_blackhole("");
+    cleanup_policy_routing();
+}
+
+fn restore_dns_entries(entries: &[DnsEntry]) -> bool {
+    let restored = entries
+        .iter()
+        .all(|entry| dns_apply(&entry.iface, &entry.servers).is_ok());
+    dns_flush();
+    restored
+}
+
+fn parse_dns_servers(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| line.parse::<std::net::IpAddr>().is_ok())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn capture_cmd(cmd: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(cmd)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 pub struct DnsGuard {
-    iface: String,
-    original: String,
+    entries: Vec<DnsEntry>,
 }
 
 impl Drop for DnsGuard {
     fn drop(&mut self) {
-        #[cfg(target_os = "macos")]
-        {
-            if self.original.trim() == "There aren't any DNS Servers set on Wi-Fi." || self.original.trim().is_empty() {
-                let _ = std::process::Command::new("networksetup")
-                    .args(["-setdnsservers", &self.iface, "empty"])
-                    .status();
-            } else {
-                let servers: Vec<&str> = self.original.lines().take(3).collect();
-                let mut args = vec!["-setdnsservers", &self.iface];
-                args.extend(servers);
-                let _ = std::process::Command::new("networksetup")
-                    .args(&args)
-                    .status();
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let _ = std::process::Command::new("resolvectl")
-                .args(["revert", &self.iface])
-                .status();
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let _ = std::process::Command::new("netsh")
-                .args(["interface", "ip", "set", "dns", &self.iface, "dhcp"])
-                .status();
-        }
+        restore_dns_entries(&self.entries);
+        clear_dns_state();
     }
 }
 
 #[cfg(target_os = "macos")]
-fn detect_active_network_service() -> Option<String> {
-    let out = std::process::Command::new("networksetup")
-        .args(["-listallnetworkservices"])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        let line = line.trim();
-        if line == "Wi-Fi" || line == "Ethernet" {
-            return Some(line.to_string());
-        }
-    }
-    text.lines().nth(1).map(|s| s.trim().to_string())
+fn dns_targets() -> Vec<String> {
+    let Some(text) = capture_cmd("networksetup", &["-listallnetworkservices"]) else {
+        return Vec::new();
+    };
+    text.lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('*'))
+        .map(str::to_owned)
+        .collect()
 }
+
+#[cfg(target_os = "macos")]
+fn dns_capture(iface: &str) -> Vec<String> {
+    capture_cmd("networksetup", &["-getdnsservers", iface])
+        .map(|text| parse_dns_servers(&text))
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "macos")]
+fn dns_apply(iface: &str, servers: &[String]) -> Result<(), String> {
+    let mut args = vec!["-setdnsservers", iface];
+    if servers.is_empty() {
+        args.push(DNS_MACOS_CLEAR);
+    } else {
+        args.extend(servers.iter().map(String::as_str));
+    }
+    run_cmd("networksetup", &args)
+}
+
+#[cfg(target_os = "macos")]
+fn dns_flush() {
+    let _ = run_cmd("dscacheutil", &["-flushcache"]);
+    let _ = run_cmd("killall", &["-HUP", "mDNSResponder"]);
+}
+
+#[cfg(target_os = "linux")]
+fn dns_targets() -> Vec<String> {
+    detect_active_interface_linux().into_iter().collect()
+}
+
+#[cfg(target_os = "linux")]
+fn dns_capture(iface: &str) -> Vec<String> {
+    capture_cmd("resolvectl", &["dns", iface])
+        .map(|text| parse_dns_servers(&text))
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn dns_apply(iface: &str, servers: &[String]) -> Result<(), String> {
+    if servers.is_empty() {
+        return run_cmd("resolvectl", &["revert", iface]);
+    }
+    let mut args = vec!["dns", iface];
+    args.extend(servers.iter().map(String::as_str));
+    run_cmd("resolvectl", &args)
+}
+
+#[cfg(target_os = "linux")]
+fn dns_flush() {
+    let _ = run_cmd("resolvectl", &["flush-caches"]);
+}
+
+#[cfg(target_os = "windows")]
+fn dns_targets() -> Vec<String> {
+    detect_active_interface_windows().into_iter().collect()
+}
+
+#[cfg(target_os = "windows")]
+fn dns_capture(iface: &str) -> Vec<String> {
+    let name_arg = format!("name={}", iface);
+    capture_cmd("netsh", &["interface", "ip", "show", "dnsservers", &name_arg])
+        .filter(|text| !text.to_lowercase().contains(DNS_WINDOWS_DHCP))
+        .map(|text| parse_dns_servers(&text))
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn dns_apply(iface: &str, servers: &[String]) -> Result<(), String> {
+    let Some((primary, rest)) = servers.split_first() else {
+        return run_cmd("netsh", &["interface", "ip", "set", "dns", iface, DNS_WINDOWS_DHCP]);
+    };
+    run_cmd("netsh", &["interface", "ip", "set", "dns", iface, "static", primary])?;
+    for server in rest {
+        let _ = run_cmd("netsh", &["interface", "ip", "add", "dns", iface, server]);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn dns_flush() {
+    let _ = run_cmd("ipconfig", &["/flushdns"]);
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn dns_targets() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn dns_capture(_iface: &str) -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn dns_apply(_iface: &str, _servers: &[String]) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn dns_flush() {}
 
 #[cfg(target_os = "linux")]
 fn detect_active_interface_linux() -> Option<String> {

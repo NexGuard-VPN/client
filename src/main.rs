@@ -71,6 +71,12 @@ fn main() {
         uninstall_service();
         return;
     }
+    if args.iter().any(|a| a == "--cleanup") {
+        route::cleanup_stale_session();
+        return;
+    }
+
+    route::restore_orphaned_dns();
 
     let cli_mode = args.iter().any(|a| a == "--cli" || a == "--no-gui");
     let init_token = arg_value(&args, "--token").or_else(|| arg_value(&args, "-t"));
@@ -326,7 +332,7 @@ fn main() {
             }
         });
 
-        route::set_system_dns("100.100.100.100")
+        route::set_system_dns(dns::MAGIC_DNS_IP)
     } else {
         None
     };
