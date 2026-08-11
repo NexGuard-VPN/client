@@ -143,7 +143,7 @@ jobs:
               "min_version": "1.9.34",
               "platforms": {
                 "macos-arm64": { "url": "${BASE_URL}/nexguard-macos-${VERSION}", "dmg": "${BASE_URL}/NexGuard-${VERSION}.dmg" },
-                "macos-amd64": { "url": "${BASE_URL}/nexguard-macos-${VERSION}" },
+                "macos-amd64": { "url": "${BASE_URL}/nexguard-macos-intel-${VERSION}" },
                 "linux-amd64": { "url": "${BASE_URL}/nexguard-linux-${VERSION}" },
                 "linux-arm64": { "url": "${BASE_URL}/nexguard-linux-arm64-${VERSION}" },
                 "windows-amd64": { "url": "${BASE_URL}/nexguard-windows-${VERSION}.exe" }
@@ -241,4 +241,8 @@ jobs:
             ln -sf nexguard-linux-${{ env.VERSION }} linux
             ln -sf nexguard-linux-arm64-${{ env.VERSION }} linux-arm64
             ln -sf nexguard-windows-${{ env.VERSION }}.exe windows.exe
-            ls -la macos linux linux-arm64 windows.exe version.json
+            ln -sf NexGuard-${{ env.VERSION }}.dmg NexGuard.dmg
+            ln -sf nexguard-macos-${{ env.VERSION }} NexGuard-macos
+            ln -sf nexguard-linux-${{ env.VERSION }} NexGuard-linux
+            ln -sf nexguard-windows-${{ env.VERSION }}.exe NexGuard.exe
+            ls -la macos macos-intel linux linux-arm64 windows.exe NexGuard.dmg version.json
