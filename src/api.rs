@@ -222,7 +222,17 @@ fn dechunk(data: &[u8]) -> Vec<u8> {
 /// blocking on read-to-EOF: the download server replies `Connection:
 /// keep-alive` and never closes, so read-to-EOF stalled for the full
 /// socket read timeout on every request.
-fn read_http_response<R: std::io::Read>(mut r: R) -> Result<(u16, Vec<u8>), String> {
+fn read_http_response<R: std::io::Read>(r: R) -> Result<(u16, Vec<u8>), String> {
+    read_http_response_with(r, None, None)
+}
+
+fn read_http_response_with<R: std::io::Read>(
+    mut r: R,
+    progress: Option<&dyn Fn(u64, u64)>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(u16, Vec<u8>), String> {
+    use std::sync::atomic::Ordering;
+    let cancelled = || cancel.is_some_and(|c| c.load(Ordering::Relaxed));
     let mut buf: Vec<u8> = Vec::with_capacity(8192);
     let mut chunk = [0u8; 16384];
 
@@ -260,16 +270,21 @@ fn read_http_response<R: std::io::Read>(mut r: R) -> Result<(u16, Vec<u8>), Stri
 
     if chunked {
         while !body.ends_with(b"0\r\n\r\n") {
+            if cancelled() { return Err("cancelled".into()); }
             let n = r.read(&mut chunk).map_err(|e| format!("read: {}", e))?;
             if n == 0 { break; }
             body.extend_from_slice(&chunk[..n]);
+            if let Some(p) = progress { p(body.len() as u64, 0); }
         }
         body = dechunk(&body);
     } else if let Some(cl) = content_length {
+        if let Some(p) = progress { p(body.len().min(cl) as u64, cl as u64); }
         while body.len() < cl {
+            if cancelled() { return Err("cancelled".into()); }
             let n = r.read(&mut chunk).map_err(|e| format!("read: {}", e))?;
             if n == 0 { break; }
             body.extend_from_slice(&chunk[..n]);
+            if let Some(p) = progress { p(body.len().min(cl) as u64, cl as u64); }
         }
         body.truncate(cl);
     } else {
@@ -471,6 +486,21 @@ pub fn fetch_geo_info(server: &str, control_port: u16, token: &str) -> Option<Ge
     })
 }
 
+pub fn fetch_geo_self() -> Option<GeoInfo> {
+    let (status, body) = http_get_tls_status(&api_host(), "/api/geo/self").ok()?;
+    if status != 200 {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    Some(GeoInfo {
+        ip: v.get("ip").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        country: v.get("country").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        city: v.get("city").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        region: v.get("region").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        isp: v.get("isp").or_else(|| v.get("org")).and_then(|x| x.as_str()).unwrap_or("").to_string(),
+    })
+}
+
 const VERSION_URL_HOST: &str = "nexguard.sh";
 const VERSION_URL_PATH: &str = "/version.json";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -522,14 +552,18 @@ fn verify_signature(binary: &[u8], signature: &[u8]) -> Result<(), String> {
     pk.verify(binary, &sig).map_err(|e| format!("signature verification failed: {}", e))
 }
 
-pub fn download_update(url: &str) -> Result<Vec<u8>, String> {
+pub fn download_update(
+    url: &str,
+    progress: &dyn Fn(u64, u64),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<u8>, String> {
     let (host, path) = parse_url(url)?;
-    let body = download_tls(&host, &path)?;
+    let body = download_tls(&host, &path, Some(progress), Some(cancel))?;
     if body.len() < 1000 || body.starts_with(b"<html") || body.starts_with(b"<!DOCTYPE") {
         return Err("download returned HTML, not a binary".into());
     }
     let sig_path = format!("{}.sig", path);
-    let sig_raw = download_tls(&host, &sig_path)
+    let sig_raw = download_tls(&host, &sig_path, None, None)
         .map_err(|e| format!("missing signature {}: {}", sig_path, e))?;
     let sig_text = std::str::from_utf8(&sig_raw).unwrap_or("").trim();
     let sig_bytes = if sig_text.len() == 128 {
@@ -541,7 +575,12 @@ pub fn download_update(url: &str) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
-fn download_tls(host: &str, path: &str) -> Result<Vec<u8>, String> {
+fn download_tls(
+    host: &str,
+    path: &str,
+    progress: Option<&dyn Fn(u64, u64)>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Vec<u8>, String> {
     use std::io::Write;
     ensure_crypto_provider();
     let addr = {
@@ -572,15 +611,19 @@ fn download_tls(host: &str, path: &str) -> Result<Vec<u8>, String> {
         path, host
     );
     tls.write_all(req.as_bytes()).map_err(|e| format!("write: {}", e))?;
-    let (status, body) = read_http_response(&mut tls)?;
+    let (status, body) = read_http_response_with(&mut tls, progress, cancel)?;
     if status != 200 {
         return Err(format!("HTTP {}", status));
     }
     Ok(body)
 }
 
-pub fn self_update(url: &str) -> Result<(), String> {
-    let binary = download_update(url)?;
+pub fn self_update(
+    url: &str,
+    progress: &dyn Fn(u64, u64),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
+    let binary = download_update(url, progress, cancel)?;
     let exe = std::env::current_exe()
         .map_err(|e| format!("current exe: {}", e))?;
 

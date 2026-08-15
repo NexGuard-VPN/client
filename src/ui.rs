@@ -35,13 +35,13 @@ struct VpnApp {
     update_info: Arc<Mutex<Option<crate::api::UpdateInfo>>>,
     updating: Arc<AtomicBool>,
     update_result: Arc<Mutex<Option<Result<(), String>>>>,
-    confirm_delete: Option<usize>,
     editing_idx: Option<usize>,
     reconnect_pending: bool,
     quit_cleanup_done: bool,
     login_in_progress: bool,
     login_result: Arc<Mutex<Option<Result<crate::api::ConnectBundle, String>>>>,
-    login_error: Option<String>,
+    login_url: Arc<Mutex<Option<String>>>,
+    login_link_copied: Option<std::time::Instant>,
     settings_connection_mode: ConnectionMode,
     settings_kill_switch: bool,
     settings_dns_leak: bool,
@@ -55,6 +55,10 @@ struct VpnApp {
     last_net_epoch: u64,
     connected_frame_since: Option<std::time::Instant>,
     settings_start_login: bool,
+    modal: Option<crate::modal::Modal>,
+    dl_progress: crate::modal::Progress,
+    update_cancel: Arc<AtomicBool>,
+    error_modal_for: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -112,13 +116,13 @@ impl Default for VpnApp {
             update_info,
             updating: Arc::new(AtomicBool::new(false)),
             update_result: Arc::new(Mutex::new(None)),
-            confirm_delete: None,
             editing_idx: None,
             reconnect_pending: false,
             quit_cleanup_done: false,
             login_in_progress: false,
             login_result: Arc::new(Mutex::new(None)),
-            login_error: None,
+            login_url: Arc::new(Mutex::new(None)),
+            login_link_copied: None,
             settings_connection_mode: connection_mode,
             settings_kill_switch: settings.kill_switch,
             settings_dns_leak: settings.dns_leak_protection,
@@ -132,6 +136,10 @@ impl Default for VpnApp {
             last_net_epoch: 0,
             connected_frame_since: None,
             settings_start_login: crate::autostart::is_enabled(),
+            modal: None,
+            dl_progress: crate::modal::Progress::default(),
+            update_cancel: Arc::new(AtomicBool::new(false)),
+            error_modal_for: None,
         }
     }
 }
@@ -241,7 +249,9 @@ impl VpnApp {
                     *status_slot.lock().unwrap() = Some(st);
                     *state.lock().unwrap() = ConnectionState::Connected;
                     std::thread::spawn(move || {
-                        if let Some(info) = crate::api::fetch_geo_info(&geo_server, geo_port, &geo_token) {
+                        let info = crate::api::fetch_geo_info(&geo_server, geo_port, &geo_token)
+                            .or_else(crate::api::fetch_geo_self);
+                        if let Some(info) = info {
                             *geo_slot.lock().unwrap() = Some(info);
                         }
                     });
@@ -342,26 +352,130 @@ impl VpnApp {
     }
 
     fn start_update(&mut self, url: String) {
+        use crate::modal::{Modal, ModalAction, ModalButton, ButtonStyle};
         if self.updating.load(Ordering::Relaxed) { return; }
         self.updating.store(true, Ordering::Relaxed);
+        self.update_cancel.store(false, Ordering::Relaxed);
+        self.dl_progress.done.store(0, Ordering::Relaxed);
+        self.dl_progress.total.store(0, Ordering::Relaxed);
+        let version = self.update_info.lock().unwrap().as_ref()
+            .map(|i| i.version.clone()).unwrap_or_default();
+        self.modal = Some(Modal::progress(
+            "Updating NexGuard",
+            &format!("Downloading v{}...", version),
+            self.dl_progress.clone(),
+            vec![ModalButton::new("Cancel", ButtonStyle::Ghost, ModalAction::CancelUpdate)],
+        ));
         let updating = Arc::clone(&self.updating);
         let result = Arc::clone(&self.update_result);
+        let done = Arc::clone(&self.dl_progress.done);
+        let total = Arc::clone(&self.dl_progress.total);
+        let cancel = Arc::clone(&self.update_cancel);
         std::thread::spawn(move || {
-            let r = crate::api::self_update(&url);
+            let progress = move |d: u64, t: u64| {
+                done.store(d, Ordering::Relaxed);
+                total.store(t, Ordering::Relaxed);
+            };
+            let r = crate::api::self_update(&url, &progress, &cancel);
             *result.lock().unwrap() = Some(r);
             updating.store(false, Ordering::Relaxed);
         });
     }
 
+    fn poll_update_result(&mut self) {
+        use crate::modal::{Modal, ModalAction, ModalButton, ButtonStyle};
+        let Some(r) = self.update_result.lock().unwrap().take() else { return };
+        let info = self.update_info.lock().unwrap().clone();
+        let version = info.as_ref().map(|i| i.version.clone()).unwrap_or_default();
+        self.modal = match r {
+            Ok(()) => Some(Modal::success(
+                "Update ready",
+                &format!("NexGuard v{} is installed. Restart to apply it.", version),
+                vec![
+                    ModalButton::new("Later", ButtonStyle::Ghost, ModalAction::Dismiss),
+                    ModalButton::new("Restart now", ButtonStyle::Primary, ModalAction::RestartApp),
+                ],
+            )),
+            Err(ref e) if e.contains("cancelled") => None,
+            Err(e) => {
+                let retry = info.map(|i| i.download_url).unwrap_or_default();
+                Some(Modal::error(
+                    "Update failed",
+                    &e,
+                    vec![
+                        ModalButton::new("Dismiss", ButtonStyle::Ghost, ModalAction::Dismiss),
+                        ModalButton::new("Try again", ButtonStyle::Primary, ModalAction::StartUpdate(retry)),
+                    ],
+                ))
+            }
+        };
+    }
+
+    fn handle_modal_action(&mut self, action: crate::modal::ModalAction) {
+        use crate::modal::ModalAction::*;
+        match action {
+            Dismiss => {
+                self.modal = None;
+                self.error_modal_for = None;
+                let mut st = self.state.lock().unwrap();
+                if matches!(*st, ConnectionState::Error(_)) {
+                    *st = ConnectionState::Disconnected;
+                }
+            }
+            RetryConnect => {
+                self.modal = None;
+                self.error_modal_for = None;
+                *self.state.lock().unwrap() = ConnectionState::Disconnected;
+                self.connect_selected();
+            }
+            StartUpdate(url) => {
+                self.modal = None;
+                self.start_update(url);
+            }
+            CancelUpdate => {
+                self.update_cancel.store(true, Ordering::Relaxed);
+                self.modal = None;
+            }
+            RestartApp => {
+                let connected = matches!(
+                    *self.state.lock().unwrap(),
+                    ConnectionState::Connected | ConnectionState::Connecting
+                );
+                if connected {
+                    self.disconnect();
+                }
+                crate::api::restart_self();
+            }
+            DeleteProfile(idx) => {
+                self.modal = None;
+                let deleting_active = self.selected == Some(idx)
+                    && matches!(*self.state.lock().unwrap(), ConnectionState::Connected | ConnectionState::Connecting);
+                if deleting_active {
+                    self.reconnect_pending = false;
+                    self.disconnect();
+                }
+                self.selected = Some(idx);
+                self.remove_selected();
+            }
+            RetryLogin => {
+                self.modal = None;
+                self.start_login();
+            }
+        }
+    }
+
     fn start_login(&mut self) {
         if self.login_in_progress { return; }
         self.login_in_progress = true;
-        self.login_error = None;
+        self.login_link_copied = None;
         *self.login_result.lock().unwrap() = None;
+        *self.login_url.lock().unwrap() = None;
         let result = Arc::clone(&self.login_result);
+        let url_slot = Arc::clone(&self.login_url);
         std::thread::spawn(move || {
             match crate::api::request_device_login() {
                 Ok(resp) => {
+                    *url_slot.lock().unwrap() = Some(resp.login_url.clone());
                     let _ = open::that(&resp.login_url);
                     let max_polls = 200u32;
                     for _ in 0..max_polls {
@@ -542,20 +656,20 @@ pub fn run_gui_with(token: Option<String>, name: Option<String>, internet: bool)
 
 fn cr(r: u8) -> egui::CornerRadius { egui::CornerRadius::same(r) }
 
-struct Theme {
-    bg: egui::Color32,
-    surface: egui::Color32,
-    surface_hover: egui::Color32,
-    border: egui::Color32,
-    border_active: egui::Color32,
-    text: egui::Color32,
-    text_secondary: egui::Color32,
-    text_muted: egui::Color32,
-    accent: egui::Color32,
-    success: egui::Color32,
-    danger: egui::Color32,
-    warning: egui::Color32,
-    input_bg: egui::Color32,
+pub(crate) struct Theme {
+    pub(crate) bg: egui::Color32,
+    pub(crate) surface: egui::Color32,
+    pub(crate) surface_hover: egui::Color32,
+    pub(crate) border: egui::Color32,
+    pub(crate) border_active: egui::Color32,
+    pub(crate) text: egui::Color32,
+    pub(crate) text_secondary: egui::Color32,
+    pub(crate) text_muted: egui::Color32,
+    pub(crate) accent: egui::Color32,
+    pub(crate) success: egui::Color32,
+    pub(crate) danger: egui::Color32,
+    pub(crate) warning: egui::Color32,
+    pub(crate) input_bg: egui::Color32,
 }
 
 fn dark_theme() -> Theme {
@@ -576,7 +690,7 @@ fn dark_theme() -> Theme {
     }
 }
 
-fn theme() -> &'static Theme {
+pub(crate) fn theme() -> &'static Theme {
     use std::sync::OnceLock;
     static T: OnceLock<Theme> = OnceLock::new();
     T.get_or_init(dark_theme)
@@ -713,25 +827,16 @@ impl eframe::App for VpnApp {
                     ctx.request_repaint_after(std::time::Duration::from_millis(200));
                 }
                 ConnectionState::Error(ref msg) => {
-                    let t = theme();
                     draw_header(ui);
                     draw_server_view(ui, self);
-                    ui.add_space(6.0);
-                    let mut dismissed = false;
-                    egui::Frame::default()
-                        .fill(egui::Color32::from_rgba_premultiplied(239, 68, 68, 25))
-                        .corner_radius(cr(10)).inner_margin(12.0)
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new(msg).size(12.0).color(t.danger));
-                            ui.add_space(4.0);
-                            if ui.add(egui::Button::new(egui::RichText::new("Dismiss").size(11.0).color(t.text_secondary))
-                                .fill(egui::Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::new(1.0_f32, t.danger))).clicked() {
-                                dismissed = true;
-                            }
-                        });
-                    if dismissed {
-                        *self.state.lock().unwrap() = ConnectionState::Disconnected;
+                    if self.error_modal_for.as_deref() != Some(msg.as_str()) {
+                        use crate::modal::{Modal, ModalAction, ModalButton, ButtonStyle};
+                        let (title, body) = friendly_error(msg);
+                        self.modal = Some(Modal::error(&title, &body, vec![
+                            ModalButton::new("Dismiss", ButtonStyle::Ghost, ModalAction::Dismiss),
+                            ModalButton::new("Try again", ButtonStyle::Primary, ModalAction::RetryConnect),
+                        ]));
+                        self.error_modal_for = Some(msg.clone());
                     }
                 }
                 ConnectionState::Disconnected => {
@@ -742,6 +847,12 @@ impl eframe::App for VpnApp {
             draw_update_banner(ui, self);
             });
         });
+
+        self.poll_update_result();
+        let action = self.modal.as_ref().and_then(|m| m.draw(ctx));
+        if let Some(action) = action {
+            self.handle_modal_action(action);
+        }
 
         if self.reconnect_pending && matches!(state, ConnectionState::Disconnected | ConnectionState::Error(_)) {
             self.reconnect_pending = false;
@@ -791,7 +902,14 @@ impl eframe::App for VpnApp {
                         self.view = View::ServerList;
                         self.connect_selected();
                     }
-                    Err(e) => { self.login_error = Some(e); }
+                    Err(e) => {
+                        use crate::modal::{Modal, ModalAction, ModalButton, ButtonStyle};
+                        let (_, body) = friendly_error(&e);
+                        self.modal = Some(Modal::error("Login failed", &body, vec![
+                            ModalButton::new("Dismiss", ButtonStyle::Ghost, ModalAction::Dismiss),
+                            ModalButton::new("Try again", ButtonStyle::Primary, ModalAction::RetryLogin),
+                        ]));
+                    }
                 }
             }
         }
@@ -1017,7 +1135,11 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                             };
                             ui.label(egui::RichText::new(label).size(11.0).strong().color(color));
                         } else if is_selected && !is_connected {
-                            ui.label(egui::RichText::new("Tap to connect").size(10.0).color(t.text_muted));
+                            if ui.add(egui::Button::new(egui::RichText::new("Connect").size(11.0).strong().color(t.text))
+                                .fill(t.accent).min_size(egui::vec2(76.0, 26.0)))
+                                .on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                action_idx = Some(ServerAction::Connect(i));
+                            }
                         }
 
                         ui.add_space(8.0);
@@ -1058,18 +1180,19 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
         if ui.interact(card_rect, card_id, egui::Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
+            && !is_active
         {
-            if is_active {
-                action_idx = Some(ServerAction::Disconnect);
-            } else {
-                action_idx = Some(ServerAction::Connect(i));
-            }
+            action_idx = Some(ServerAction::Select(i));
         }
 
         ui.add_space(3.0);
     }
 
     match action_idx {
+        Some(ServerAction::Select(idx)) => {
+            app.selected = Some(idx);
+            app.sync_tray_servers();
+        }
         Some(ServerAction::Connect(idx)) => {
             app.selected = Some(idx);
             app.sync_tray_servers();
@@ -1080,9 +1203,6 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                 app.connect_selected();
             }
         }
-        Some(ServerAction::Disconnect) => {
-            app.disconnect();
-        }
         None => {}
     }
 
@@ -1092,59 +1212,22 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
 
     if let Some(idx) = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::new("del_confirm_idx"))) {
         ui.ctx().data_mut(|d| d.remove_temp::<usize>(egui::Id::new("del_confirm_idx")));
-        app.confirm_delete = Some(idx);
-    }
-
-    if let Some(idx) = app.confirm_delete {
+        use crate::modal::{Modal, ModalAction, ModalButton, ButtonStyle};
         let name = app.profiles.get(idx).map(|p| p.name.clone()).unwrap_or_default();
-        let t = theme();
-        let mut close = false;
-        let mut do_delete = false;
-        egui::Window::new("Confirm deletion")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .fixed_size(egui::vec2(280.0, 120.0))
-            .show(ui.ctx(), |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new(format!("Remove \"{}\"?", name)).size(13.0).color(t.text));
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("This only removes it from this device.").size(11.0).color(t.text_muted));
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(30.0);
-                        if ui.add(egui::Button::new(egui::RichText::new("Cancel").size(12.0).color(t.text))
-                            .fill(t.surface).min_size(egui::vec2(90.0, 28.0))).clicked() {
-                            close = true;
-                        }
-                        ui.add_space(8.0);
-                        if ui.add(egui::Button::new(egui::RichText::new("Delete").size(12.0).color(egui::Color32::WHITE))
-                            .fill(t.danger).min_size(egui::vec2(90.0, 28.0))).clicked() {
-                            do_delete = true;
-                        }
-                    });
-                });
-            });
-        if do_delete {
-            let deleting_active = app.selected == Some(idx)
-                && matches!(*app.state.lock().unwrap(), ConnectionState::Connected | ConnectionState::Connecting);
-            if deleting_active {
-                app.reconnect_pending = false;
-                app.disconnect();
-            }
-            app.selected = Some(idx);
-            app.remove_selected();
-            app.confirm_delete = None;
-        } else if close {
-            app.confirm_delete = None;
-        }
+        app.modal = Some(Modal::confirm(
+            "Remove server",
+            &format!("Remove \"{}\"? This only removes it from this device.", name),
+            vec![
+                ModalButton::new("Cancel", ButtonStyle::Ghost, ModalAction::Dismiss),
+                ModalButton::new("Delete", ButtonStyle::Danger, ModalAction::DeleteProfile(idx)),
+            ],
+        ));
     }
 }
 
 enum ServerAction {
+    Select(usize),
     Connect(usize),
-    Disconnect,
 }
 
 fn draw_empty_state(ui: &mut egui::Ui, app: &mut VpnApp) {
@@ -1295,6 +1378,7 @@ fn draw_login(ui: &mut egui::Ui, app: &mut VpnApp) {
     ui.add_space(6.0);
 
     if app.login_in_progress {
+        let login_url = app.login_url.lock().unwrap().clone();
         card(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(10.0);
@@ -1306,19 +1390,41 @@ fn draw_login(ui: &mut egui::Ui, app: &mut VpnApp) {
                 ui.add_space(10.0);
             });
         });
+        if let Some(ref url) = login_url {
+            ui.add_space(6.0);
+            card(ui, |ui| {
+                ui.label(egui::RichText::new("Browser didn't open? Use this link:").size(11.0).color(t.text_muted));
+                ui.add_space(4.0);
+                egui::Frame::default().fill(t.input_bg).corner_radius(cr(8)).inner_margin(8.0)
+                    .stroke(egui::Stroke::new(1.0_f32, t.border))
+                    .show(ui, |ui| {
+                        ui.add(egui::Label::new(
+                            egui::RichText::new(url).size(11.0).monospace().color(t.text_secondary),
+                        ).wrap().selectable(true));
+                    });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let copied_recently = app.login_link_copied
+                        .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2));
+                    let copy_label = if copied_recently { "Copied ✓" } else { "Copy link" };
+                    let copy_color = if copied_recently { t.success } else { t.text };
+                    if ui.add(egui::Button::new(egui::RichText::new(copy_label).size(12.0).color(copy_color))
+                        .fill(t.surface_hover).min_size(egui::vec2(100.0, 28.0))).clicked() {
+                        if let Ok(mut cb) = arboard::Clipboard::new() {
+                            if cb.set_text(url.clone()).is_ok() {
+                                app.login_link_copied = Some(std::time::Instant::now());
+                            }
+                        }
+                    }
+                    if ui.add(egui::Button::new(egui::RichText::new("Open browser").size(12.0).color(t.text))
+                        .fill(t.accent).min_size(egui::vec2(110.0, 28.0))).clicked() {
+                        let _ = open::that(url);
+                    }
+                });
+            });
+        }
         ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
         return;
-    }
-
-    if let Some(ref err) = app.login_error {
-        ui.add_space(6.0);
-        egui::Frame::default()
-            .fill(egui::Color32::from_rgba_premultiplied(239, 68, 68, 25))
-            .corner_radius(cr(10)).inner_margin(12.0)
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new(err).size(12.0).color(t.danger));
-            });
-        ui.add_space(6.0);
     }
 
     card(ui, |ui| {
@@ -1526,20 +1632,7 @@ fn draw_connected(ui: &mut egui::Ui, status: &Option<VpnStatus>) {
 
 fn draw_update_banner(ui: &mut egui::Ui, app: &mut VpnApp) {
     let t = theme();
-    if let Some(ref result) = app.update_result.lock().unwrap().clone() {
-        ui.add_space(8.0);
-        let (msg, bg, tc) = match result {
-            Ok(()) => ("Updated! Restart to apply.", egui::Color32::from_rgba_premultiplied(34, 197, 94, 20), t.success),
-            Err(e) => (e.as_str(), egui::Color32::from_rgba_premultiplied(239, 68, 68, 20), t.danger),
-        };
-        egui::Frame::default().fill(bg).corner_radius(cr(12)).inner_margin(14.0)
-            .show(ui, |ui| { ui.label(egui::RichText::new(msg).size(13.0).strong().color(tc)); });
-        return;
-    }
     if app.updating.load(Ordering::Relaxed) {
-        ui.add_space(6.0);
-        ui.horizontal(|ui| { ui.spinner(); ui.label(egui::RichText::new("Updating...").size(12.0).color(t.warning)); });
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
         return;
     }
     let info = app.update_info.lock().unwrap().clone();
@@ -1564,6 +1657,25 @@ fn draw_update_banner(ui: &mut egui::Ui, app: &mut VpnApp) {
                 });
             });
     }
+}
+
+fn friendly_error(raw: &str) -> (String, String) {
+    let detail = raw
+        .find("{\"")
+        .and_then(|i| serde_json::from_str::<serde_json::Value>(raw[i..].trim()).ok())
+        .and_then(|v| {
+            v.get("error").or_else(|| v.get("status"))
+                .and_then(|e| e.as_str()).map(str::to_string)
+        })
+        .unwrap_or_else(|| raw.to_string());
+    let body = match detail.as_str() {
+        "tunnel not connected" =>
+            "This server is offline right now — its relay link is down. Try again in a moment or pick another server.".to_string(),
+        "entitlement required" | "no active subscription" =>
+            "Your subscription does not cover this server. Check your plan on the dashboard.".to_string(),
+        _ => detail,
+    };
+    ("Connection failed".to_string(), body)
 }
 
 fn mini_stat(ui: &mut egui::Ui, label: &str, value: &str, color: egui::Color32) {

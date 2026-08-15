@@ -1,5 +1,6 @@
 mod api;
 pub mod autostart;
+mod modal;
 pub mod cache;
 mod dns;
 pub mod fingerprint;
@@ -92,7 +93,11 @@ fn main() {
         if info.force_update {
             eprintln!("[nexguard] mandatory update required: v{}", info.version);
             eprintln!("[nexguard] updating...");
-            match api::self_update(&info.download_url) {
+            match api::self_update(
+                &info.download_url,
+                &|_, _| {},
+                &std::sync::atomic::AtomicBool::new(false),
+            ) {
                 Ok(()) => {
                     eprintln!("[nexguard] updated to v{}", info.version);
                     api::restart_self();

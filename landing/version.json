@@ -22,10 +22,13 @@
     }
   },
   "server": {
-    "version": "1.5.5",
+    "version": "1.5.6",
     "platforms": {
       "linux-amd64": {
-        "url": "https://nexguard.sh/download/nexguard-server-linux-1.5.5"
+        "url": "https://nexguard.sh/download/nexguard-server-linux-1.5.6"
+      },
+      "linux-arm64": {
+        "url": "https://nexguard.sh/download/nexguard-server-linux-arm64-1.5.6"
       }
     }
   }
