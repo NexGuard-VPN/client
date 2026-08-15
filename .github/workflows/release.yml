@@ -136,28 +136,25 @@ jobs:
 
       - name: Generate version.json
         run: |
-          cat > artifacts/version.json << EOF
-          {
-            "client": {
-              "version": "${VERSION}",
-              "min_version": "1.9.34",
-              "platforms": {
-                "macos-arm64": { "url": "${BASE_URL}/nexguard-macos-${VERSION}", "dmg": "${BASE_URL}/NexGuard-${VERSION}.dmg" },
-                "macos-amd64": { "url": "${BASE_URL}/nexguard-macos-intel-${VERSION}" },
-                "linux-amd64": { "url": "${BASE_URL}/nexguard-linux-${VERSION}" },
-                "linux-arm64": { "url": "${BASE_URL}/nexguard-linux-arm64-${VERSION}" },
-                "windows-amd64": { "url": "${BASE_URL}/nexguard-windows-${VERSION}.exe" }
-              }
-            },
-            "server": {
-              "version": "1.4.0",
-              "platforms": {
-                "linux-amd64": { "url": "${BASE_URL}/nexguard-server-linux-1.4.0" },
-                "linux-arm64": { "url": "${BASE_URL}/nexguard-server-linux-arm64-1.4.0" }
-              }
-            }
-          }
-          EOF
+          jq -n \
+            --arg v "${VERSION}" \
+            --arg base "${BASE_URL}" \
+            --slurpfile repo landing/version.json \
+            '{
+              client: {
+                version: $v,
+                min_version: "1.9.34",
+                platforms: {
+                  "macos-arm64": { url: ($base + "/nexguard-macos-" + $v), dmg: ($base + "/NexGuard-" + $v + ".dmg") },
+                  "macos-amd64": { url: ($base + "/nexguard-macos-intel-" + $v) },
+                  "linux-amd64": { url: ($base + "/nexguard-linux-" + $v) },
+                  "linux-arm64": { url: ($base + "/nexguard-linux-arm64-" + $v) },
+                  "windows-amd64": { url: ($base + "/nexguard-windows-" + $v + ".exe") }
+                }
+              },
+              server: $repo[0].server
+            }' > artifacts/version.json
+          cat artifacts/version.json
 
       - name: Rename artifacts with version
         run: |
