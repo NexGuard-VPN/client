@@ -147,7 +147,7 @@ impl Modal {
         let size = egui::vec2(0.0, 30.0);
         match b.style {
             ButtonStyle::Primary => egui::Button::new(
-                egui::RichText::new(&b.label).size(12.0).strong().color(t.text),
+                egui::RichText::new(&b.label).size(12.0).strong().color(t.accent_ink),
             )
             .fill(t.accent)
             .min_size(size),

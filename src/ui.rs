@@ -73,10 +73,11 @@ impl Default for VpnApp {
         let update_info: Arc<Mutex<Option<crate::api::UpdateInfo>>> = Arc::new(Mutex::new(None));
         {
             let slot = Arc::clone(&update_info);
-            std::thread::spawn(move || {
+            std::thread::spawn(move || loop {
                 if let Some(info) = crate::api::check_update() {
                     *slot.lock().unwrap() = Some(info);
                 }
+                std::thread::sleep(std::time::Duration::from_secs(4 * 3600));
             });
         }
         let profiles = crate::profiles::load();
@@ -666,6 +667,7 @@ pub(crate) struct Theme {
     pub(crate) text_secondary: egui::Color32,
     pub(crate) text_muted: egui::Color32,
     pub(crate) accent: egui::Color32,
+    pub(crate) accent_ink: egui::Color32,
     pub(crate) success: egui::Color32,
     pub(crate) danger: egui::Color32,
     pub(crate) warning: egui::Color32,
@@ -674,19 +676,20 @@ pub(crate) struct Theme {
 
 fn dark_theme() -> Theme {
     Theme {
-        bg: egui::Color32::from_rgb(9, 9, 11),
-        surface: egui::Color32::from_rgb(24, 24, 27),
-        surface_hover: egui::Color32::from_rgb(39, 39, 42),
-        border: egui::Color32::from_rgb(39, 39, 42),
-        border_active: egui::Color32::from_rgb(56, 189, 248),
-        text: egui::Color32::from_rgb(250, 250, 250),
-        text_secondary: egui::Color32::from_rgb(161, 161, 170),
-        text_muted: egui::Color32::from_rgb(113, 113, 122),
-        accent: egui::Color32::from_rgb(56, 189, 248),
-        success: egui::Color32::from_rgb(34, 197, 94),
-        danger: egui::Color32::from_rgb(239, 68, 68),
-        warning: egui::Color32::from_rgb(234, 179, 8),
-        input_bg: egui::Color32::from_rgb(15, 15, 18),
+        bg: egui::Color32::from_rgb(19, 17, 8),
+        surface: egui::Color32::from_rgb(27, 24, 16),
+        surface_hover: egui::Color32::from_rgb(34, 30, 19),
+        border: egui::Color32::from_rgb(46, 40, 28),
+        border_active: egui::Color32::from_rgb(242, 172, 60),
+        text: egui::Color32::from_rgb(234, 227, 210),
+        text_secondary: egui::Color32::from_rgb(178, 170, 148),
+        text_muted: egui::Color32::from_rgb(154, 145, 124),
+        accent: egui::Color32::from_rgb(242, 172, 60),
+        accent_ink: egui::Color32::from_rgb(26, 18, 4),
+        success: egui::Color32::from_rgb(124, 201, 139),
+        danger: egui::Color32::from_rgb(229, 83, 75),
+        warning: egui::Color32::from_rgb(224, 177, 92),
+        input_bg: egui::Color32::from_rgb(15, 13, 6),
     }
 }
 
@@ -1010,7 +1013,7 @@ fn draw_header(ui: &mut egui::Ui) {
         ui.add_space(12.0);
         draw_logo(ui);
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("NexGuard").size(22.0).strong().color(t.text));
+        ui.label(egui::RichText::new("NexGuard").size(22.0).strong().family(egui::FontFamily::Monospace).color(t.text));
         ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(10.0).color(t.text_muted));
         ui.add_space(12.0);
     });
@@ -1025,7 +1028,7 @@ fn draw_header_connected(ui: &mut egui::Ui, app: &mut VpnApp) {
         ui.add_space(8.0);
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("NexGuard").size(17.0).strong().color(t.text));
+                ui.label(egui::RichText::new("NexGuard").size(17.0).strong().family(egui::FontFamily::Monospace).color(t.text));
                 ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(10.0).color(t.text_muted));
             });
             ui.horizontal(|ui| {
@@ -1065,7 +1068,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
     }
 
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Servers").size(14.0).strong().color(t.text));
+        ui.label(egui::RichText::new("Servers").size(14.0).strong().family(egui::FontFamily::Monospace).color(t.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add(egui::Button::new(egui::RichText::new("⚙").size(14.0).color(t.text_muted)).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Settings").clicked() {
                 app.view = View::Settings;
@@ -1078,7 +1081,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                 app.start_sync();
             }
             ui.add_space(4.0);
-            let login_btn = egui::Button::new(egui::RichText::new("Login").size(12.0).strong().color(egui::Color32::WHITE))
+            let login_btn = egui::Button::new(egui::RichText::new("Login").size(12.0).strong().color(t.accent_ink))
                 .fill(t.accent)
                 .min_size(egui::vec2(60.0, 24.0));
             if ui.add(login_btn).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Add another account").clicked() {
@@ -1135,7 +1138,7 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                             };
                             ui.label(egui::RichText::new(label).size(11.0).strong().color(color));
                         } else if is_selected && !is_connected {
-                            if ui.add(egui::Button::new(egui::RichText::new("Connect").size(11.0).strong().color(t.text))
+                            if ui.add(egui::Button::new(egui::RichText::new("Connect").size(11.0).strong().color(t.accent_ink))
                                 .fill(t.accent).min_size(egui::vec2(76.0, 26.0)))
                                 .on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                 action_idx = Some(ServerAction::Connect(i));
@@ -1236,7 +1239,7 @@ fn draw_empty_state(ui: &mut egui::Ui, app: &mut VpnApp) {
     ui.vertical_centered(|ui| {
         draw_logo(ui);
         ui.add_space(10.0);
-        ui.label(egui::RichText::new("Welcome to NexGuard").size(18.0).strong().color(t.text));
+        ui.label(egui::RichText::new("Welcome to NexGuard").size(18.0).strong().family(egui::FontFamily::Monospace).color(t.text));
         ui.add_space(4.0);
         ui.label(egui::RichText::new("Add a server to get started").size(12.0).color(t.text_muted));
         ui.add_space(20.0);
@@ -1245,7 +1248,7 @@ fn draw_empty_state(ui: &mut egui::Ui, app: &mut VpnApp) {
     card(ui, |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(6.0);
-            let btn = egui::Button::new(egui::RichText::new("Login with Browser").size(14.0).strong().color(t.text))
+            let btn = egui::Button::new(egui::RichText::new("Login with Browser").size(14.0).strong().color(t.accent_ink))
                 .fill(t.accent)
                 .min_size(egui::vec2(220.0, 40.0));
             if ui.add(btn).clicked() {
@@ -1292,7 +1295,7 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
             app.view = View::ServerList;
         }
         let title = if editing { "Edit Server" } else { "Add Server" };
-        ui.label(egui::RichText::new(title).size(14.0).strong().color(t.text));
+        ui.label(egui::RichText::new(title).size(14.0).strong().family(egui::FontFamily::Monospace).color(t.text));
     });
     ui.add_space(6.0);
 
@@ -1338,7 +1341,7 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
     ui.vertical_centered(|ui| {
         let ok = !app.new_token.is_empty();
         let label = if editing { "Save" } else { "Save & Connect" };
-        let btn = egui::Button::new(egui::RichText::new(label).size(14.0).strong().color(t.text))
+        let btn = egui::Button::new(egui::RichText::new(label).size(14.0).strong().color(if ok { t.accent_ink } else { t.text }))
             .fill(if ok { t.accent } else { t.surface_hover })
             .min_size(egui::vec2(200.0, 40.0));
         if ui.add_enabled(ok, btn).clicked() {
@@ -1373,7 +1376,7 @@ fn draw_login(ui: &mut egui::Ui, app: &mut VpnApp) {
                 app.view = View::ServerList;
             }
         }
-        ui.label(egui::RichText::new("Login").size(14.0).strong().color(t.text));
+        ui.label(egui::RichText::new("Login").size(14.0).strong().family(egui::FontFamily::Monospace).color(t.text));
     });
     ui.add_space(6.0);
 
@@ -1416,7 +1419,7 @@ fn draw_login(ui: &mut egui::Ui, app: &mut VpnApp) {
                             }
                         }
                     }
-                    if ui.add(egui::Button::new(egui::RichText::new("Open browser").size(12.0).color(t.text))
+                    if ui.add(egui::Button::new(egui::RichText::new("Open browser").size(12.0).strong().color(t.accent_ink))
                         .fill(t.accent).min_size(egui::vec2(110.0, 28.0))).clicked() {
                         let _ = open::that(url);
                     }
@@ -1433,7 +1436,7 @@ fn draw_login(ui: &mut egui::Ui, app: &mut VpnApp) {
             draw_logo(ui);
             ui.add_space(8.0);
             let title = if app.profiles.is_empty() { "Sign in to NexGuard" } else { "Add Another Account" };
-            ui.label(egui::RichText::new(title).size(16.0).strong().color(t.text));
+            ui.label(egui::RichText::new(title).size(16.0).strong().family(egui::FontFamily::Monospace).color(t.text));
             ui.add_space(4.0);
             let subtitle = if app.profiles.is_empty() {
                 "Authenticate via browser to auto-configure your VPN"
@@ -1442,7 +1445,7 @@ fn draw_login(ui: &mut egui::Ui, app: &mut VpnApp) {
             };
             ui.label(egui::RichText::new(subtitle).size(11.0).color(t.text_muted));
             ui.add_space(14.0);
-            let btn = egui::Button::new(egui::RichText::new("Login with Browser").size(14.0).strong().color(t.text))
+            let btn = egui::Button::new(egui::RichText::new("Login with Browser").size(14.0).strong().color(t.accent_ink))
                 .fill(t.accent)
                 .min_size(egui::vec2(220.0, 42.0));
             if ui.add(btn).clicked() {
@@ -1473,7 +1476,7 @@ fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
         if ui.small_button("< Back").clicked() {
             app.view = View::ServerList;
         }
-        ui.label(egui::RichText::new("Settings").size(14.0).strong().color(t.text));
+        ui.label(egui::RichText::new("Settings").size(14.0).strong().family(egui::FontFamily::Monospace).color(t.text));
     });
     ui.add_space(6.0);
 
@@ -1486,7 +1489,7 @@ fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
             for (label, mode) in modes {
                 let selected = app.settings_connection_mode == mode;
                 let fill = if selected { t.accent } else { t.surface };
-                let txt_color = if selected { t.text } else { t.text_secondary };
+                let txt_color = if selected { t.accent_ink } else { t.text_secondary };
                 if ui.add(egui::Button::new(egui::RichText::new(label).size(11.0).color(txt_color))
                     .fill(fill)
                     .stroke(egui::Stroke::new(1.0_f32, if selected { t.accent } else { t.border }))
@@ -1650,7 +1653,7 @@ fn draw_update_banner(ui: &mut egui::Ui, app: &mut VpnApp) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let url = info.download_url.clone();
                         let btn = egui::Button::new(
-                            egui::RichText::new("Update").size(12.0).color(t.text),
+                            egui::RichText::new("Update").size(12.0).strong().color(t.accent_ink),
                         ).fill(t.accent).min_size(egui::vec2(80.0, 30.0));
                         if ui.add(btn).clicked() { app.start_update(url); }
                     });
