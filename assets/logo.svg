@@ -1,16 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <defs>
-    <linearGradient id="fg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#F3BA5E"/>
-      <stop offset="100%" stop-color="#BD740F"/>
-    </linearGradient>
-  </defs>
-  <rect width="64" height="64" rx="14" fill="#171309"/>
-  <circle cx="32" cy="32" r="22" stroke="url(#fg)" stroke-width="4" fill="none" opacity="0.35"/>
-  <circle cx="32" cy="32" r="13" stroke="url(#fg)" stroke-width="4" fill="none" opacity="0.65"/>
-  <circle cx="32" cy="32" r="6" fill="url(#fg)"/>
-  <line x1="32" y1="8" x2="32" y2="18" stroke="url(#fg)" stroke-width="3.5" stroke-linecap="round" opacity="0.7"/>
-  <line x1="32" y1="46" x2="32" y2="56" stroke="url(#fg)" stroke-width="3.5" stroke-linecap="round" opacity="0.7"/>
-  <line x1="8" y1="32" x2="18" y2="32" stroke="url(#fg)" stroke-width="3.5" stroke-linecap="round" opacity="0.7"/>
-  <line x1="46" y1="32" x2="56" y2="32" stroke="url(#fg)" stroke-width="3.5" stroke-linecap="round" opacity="0.7"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="64" height="64" fill="none">
+  <rect width="48" height="48" rx="12" fill="#171309"/>
+  <rect x="0.75" y="0.75" width="46.5" height="46.5" rx="11.25" stroke="#F2AC3C" stroke-width="1.5"/>
+  <path d="M24 8 L34 16 L31 30 L24 38 L17 30 L14 16 Z" fill="#F2AC3C"/>
+  <rect x="20" y="23" width="8" height="7" rx="1.5" fill="#171309"/>
+  <path d="M21.5 23 C21.5 23 21.5 18.5 24 18.5 C26.5 18.5 26.5 23 26.5 23" stroke="#171309" stroke-width="2.5" fill="none" stroke-linecap="round"/>
 </svg>
