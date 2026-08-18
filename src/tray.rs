@@ -76,7 +76,7 @@ impl NexTray {
 
         let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("NexGuard VPN")
+            .with_tooltip("NexGuard")
             .with_icon(icon_off.clone());
         #[cfg(target_os = "macos")]
         let builder = builder.with_icon_as_template(true);

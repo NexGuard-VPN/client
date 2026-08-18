@@ -320,7 +320,7 @@ mod platform {
 
             let adapter = match wintun::Adapter::open(&wintun, "NexGuard") {
                 Ok(a) => a,
-                Err(_) => wintun::Adapter::create(&wintun, "NexGuard", "NexGuard VPN", None)
+                Err(_) => wintun::Adapter::create(&wintun, "NexGuard", "NexGuard", None)
                     .unwrap_or_else(|e| panic!("failed to create adapter: {}", e)),
             };
 

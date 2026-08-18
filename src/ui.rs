@@ -294,7 +294,7 @@ impl VpnApp {
     }
 
     fn save_new_server(&mut self) {
-        let name = if self.new_name.is_empty() { "VPN Server".to_string() } else { self.new_name.clone() };
+        let name = if self.new_name.is_empty() { "Server".to_string() } else { self.new_name.clone() };
         let profile = ServerProfile {
             name,
             server: self.new_server.clone(),
@@ -519,7 +519,7 @@ impl VpnApp {
     }
 }
 
-const APP_NAME: &str = "NexGuard VPN";
+const APP_NAME: &str = "NexGuard";
 const DEPLOY_URL: &str = "https://nexguard.sh/deploy";
 
 static SHOW_REQUEST: std::sync::atomic::AtomicBool = AtomicBool::new(false);
@@ -632,7 +632,7 @@ pub fn run_gui_with(token: Option<String>, name: Option<String>, internet: bool)
         );
 
         if let Some(t) = token {
-            let profile_name = name.unwrap_or_else(|| "VPN Server".to_string());
+            let profile_name = name.unwrap_or_else(|| "Server".to_string());
             let profile = crate::profiles::ServerProfile {
                 name: profile_name,
                 server: String::new(),
@@ -887,7 +887,7 @@ impl eframe::App for VpnApp {
                 match result {
                     Ok(bundle) => {
                         let profile = ServerProfile {
-                            name: if bundle.email.is_empty() { "My VPN".into() } else { bundle.email },
+                            name: if bundle.email.is_empty() { "My Network".into() } else { bundle.email },
                             server: String::new(),
                             token: bundle.device_jwt,
                             server_id: bundle.server_id,
@@ -1271,7 +1271,7 @@ fn draw_empty_state(ui: &mut egui::Ui, app: &mut VpnApp) {
     ui.vertical_centered(|ui| {
         ui.label(egui::RichText::new("Don't have a server?").size(12.0).color(t.text_muted));
         ui.add_space(6.0);
-        if ui.add(egui::Button::new(egui::RichText::new("Deploy VPN Server ↗").size(12.0).color(t.accent))
+        if ui.add(egui::Button::new(egui::RichText::new("Deploy Server ↗").size(12.0).color(t.accent))
             .fill(egui::Color32::TRANSPARENT)
             .stroke(egui::Stroke::new(1.0_f32, t.accent))
             .min_size(egui::vec2(200.0, 36.0))).clicked() {
@@ -1301,7 +1301,7 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
 
     card(ui, |ui| {
         ui.label(lbl("Server Name"));
-        ui.add(egui::TextEdit::singleline(&mut app.new_name).hint_text("e.g. Office VPN").desired_width(f32::INFINITY).margin(egui::vec2(10.0, 10.0)));
+        ui.add(egui::TextEdit::singleline(&mut app.new_name).hint_text("e.g. Office Server").desired_width(f32::INFINITY).margin(egui::vec2(10.0, 10.0)));
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -1332,7 +1332,7 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
         });
 
         ui.add_space(8.0);
-        ui.checkbox(&mut app.new_internet, "Route all traffic through VPN");
+        ui.checkbox(&mut app.new_internet, "Full-tunnel mode (route all traffic through the network)");
         ui.checkbox(&mut app.new_share_lan, "Allow other peers to access my local network");
         ui.checkbox(&mut app.new_auto_connect, "Connect automatically on startup");
     });
@@ -1359,7 +1359,7 @@ fn draw_add_server(ui: &mut egui::Ui, app: &mut VpnApp) {
     ui.vertical_centered(|ui| {
         ui.label(egui::RichText::new("Don't have a server?").size(12.0).color(t.text_muted));
         ui.add_space(6.0);
-        if ui.add(egui::Button::new(egui::RichText::new("Deploy VPN Server").size(12.0).color(t.accent))
+        if ui.add(egui::Button::new(egui::RichText::new("Deploy Server").size(12.0).color(t.accent))
             .fill(egui::Color32::TRANSPARENT)
             .stroke(egui::Stroke::new(1.0_f32, t.accent))
             .min_size(egui::vec2(200.0, 36.0))).clicked() {
@@ -1439,7 +1439,7 @@ fn draw_login(ui: &mut egui::Ui, app: &mut VpnApp) {
             ui.label(egui::RichText::new(title).size(16.0).strong().family(egui::FontFamily::Monospace).color(t.text));
             ui.add_space(4.0);
             let subtitle = if app.profiles.is_empty() {
-                "Authenticate via browser to auto-configure your VPN"
+                "Authenticate via browser to auto-configure your network"
             } else {
                 "Each login creates a separate server profile"
             };
@@ -1587,7 +1587,7 @@ fn draw_connected(ui: &mut egui::Ui, status: &Option<VpnStatus>) {
 
     ui.add_space(6.0);
     card(ui, |ui| {
-        row(ui, "VPN IP", ip_only);
+        row(ui, "Network IP", ip_only);
         if let Some(ref g) = geo {
             row(ui, "Public IP", &g.ip);
             if !g.region.is_empty() { row(ui, "Region", &g.region); }

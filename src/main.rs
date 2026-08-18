@@ -32,11 +32,11 @@ fn print_help() {
     println!("  nexguard --cli --server IP --token T  CLI mode (no GUI)");
     println!();
     println!("Options:");
-    println!("  -s, --server IP:PORT      VPN server address");
+    println!("  -s, --server IP:PORT      server address");
     println!("  -t, --token TOKEN         Auth token");
     println!("  -n, --name NAME           Client name");
     println!("  -r, --relay IP:443        Relay server (tunnel through nexguard relay)");
-    println!("  --internet                Route all traffic through VPN");
+    println!("  --internet                Route all traffic through the network");
     println!("  --cli, --no-gui           Force CLI mode");
     println!("  --gui                     Force GUI mode");
     println!("  --cleanup                 Remove stale routes from a crashed session");
@@ -792,7 +792,7 @@ fn install_service(args: &[String]) {
     let internet = args.iter().any(|a| a == "--internet" || a == "--exit");
 
     if let Some(ref t) = token {
-        let profile_name = name.clone().unwrap_or_else(|| "VPN Server".to_string());
+        let profile_name = name.clone().unwrap_or_else(|| "Server".to_string());
         let profile = crate::profiles::ServerProfile {
             name: profile_name.clone(),
             server: String::new(),
@@ -857,7 +857,7 @@ fn install_service(args: &[String]) {
     #[cfg(target_os = "linux")]
     {
         let unit = format!(r#"[Unit]
-Description=NexGuard VPN Client
+Description=NexGuard Client
 After=network-online.target
 Wants=network-online.target
 
