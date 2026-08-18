@@ -1,6 +1,6 @@
 [package]
 name = "nexguard"
-version = "1.9.55"
+version = "1.9.56"
 edition = "2021"
 
 [[bin]]

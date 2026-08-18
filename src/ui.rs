@@ -1174,13 +1174,16 @@ fn draw_server_list(ui: &mut egui::Ui, app: &mut VpnApp) {
                                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("del_confirm_idx"), i));
                             }
                         });
-                    });
-                });
+                        ui.min_rect()
+                    }).inner
+                }).inner
             });
 
-        let card_rect = card.response.rect;
+        let controls_rect = card.inner;
+        let mut click_rect = card.response.rect;
+        click_rect.max.x = controls_rect.min.x.clamp(click_rect.min.x, click_rect.max.x);
         let card_id = egui::Id::new(("server_card_click", i));
-        if ui.interact(card_rect, card_id, egui::Sense::click())
+        if ui.interact(click_rect, card_id, egui::Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
             && !is_active
