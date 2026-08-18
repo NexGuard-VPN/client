@@ -104,22 +104,28 @@ fn detect_default_gateway() -> Result<(String, String), String> {
 
     let text = String::from_utf8_lossy(&out.stdout);
 
-    let mut gw = None;
-    let mut iface = None;
-    let parts: Vec<&str> = text.split_whitespace().collect();
-    for i in 0..parts.len() {
-        if parts[i] == "via" && i + 1 < parts.len() {
-            gw = Some(parts[i + 1].to_owned());
+    // Per line, not across the whole output: with more than one default route
+    // present a flattened scan can pair one route's gateway with another's
+    // interface. Point-to-point defaults carry no `via`, so keep looking until
+    // a route names both.
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let mut gw = None;
+        let mut iface = None;
+        for i in 0..parts.len() {
+            if parts[i] == "via" && i + 1 < parts.len() {
+                gw = Some(parts[i + 1].to_owned());
+            }
+            if parts[i] == "dev" && i + 1 < parts.len() {
+                iface = Some(parts[i + 1].to_owned());
+            }
         }
-        if parts[i] == "dev" && i + 1 < parts.len() {
-            iface = Some(parts[i + 1].to_owned());
+        if let (Some(g), Some(i)) = (gw, iface) {
+            return Ok((g, i));
         }
     }
 
-    match (gw, iface) {
-        (Some(g), Some(i)) => Ok((g, i)),
-        _ => Err("could not detect default gateway".into()),
-    }
+    Err("could not detect default gateway".into())
 }
 
 #[cfg(target_os = "macos")]
@@ -143,10 +149,36 @@ fn detect_default_gateway() -> Result<(String, String), String> {
         }
     }
 
-    match (gw, iface) {
-        (Some(g), Some(i)) => Ok((g, i)),
-        _ => Err("could not detect default gateway".into()),
+    if let (Some(g), Some(i)) = (gw, iface) {
+        return Ok((g, i));
     }
+
+    physical_default_gateway()
+}
+
+// A point-to-point default route — another VPN, a phone tether — names an
+// interface but carries no gateway address, so `route get default` yields half
+// an answer. Host routes still have to leave through the physical uplink, so
+// fall through to the routing table and take the default that has a real
+// gateway on it.
+#[cfg(target_os = "macos")]
+fn physical_default_gateway() -> Result<(String, String), String> {
+    let out = std::process::Command::new("netstat")
+        .args(["-rn", "-f", "inet"])
+        .output()
+        .map_err(|e| format!("netstat -rn: {}", e))?;
+
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 || parts[0] != "default" {
+            continue;
+        }
+        if parts[1].parse::<std::net::Ipv4Addr>().is_ok() {
+            return Ok((parts[1].to_owned(), parts[3].to_owned()));
+        }
+    }
+
+    Err("could not detect default gateway".into())
 }
 
 #[cfg(target_os = "windows")]
