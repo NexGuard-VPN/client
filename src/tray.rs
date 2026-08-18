@@ -179,7 +179,7 @@ impl NexTray {
 
 fn make_icon(connected: bool) -> Icon {
     let size = ICON_SIZE as usize;
-    let png = include_bytes!("../assets/logo-64.png");
+    let png = include_bytes!("../assets/logo-glyph-64.png");
     let img = image::load_from_memory(png).unwrap().to_rgba8();
     let resized = image::imageops::resize(&img, size as u32, size as u32, image::imageops::FilterType::Lanczos3);
     let mut rgba = resized.into_raw();
