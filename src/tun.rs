@@ -19,28 +19,13 @@ impl TunDevice {
                 else { "TUN device creation failed".to_string() }
             })
     }
-
-    pub fn set_address_v6(&self, ip: &str, prefix: u8) {
-        #[cfg(target_os = "linux")]
-        {
-            let _ = std::process::Command::new("ip")
-                .args(["addr", "add", &format!("{}/{}", ip, prefix), "dev", &self.name])
-                .status();
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("ifconfig")
-                .args([&self.name, "inet6", &format!("{}/{}", ip, prefix)])
-                .status();
-        }
-    }
 }
 
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
 
-    const TUNSETIFF: u64 = 0x400454CA;
+    const TUNSETIFF: libc::Ioctl = 0x400454CA as libc::Ioctl;
 
     #[repr(C)]
     struct IfReq {

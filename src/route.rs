@@ -55,6 +55,17 @@ impl ExitRouteState {
         })
     }
 
+    pub fn preserve(&mut self, ip: &str) -> bool {
+        if self.preserved_ips.iter().any(|p| p == ip) {
+            return true;
+        }
+        if add_host_route(ip, &self.original_gateway, &self.original_iface).is_ok() {
+            self.preserved_ips.push(ip.to_string());
+            return true;
+        }
+        false
+    }
+
     pub fn cleanup(&self) {
         remove_default_via_tun(&self.tun_name);
         if self.has_v6 {
@@ -76,13 +87,17 @@ impl Drop for ExitRouteState {
     }
 }
 
-pub fn emergency_cleanup(tun_name: &str) {
-    let _ = writeln!(std::io::stderr(), "[vpn-client] emergency route cleanup for {}", tun_name);
+pub fn cleanup_tun_routes(tun_name: &str) {
     remove_default_via_tun(tun_name);
     remove_default_v6_via_tun(tun_name);
     remove_v6_blackhole(tun_name);
     cleanup_policy_routing();
     restore_orphaned_dns();
+}
+
+pub fn emergency_cleanup(tun_name: &str) {
+    let _ = writeln!(std::io::stderr(), "[vpn-client] emergency route cleanup for {}", tun_name);
+    cleanup_tun_routes(tun_name);
     if let Ok((gw, _iface)) = detect_default_gateway() {
         if !gw.is_empty() {
             let _ = run_cmd("route", &["delete", "default"]);
@@ -96,7 +111,7 @@ pub fn add_route(net: Ipv4Addr, prefix: u8, tun_name: &str) -> std::io::Result<(
 }
 
 #[cfg(target_os = "linux")]
-fn detect_default_gateway() -> Result<(String, String), String> {
+pub fn detect_default_gateway() -> Result<(String, String), String> {
     let out = std::process::Command::new("ip")
         .args(["route", "show", "default"])
         .output()
@@ -129,7 +144,7 @@ fn detect_default_gateway() -> Result<(String, String), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn detect_default_gateway() -> Result<(String, String), String> {
+pub fn detect_default_gateway() -> Result<(String, String), String> {
     let out = std::process::Command::new("route")
         .args(["-n", "get", "default"])
         .output()
@@ -182,7 +197,7 @@ fn physical_default_gateway() -> Result<(String, String), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn detect_default_gateway() -> Result<(String, String), String> {
+pub fn detect_default_gateway() -> Result<(String, String), String> {
     let out = std::process::Command::new("route")
         .args(["print", "0.0.0.0"])
         .output()
@@ -424,104 +439,6 @@ fn detect_source_ip(iface: &str) -> Option<String> {
     None
 }
 
-pub struct KillSwitch {
-    enabled: bool,
-}
-
-impl KillSwitch {
-    pub fn activate(tun_name: &str, server_ips: &[&str]) -> Self {
-        if let Err(e) = activate_kill_switch(tun_name, server_ips) {
-            let _ = writeln!(std::io::stderr(), "[vpn-client] kill switch failed: {}", e);
-            return Self { enabled: false };
-        }
-        let _ = writeln!(std::io::stderr(), "[vpn-client] kill switch enabled");
-        Self { enabled: true }
-    }
-
-    pub fn deactivate(&self) {
-        if self.enabled {
-            deactivate_kill_switch();
-            let _ = writeln!(std::io::stderr(), "[vpn-client] kill switch disabled");
-        }
-    }
-}
-
-impl Drop for KillSwitch {
-    fn drop(&mut self) {
-        self.deactivate();
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn activate_kill_switch(tun_name: &str, server_ips: &[&str]) -> Result<(), String> {
-    let mut rules = String::new();
-    rules.push_str("# NexGuard kill switch\n");
-    rules.push_str("block drop all\n");
-    rules.push_str(&format!("pass on {} all\n", tun_name));
-    rules.push_str("pass on lo0 all\n");
-    for ip in server_ips {
-        rules.push_str(&format!("pass out proto tcp to {} port 443\n", ip));
-        rules.push_str(&format!("pass out proto tcp to {} port 9190\n", ip));
-    }
-    rules.push_str("pass out proto udp to any port 53\n");
-    rules.push_str("pass out proto tcp to any port 53\n");
-
-    std::fs::write("/tmp/nexguard-pf.conf", &rules)
-        .map_err(|e| format!("write pf rules: {}", e))?;
-    run_cmd("pfctl", &["-f", "/tmp/nexguard-pf.conf"])
-        .map_err(|e| format!("pfctl load: {}", e))?;
-    run_cmd("pfctl", &["-e"]).ok();
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn deactivate_kill_switch() {
-    let _ = run_cmd("pfctl", &["-d"]);
-    let _ = std::fs::remove_file("/tmp/nexguard-pf.conf");
-}
-
-#[cfg(target_os = "linux")]
-fn activate_kill_switch(tun_name: &str, server_ips: &[&str]) -> Result<(), String> {
-    run_cmd("iptables", &["-N", "NEXGUARD-KS"]).ok();
-    run_cmd("iptables", &["-F", "NEXGUARD-KS"])?;
-    run_cmd("iptables", &["-A", "NEXGUARD-KS", "-o", tun_name, "-j", "ACCEPT"])?;
-    run_cmd("iptables", &["-A", "NEXGUARD-KS", "-o", "lo", "-j", "ACCEPT"])?;
-    run_cmd("iptables", &["-A", "NEXGUARD-KS", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"])?;
-    for ip in server_ips {
-        run_cmd("iptables", &["-A", "NEXGUARD-KS", "-d", ip, "-p", "tcp", "--dport", "443", "-j", "ACCEPT"])?;
-        run_cmd("iptables", &["-A", "NEXGUARD-KS", "-d", ip, "-p", "tcp", "--dport", "9190", "-j", "ACCEPT"])?;
-    }
-    run_cmd("iptables", &["-A", "NEXGUARD-KS", "-p", "udp", "--dport", "53", "-j", "ACCEPT"])?;
-    run_cmd("iptables", &["-A", "NEXGUARD-KS", "-j", "DROP"])?;
-    run_cmd("iptables", &["-I", "OUTPUT", "1", "-j", "NEXGUARD-KS"])?;
-
-    run_cmd("ip6tables", &["-N", "NEXGUARD-KS6"]).ok();
-    run_cmd("ip6tables", &["-F", "NEXGUARD-KS6"])?;
-    run_cmd("ip6tables", &["-A", "NEXGUARD-KS6", "-o", tun_name, "-j", "ACCEPT"])?;
-    run_cmd("ip6tables", &["-A", "NEXGUARD-KS6", "-o", "lo", "-j", "ACCEPT"])?;
-    run_cmd("ip6tables", &["-A", "NEXGUARD-KS6", "-j", "DROP"])?;
-    run_cmd("ip6tables", &["-I", "OUTPUT", "1", "-j", "NEXGUARD-KS6"])?;
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn deactivate_kill_switch() {
-    let _ = run_cmd("iptables", &["-D", "OUTPUT", "-j", "NEXGUARD-KS"]);
-    let _ = run_cmd("iptables", &["-F", "NEXGUARD-KS"]);
-    let _ = run_cmd("iptables", &["-X", "NEXGUARD-KS"]);
-    let _ = run_cmd("ip6tables", &["-D", "OUTPUT", "-j", "NEXGUARD-KS6"]);
-    let _ = run_cmd("ip6tables", &["-F", "NEXGUARD-KS6"]);
-    let _ = run_cmd("ip6tables", &["-X", "NEXGUARD-KS6"]);
-}
-
-#[cfg(target_os = "windows")]
-fn activate_kill_switch(_tun_name: &str, _server_ips: &[&str]) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn deactivate_kill_switch() {}
-
 fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), String> {
     let output = std::process::Command::new(cmd)
         .args(args)
@@ -539,60 +456,19 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
-pub fn detect_local_subnets() -> Vec<String> {
-    let mut subnets = Vec::new();
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(output) = std::process::Command::new("route").args(["-n", "get", "default"]).output() {
-            let s = String::from_utf8_lossy(&output.stdout);
-            let mut iface = String::new();
-            for line in s.lines() {
-                if let Some(rest) = line.trim().strip_prefix("interface:") {
-                    iface = rest.trim().to_string();
-                }
-            }
-            if !iface.is_empty() {
-                if let Ok(out) = std::process::Command::new("ifconfig").arg(&iface).output() {
-                    let s = String::from_utf8_lossy(&out.stdout);
-                    for line in s.lines() {
-                        let line = line.trim();
-                        if let Some(rest) = line.strip_prefix("inet ") {
-                            let parts: Vec<&str> = rest.split_whitespace().collect();
-                            if parts.len() >= 4 && parts[2] == "netmask" {
-                                let ip = parts[0];
-                                let netmask = parts[3].trim_start_matches("0x");
-                                if let Ok(mask) = u32::from_str_radix(netmask, 16) {
-                                    let prefix = mask.count_ones();
-                                    if let Ok(ip_addr) = ip.parse::<std::net::Ipv4Addr>() {
-                                        let net_u32 = u32::from(ip_addr) & mask;
-                                        let net = std::net::Ipv4Addr::from(net_u32);
-                                        if !ip_addr.is_loopback() {
-                                            subnets.push(format!("{}/{}", net, prefix));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(output) = std::process::Command::new("ip").args(["-4", "route", "show"]).output() {
-            let s = String::from_utf8_lossy(&output.stdout);
-            for line in s.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 && parts[1] == "dev" && !parts[0].starts_with("default") && !parts[0].starts_with("0.0.0.0") {
-                    if parts[0].contains("/") && !parts[0].starts_with("127.") && !parts[0].starts_with("100.") {
-                        subnets.push(parts[0].to_string());
-                    }
-                }
-            }
-        }
-    }
-    subnets.into_iter().take(3).collect()
+fn is_shared_address_space(addr: &str) -> bool {
+    addr.parse::<Ipv4Addr>()
+        .map(|ip| {
+            let o = ip.octets();
+            o[0] == 100 && (64..128).contains(&o[1])
+        })
+        .unwrap_or(false)
+}
+
+fn managed_elsewhere(servers: &[String], ours: &str) -> bool {
+    servers
+        .iter()
+        .any(|s| s != ours && is_shared_address_space(s))
 }
 
 pub fn set_system_dns(dns_ip: &str) -> Option<DnsGuard> {
@@ -603,11 +479,23 @@ pub fn set_system_dns(dns_ip: &str) -> Option<DnsGuard> {
 
     let entries: Vec<DnsEntry> = targets
         .into_iter()
-        .map(|iface| {
+        .filter_map(|iface| {
             let servers = dns_capture(&iface);
-            DnsEntry { iface, servers }
+            if managed_elsewhere(&servers, dns_ip) {
+                return None;
+            }
+            let servers = if servers.iter().any(|s| s == dns_ip) {
+                Vec::new()
+            } else {
+                servers
+            };
+            Some(DnsEntry { iface, servers })
         })
         .collect();
+
+    if entries.is_empty() {
+        return None;
+    }
 
     persist_dns_state(&entries);
 

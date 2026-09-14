@@ -4,10 +4,30 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-pub const MAGIC_DNS_IP: &str = "100.100.100.100";
 const DNS_PORT: u16 = 53;
+const LOOPBACK: &str = "127.0.0.1";
+const BIND_ATTEMPTS: u32 = 10;
+const BIND_RETRY: Duration = Duration::from_millis(200);
+
+fn bind_with_retry(bind_ip: &str) -> Option<UdpSocket> {
+    for attempt in 0..BIND_ATTEMPTS {
+        if let Ok(socket) = UdpSocket::bind(format!("{}:{}", bind_ip, DNS_PORT)) {
+            return Some(socket);
+        }
+        if attempt + 1 < BIND_ATTEMPTS {
+            std::thread::sleep(BIND_RETRY);
+        }
+    }
+    None
+}
 const UPSTREAM_TIMEOUT_MS: u64 = 3000;
-const DNS_SUFFIX: &str = ".nexguard";
+pub const DEFAULT_DNS_SUFFIX: &str = "nexguard";
+
+fn normalize_suffix(suffix: &str) -> String {
+    let trimmed = suffix.trim().trim_matches('.');
+    let base = if trimmed.is_empty() { DEFAULT_DNS_SUFFIX } else { trimmed };
+    format!(".{}", base.to_lowercase())
+}
 
 const QTYPE_A: u16 = 1;
 const QTYPE_AAAA: u16 = 28;
@@ -18,16 +38,19 @@ pub struct DnsResolver {
     peers: Arc<RwLock<HashMap<String, Ipv4Addr>>>,
     socket: UdpSocket,
     upstream: SocketAddr,
+    suffix: String,
     active: Arc<AtomicBool>,
 }
 
 impl DnsResolver {
-    pub fn try_start(upstream: &str, peers: Arc<RwLock<HashMap<String, Ipv4Addr>>>) -> Option<Self> {
-        let bind_addr = format!("{}:{}", MAGIC_DNS_IP, DNS_PORT);
-        let socket = UdpSocket::bind(&bind_addr)
-            .or_else(|_| UdpSocket::bind(format!("127.0.0.1:{}", DNS_PORT)))
-            .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
-            .ok()?;
+    pub fn try_start(
+        bind_ip: &str,
+        upstream: &str,
+        suffix: &str,
+        peers: Arc<RwLock<HashMap<String, Ipv4Addr>>>,
+    ) -> Option<Self> {
+        let socket = bind_with_retry(bind_ip)
+            .or_else(|| UdpSocket::bind(format!("{}:{}", LOOPBACK, DNS_PORT)).ok())?;
         socket.set_read_timeout(Some(Duration::from_millis(100))).ok();
         socket.set_nonblocking(true).ok();
 
@@ -40,8 +63,13 @@ impl DnsResolver {
             peers,
             socket,
             upstream: upstream_addr,
+            suffix: normalize_suffix(suffix),
             active: Arc::new(AtomicBool::new(true)),
         })
+    }
+
+    pub fn resolver_address(&self) -> Option<SocketAddr> {
+        self.socket.local_addr().ok().filter(|a| a.port() == DNS_PORT)
     }
 
     pub fn run_with_shutdown(&self, shutdown: &AtomicBool) {
@@ -87,12 +115,12 @@ impl DnsResolver {
                 if let Some(ip) = self.resolve(&name) {
                     return build_a_response(query, ip);
                 }
-                if name.ends_with(DNS_SUFFIX) {
+                if name.ends_with(&self.suffix) {
                     return build_nxdomain(query);
                 }
             }
             QTYPE_AAAA => {
-                if name.ends_with(DNS_SUFFIX) {
+                if name.ends_with(&self.suffix) {
                     return build_nxdomain(query);
                 }
             }
@@ -109,7 +137,7 @@ impl DnsResolver {
     }
 
     fn resolve(&self, name: &str) -> Option<Ipv4Addr> {
-        let bare = name.strip_suffix(DNS_SUFFIX).unwrap_or(name);
+        let bare = name.strip_suffix(&self.suffix).unwrap_or(name);
         let bare = bare.strip_suffix('.').unwrap_or(bare);
         let peers = self.peers.read().ok()?;
         peers.get(bare).copied()
@@ -125,25 +153,6 @@ impl DnsResolver {
             Err(_) => Vec::new(),
         }
     }
-}
-
-pub fn extract_peer_map(peer_infos: &[crate::api::MeshPeerInfo]) -> HashMap<String, Ipv4Addr> {
-    let mut map = HashMap::new();
-    for peer in peer_infos {
-        if peer.name.is_empty() { continue; }
-        for cidr in &peer.allowed_ips {
-            if let Some(ip) = parse_ip_from_cidr(cidr) {
-                map.insert(peer.name.clone(), ip);
-                break;
-            }
-        }
-    }
-    map
-}
-
-fn parse_ip_from_cidr(cidr: &str) -> Option<Ipv4Addr> {
-    let ip_str = cidr.split('/').next()?;
-    ip_str.parse().ok()
 }
 
 fn parse_qname(data: &[u8], offset: usize) -> Option<String> {

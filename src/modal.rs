@@ -18,8 +18,9 @@ pub enum ModalAction {
     StartUpdate(String),
     CancelUpdate,
     RestartApp,
-    DeleteProfile(usize),
-    RetryLogin,
+    LeaveMesh,
+    RevokeMember(String),
+    SignOut,
 }
 
 #[derive(Clone, Copy)]

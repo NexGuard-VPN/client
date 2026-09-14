@@ -1,13 +1,18 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder, TrayIcon};
 
-use crate::profiles::ServerProfile;
-use crate::vpn::VpnStatus;
+use crate::meshnet::{MeshStatus, PeerPath};
 
 const ICON_SIZE: u32 = 22;
+const TITLE_IDLE: &str = "NexGuard — Not connected";
+const TITLE_CONNECTED: &str = "NexGuard — Connected";
+const ACTION_CONNECT: &str = "Connect";
+const ACTION_DISCONNECT: &str = "Disconnect";
+const MENU_SHOW: &str = "Show Window";
+const MENU_QUIT: &str = "Quit NexGuard";
 
 pub struct NexTray {
     _tray: TrayIcon,
@@ -15,58 +20,52 @@ pub struct NexTray {
     item_toggle: MenuItem,
     item_ip: MenuItem,
     item_tx_rx: MenuItem,
-    server_items: Vec<(MenuItem, usize)>,
-    servers_sub: Submenu,
+    item_devices: MenuItem,
     toggle_id: tray_icon::menu::MenuId,
     show_id: tray_icon::menu::MenuId,
     quit_id: tray_icon::menu::MenuId,
     icon_on: Icon,
     icon_off: Icon,
     was_connected: bool,
-    status: Arc<Mutex<Option<VpnStatus>>>,
+    mesh_status: Arc<Mutex<Option<MeshStatus>>>,
     connect_trigger: Arc<AtomicBool>,
-    selected_server: Arc<AtomicUsize>,
     pub quit_requested: bool,
     pub disconnect_requested: bool,
     pub show_requested: bool,
 }
 
+pub struct TrayChannels {
+    pub mesh_status: Arc<Mutex<Option<MeshStatus>>>,
+    pub connect_trigger: Arc<AtomicBool>,
+}
+
+struct TrayView {
+    title: &'static str,
+    toggle: &'static str,
+    ip: String,
+    traffic: String,
+    devices: String,
+    connected: bool,
+}
+
 impl NexTray {
-    pub fn new(
-        status: Arc<Mutex<Option<VpnStatus>>>,
-        connect_trigger: Arc<AtomicBool>,
-        selected_server: Arc<AtomicUsize>,
-        profiles: &[ServerProfile],
-    ) -> Option<Self> {
+    pub fn new(channels: TrayChannels) -> Option<Self> {
         let menu = Menu::new();
 
-        let item_status = MenuItem::new("NexGuard — Disconnected", false, None);
-        let item_toggle = MenuItem::new("Connect", true, None);
-        let servers_sub = Submenu::new("Servers", true);
+        let item_status = MenuItem::new(TITLE_IDLE, false, None);
+        let item_toggle = MenuItem::new(ACTION_CONNECT, true, None);
         let item_ip = MenuItem::new("", false, None);
         let item_tx_rx = MenuItem::new("", false, None);
-        let item_show = MenuItem::new("Show Window", true, None);
-        let item_quit = MenuItem::new("Quit NexGuard", true, None);
-
-        let mut server_items = Vec::new();
-        for (i, p) in profiles.iter().enumerate() {
-            let label = if i == 0 {
-                format!("● {}", p.name)
-            } else {
-                p.name.clone()
-            };
-            let item = MenuItem::new(&label, true, None);
-            server_items.push((item.clone(), i));
-            let _ = servers_sub.append(&item);
-        }
+        let item_devices = MenuItem::new("", false, None);
+        let item_show = MenuItem::new(MENU_SHOW, true, None);
+        let item_quit = MenuItem::new(MENU_QUIT, true, None);
 
         let _ = menu.append(&item_status);
         let _ = menu.append(&item_toggle);
         let _ = menu.append(&PredefinedMenuItem::separator());
-        let _ = menu.append(&servers_sub);
-        let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&item_ip);
         let _ = menu.append(&item_tx_rx);
+        let _ = menu.append(&item_devices);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&item_show);
         let _ = menu.append(&item_quit);
@@ -92,45 +91,27 @@ impl NexTray {
             item_toggle,
             item_ip,
             item_tx_rx,
-            server_items,
-            servers_sub,
+            item_devices,
             toggle_id,
             show_id,
             quit_id,
             icon_on,
             icon_off,
             was_connected: false,
-            status,
-            connect_trigger,
-            selected_server,
+            mesh_status: channels.mesh_status,
+            connect_trigger: channels.connect_trigger,
             quit_requested: false,
             disconnect_requested: false,
             show_requested: false,
         })
     }
 
-    pub fn update_servers(&mut self, profiles: &[ServerProfile], selected: usize) {
-        for (item, _) in &self.server_items {
-            let _ = self.servers_sub.remove(item);
-        }
-        self.server_items.clear();
-        for (i, p) in profiles.iter().enumerate() {
-            let label = if i == selected {
-                format!("● {}", p.name)
-            } else {
-                p.name.clone()
-            };
-            let item = MenuItem::new(&label, true, None);
-            self.server_items.push((item.clone(), i));
-            let _ = self.servers_sub.append(&item);
-        }
-    }
-
     pub fn tick(&mut self) {
+        let view = self.compose();
+
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == self.toggle_id {
-                let connected = self.status.lock().unwrap().is_some();
-                if connected {
+                if view.connected {
                     self.disconnect_requested = true;
                 } else {
                     self.connect_trigger.store(true, Ordering::Relaxed);
@@ -139,42 +120,52 @@ impl NexTray {
                 self.show_requested = true;
             } else if event.id == self.quit_id {
                 self.quit_requested = true;
-            } else {
-                for (item, idx) in &self.server_items {
-                    if event.id == *item.id() {
-                        self.selected_server.store(*idx, Ordering::Relaxed);
-                        self.connect_trigger.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                }
             }
         }
 
-        let connected = self.status.lock().unwrap().is_some();
-
-        if connected != self.was_connected || connected {
-            if connected {
-                let guard = self.status.lock().unwrap();
-                if let Some(ref st) = *guard {
-                    let ip = st.address.split('/').next().unwrap_or(&st.address);
-                    let tx = st.tx.load(Ordering::Relaxed);
-                    let rx = st.rx.load(Ordering::Relaxed);
-                    self.item_status.set_text("NexGuard — Connected");
-                    self.item_toggle.set_text("Disconnect");
-                    self.item_ip.set_text(format!("IP: {}", ip));
-                    self.item_tx_rx.set_text(format!("TX: {}  RX: {}", fmt_bytes(tx), fmt_bytes(rx)));
-                }
-                let _ = self._tray.set_icon(Some(self.icon_on.clone()));
-            } else {
-                self.item_status.set_text("NexGuard — Disconnected");
-                self.item_toggle.set_text("Connect");
-                self.item_ip.set_text("");
-                self.item_tx_rx.set_text("");
-                let _ = self._tray.set_icon(Some(self.icon_off.clone()));
-            }
-            self.was_connected = connected;
+        if view.connected || view.connected != self.was_connected {
+            self.item_status.set_text(view.title);
+            self.item_toggle.set_text(view.toggle);
+            self.item_ip.set_text(&view.ip);
+            self.item_tx_rx.set_text(&view.traffic);
+            self.item_devices.set_text(&view.devices);
+            let icon = if view.connected { &self.icon_on } else { &self.icon_off };
+            let _ = self._tray.set_icon(Some(icon.clone()));
+            self.was_connected = view.connected;
         }
     }
+
+    fn compose(&self) -> TrayView {
+        let mesh = self.mesh_status.lock().ok().and_then(|s| s.clone());
+        let Some(status) = mesh else {
+            return TrayView {
+                title: TITLE_IDLE,
+                toggle: ACTION_CONNECT,
+                ip: String::new(),
+                traffic: String::new(),
+                devices: String::new(),
+                connected: false,
+            };
+        };
+        let peers = status.peers.lock().map(|p| p.clone()).unwrap_or_default();
+        let direct = peers.iter().filter(|p| p.path == PeerPath::Direct).count();
+        let online = peers.iter().filter(|p| p.path != PeerPath::Offline).count();
+        TrayView {
+            title: TITLE_CONNECTED,
+            toggle: ACTION_DISCONNECT,
+            ip: format!("IP: {}", status.address),
+            traffic: traffic_text(
+                status.tx.load(Ordering::Relaxed),
+                status.rx.load(Ordering::Relaxed),
+            ),
+            devices: format!("Devices: {} online, {} direct", online, direct),
+            connected: true,
+        }
+    }
+}
+
+fn traffic_text(tx: u64, rx: u64) -> String {
+    format!("TX: {}  RX: {}", fmt_bytes(tx), fmt_bytes(rx))
 }
 
 fn make_icon(connected: bool) -> Icon {

@@ -1,111 +1,85 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ServerProfile {
-    pub name: String,
-    pub server: String,
-    pub token: String,
-    #[serde(default)]
-    pub server_id: String,
-    pub internet: bool,
-    #[serde(default)]
-    pub share_lan: bool,
-    #[serde(default)]
-    pub auto_connect: bool,
-    #[serde(default)]
-    pub last_used: u64,
-}
-
-fn profiles_path() -> PathBuf {
-    let dir = dirs_next().unwrap_or_else(|| PathBuf::from("."));
-    dir.join("servers.json")
-}
-
 pub fn config_dir() -> Option<PathBuf> {
     dirs_next()
 }
 
-fn dirs_next() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    { std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".nexguard")) }
-    #[cfg(target_os = "linux")]
-    { std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".nexguard")) }
-    #[cfg(target_os = "windows")]
-    { std::env::var("APPDATA").ok().map(|h| PathBuf::from(h).join("NexGuard")) }
-}
+#[cfg(unix)]
+const APP_DIR_UNIX: &str = ".nexguard";
+#[cfg(windows)]
+const APP_DIR_WINDOWS: &str = "NexGuard";
 
-pub fn load() -> Vec<ServerProfile> {
-    let path = profiles_path();
-    match std::fs::read_to_string(&path) {
-        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
-}
-
-pub fn save(profiles: &[ServerProfile]) {
-    let path = profiles_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(profiles) {
-        let _ = std::fs::write(&path, json);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
-    }
-}
-
-pub fn add(profiles: &mut Vec<ServerProfile>, profile: ServerProfile) {
-    let existing = profiles.iter_mut().find(|p| {
-        (!p.token.is_empty() && p.token == profile.token)
-            || (!p.server_id.is_empty() && !profile.server_id.is_empty() && p.server_id == profile.server_id)
-            || (!p.server.is_empty() && !profile.server.is_empty() && p.server == profile.server)
-    });
-    if let Some(existing) = existing {
-        existing.token = profile.token;
-        existing.name = profile.name;
-        existing.server_id = profile.server_id;
-        existing.internet = profile.internet;
-        existing.share_lan = profile.share_lan;
-        if profile.auto_connect { existing.auto_connect = true; }
+#[cfg(unix)]
+fn passwd_home(key: &str) -> Option<String> {
+    let out = std::process::Command::new("getent")
+        .args(["passwd", key])
+        .output()
+        .ok()?;
+    let line = String::from_utf8_lossy(&out.stdout);
+    let home = line.split(':').nth(5)?.trim().to_string();
+    if home.is_empty() {
+        None
     } else {
-        profiles.push(profile);
-    }
-    save(profiles);
-}
-
-pub fn remove(profiles: &mut Vec<ServerProfile>, index: usize) {
-    if index < profiles.len() {
-        profiles.remove(index);
-        save(profiles);
+        Some(home)
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[cfg(unix)]
+fn sudo_home() -> Option<String> {
+    let user = std::env::var("SUDO_USER").ok().filter(|u| {
+        u.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    })?;
+    passwd_home(&user)
+}
+
+fn dirs_next() -> Option<PathBuf> {
+    #[cfg(unix)]
+    let base = sudo_home()
+        .or_else(|| std::env::var("HOME").ok().filter(|h| !h.is_empty()))
+        .or_else(|| passwd_home(&unsafe { libc::getuid() }.to_string()))?;
+    #[cfg(unix)]
+    let dir = PathBuf::from(base).join(APP_DIR_UNIX);
+
+    #[cfg(windows)]
+    let dir = PathBuf::from(std::env::var("APPDATA").ok()?).join(APP_DIR_WINDOWS);
+
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
-    #[serde(default)]
-    pub connection_mode: String,
-    #[serde(default)]
-    pub kill_switch: bool,
-    #[serde(default)]
-    pub dns_leak_protection: bool,
     #[serde(default)]
     pub advertise_routes: String,
     #[serde(default)]
     pub auto_reconnect: bool,
+    #[serde(default)]
+    pub mesh_exit_node: String,
+    #[serde(default)]
+    pub mesh_advertise_exit_node: bool,
+    #[serde(default)]
+    pub mesh_network_id: String,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub api_host: String,
+    #[serde(default)]
+    pub mesh_magic_dns: bool,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            connection_mode: "auto".to_string(),
-            kill_switch: false,
-            dns_leak_protection: false,
             advertise_routes: String::new(),
             auto_reconnect: true,
+            mesh_exit_node: String::new(),
+            mesh_advertise_exit_node: false,
+            mesh_network_id: String::new(),
+            project_id: String::new(),
+            api_host: String::new(),
+            mesh_magic_dns: false,
         }
     }
 }

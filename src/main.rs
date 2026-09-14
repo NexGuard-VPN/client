@@ -1,50 +1,59 @@
+#![cfg_attr(not(feature = "gui"), allow(dead_code))]
 mod api;
 pub mod autostart;
+#[cfg(feature = "gui")]
 mod modal;
-pub mod cache;
+mod derp;
+mod derpframe;
+mod dial;
+mod disco;
 mod dns;
-pub mod fingerprint;
-pub mod mesh;
+pub mod exitnode;
+mod meshapi;
+mod meshtypes;
+pub mod meshnet;
+pub mod allowed;
+pub mod rng;
 pub mod netmon;
 mod profiles;
 mod route;
 mod stun;
+#[cfg(feature = "gui")]
 pub mod tray;
 pub mod tun;
+#[cfg(feature = "gui")]
 mod ui;
-mod vpn;
-mod wg;
 
-use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-
-use boringtun::noise::Tunn;
-use boringtun::x25519::{PublicKey, StaticSecret};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 fn print_help() {
     println!("Usage: nexguard [OPTIONS]");
     println!();
-    println!("  nexguard                              Open GUI (default)");
-    println!("  nexguard --server IP --token TOKEN    Open GUI with server pre-filled");
-    println!("  nexguard --cli --server IP --token T  CLI mode (no GUI)");
+    println!("  nexguard                              Open the app (default)");
+    println!("  nexguard --mesh --share-internet      Run headless as an exit node");
     println!();
     println!("Options:");
-    println!("  -s, --server IP:PORT      server address");
-    println!("  -t, --token TOKEN         Auth token");
-    println!("  -n, --name NAME           Client name");
-    println!("  -r, --relay IP:443        Relay server (tunnel through nexguard relay)");
-    println!("  --internet                Route all traffic through the network");
-    println!("  --cli, --no-gui           Force CLI mode");
-    println!("  --gui                     Force GUI mode");
+    println!("  -n, --name NAME           This device's name in the project");
+    println!("  -t, --token TOKEN         Account token (defaults to the signed-in one)");
+    println!("  --login                   Sign in to your NexGuard account (headless)");
+    println!("  --mesh                    Join the project network (headless)");
+    println!("  --join-mesh TOKEN         Accept an invite, then join that project");
+    println!("  --list-networks           Print the project networks this account can join");
+    println!("  --network NETWORK_ID      Join a specific project network");
+    println!("  --exit-node DEVICE_ID     Route all traffic through that device");
+    println!("  --share-internet          Let other devices exit through this one");
+    println!("  --magic-dns               Resolve device names (changes system DNS)");
+    println!("  --advertise-routes CIDRS  Comma-separated subnets to share");
     println!("  --cleanup                 Remove stale routes from a crashed session");
     println!("  --install-service         Start automatically on boot (needs root)");
     println!("  --uninstall-service       Remove the boot service");
     println!("  -v, --version             Print version and exit");
     println!("  -h, --help                Print this help and exit");
 }
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -79,363 +88,25 @@ fn main() {
 
     route::restore_orphaned_dns();
 
-    let cli_mode = args.iter().any(|a| a == "--cli" || a == "--no-gui");
-    let init_token = arg_value(&args, "--token").or_else(|| arg_value(&args, "-t"));
-    let init_name = arg_value(&args, "--name").or_else(|| arg_value(&args, "-n"));
-    let init_internet = args.iter().any(|a| a == "--internet" || a == "--exit");
-
-    if !cli_mode {
-        ui::run_gui_with(init_token, init_name, init_internet);
+    if args.iter().any(|a| a == "--login") {
+        run_login();
+        return;
+    }
+    if args.iter().any(|a| a == "--list-networks") {
+        list_networks(&args);
+        return;
+    }
+    if args.iter().any(|a| a == "--mesh") {
+        run_mesh(&args);
         return;
     }
 
-    if let Some(info) = api::check_update() {
-        if info.force_update {
-            eprintln!("[nexguard] mandatory update required: v{}", info.version);
-            eprintln!("[nexguard] updating...");
-            match api::self_update(
-                &info.download_url,
-                &|_, _| {},
-                &std::sync::atomic::AtomicBool::new(false),
-            ) {
-                Ok(()) => {
-                    eprintln!("[nexguard] updated to v{}", info.version);
-                    api::restart_self();
-                }
-                Err(e) => {
-                    eprintln!("[nexguard] update failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        } else if info.has_update {
-            eprintln!("[nexguard] update available: v{}", info.version);
-        }
-    }
-
-    let args = parse_args();
-
-    eprintln!("[vpn-client] joining server {}...", args.server);
-
-    let private_key = load_or_generate_key();
-    let secret = StaticSecret::from(private_key);
-    let public_key = PublicKey::from(&secret);
-    let pub_key_b64 = b64_encode(public_key.as_bytes());
-
-    eprintln!("[vpn-client] public key: {}", pub_key_b64);
-
-    let join_resp = if let Some(ref url) = args.join_url {
-        match api::join_via_api(url, &args.token, &pub_key_b64, &args.name) {
-            Ok(r) => r,
-            Err(e) => { eprintln!("[vpn-client] {}", e); std::process::exit(1); }
-        }
-    } else if args.advertise_routes.is_empty() {
-        api::join_server(&args.server, args.control_port, &args.token, &pub_key_b64, &args.name)
-    } else {
-        eprintln!("[vpn-client] advertising routes: {:?}", args.advertise_routes);
-        match api::try_join_server_with_routes(
-            &args.server, args.control_port, &args.token, &pub_key_b64, &args.name, &args.advertise_routes,
-        ) {
-            Ok(r) => r,
-            Err(e) => { eprintln!("[vpn-client] {}", e); std::process::exit(1); }
-        }
-    };
-
-    let assigned_addr = join_resp.address.clone();
-    let server_pub_key = b64_decode(&join_resp.server_public_key);
-
-    eprintln!("[vpn-client] assigned address: {}", assigned_addr);
-
-    let (ip, prefix) = parse_cidr(&assigned_addr);
-    let server_endpoint: std::net::SocketAddr = if args.relay.is_some() {
-        "127.0.0.1:51820".parse().unwrap()
-    } else if let Some(ref ep) = join_resp.server_endpoint {
-        ep.parse().unwrap_or_else(|_| api::parse_endpoint(&args.server))
-    } else {
-        api::parse_endpoint(&args.server)
-    };
-
-    let tun_dev = tun::TunDevice::create(args.mtu);
-    tun_dev.set_address(ip, prefix);
-
-    if let Some(ref v6) = join_resp.address_v6 {
-        if let Some((v6_ip, v6_prefix)) = parse_ipv6_cidr(v6) {
-            tun_dev.set_address_v6(&v6_ip.to_string(), v6_prefix);
-            eprintln!("[vpn-client] ipv6 address: {}", v6);
-        }
-    }
-
-    tun_dev.set_up();
-
-    if !args.internet {
-        if prefix < 32 {
-            let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
-            let net = Ipv4Addr::from(u32::from(ip) & mask);
-            let _ = route::add_route(net, prefix, tun_dev.name());
-        }
-
-        for peer in &join_resp.peers {
-            if let Some(ips) = peer.get("allowed_ips").and_then(|v| v.as_array()) {
-                for cidr_val in ips {
-                    if let Some(cidr) = cidr_val.as_str() {
-                        let (net_ip, net_prefix) = parse_cidr(cidr);
-                        if net_ip != ip {
-                            let _ = route::add_route(net_ip, net_prefix, tun_dev.name());
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(ref network) = args.vpn_network {
-            let (net_ip, net_prefix) = parse_cidr(network);
-            let _ = route::add_route(net_ip, net_prefix, tun_dev.name());
-            eprintln!("[vpn-client] added route {}", network);
-        }
-    }
-
-    let exit_state = if args.internet {
-        use std::collections::BTreeSet;
-        use std::net::ToSocketAddrs;
-
-        let mut preserve_set: BTreeSet<String> = BTreeSet::new();
-
-        let push_resolved = |set: &mut BTreeSet<String>, host: &str, default_port: u16| {
-            let target = if host.contains(':') { host.to_string() } else { format!("{}:{}", host, default_port) };
-            if let Ok(addrs) = target.to_socket_addrs() {
-                for a in addrs {
-                    if !a.ip().is_loopback() && !a.ip().is_unspecified() {
-                        set.insert(a.ip().to_string());
-                    }
-                }
-            }
-        };
-
-        if !server_endpoint.ip().is_loopback() && !server_endpoint.ip().is_unspecified() {
-            preserve_set.insert(server_endpoint.ip().to_string());
-        }
-
-        if let Some(ref relays) = args.relay {
-            for relay in relays.split(',') {
-                let r = relay.trim();
-                if !r.is_empty() {
-                    push_resolved(&mut preserve_set, r, 443);
-                }
-            }
-        } else {
-            push_resolved(&mut preserve_set, &args.server, args.control_port);
-        }
-
-        if preserve_set.is_empty() {
-            eprintln!("[vpn-client] internet setup failed: could not resolve any relay/server IP to preserve");
-            None
-        } else {
-            let preserve_ips: Vec<String> = preserve_set.into_iter().collect();
-            let preserve_refs: Vec<&str> = preserve_ips.iter().map(|s| s.as_str()).collect();
-            let has_v6 = join_resp.vpn_network_v6.is_some();
-            match route::ExitRouteState::setup_dual(&preserve_refs, tun_dev.name(), has_v6) {
-                Ok(state) => {
-                    eprintln!("[vpn-client] internet routing enabled (v6={}, preserved={})", has_v6, preserve_ips.join(","));
-                    Some(state)
-                }
-                Err(e) => {
-                    eprintln!("[vpn-client] internet setup failed: {}", e);
-                    None
-                }
-            }
-        }
-    } else {
-        None
-    };
-
-    eprintln!(
-        "[vpn-client] tun={}, addr={}, endpoint={}",
-        tun_dev.name(),
-        assigned_addr,
-        server_endpoint,
-    );
-
-    let server_pub = PublicKey::from(server_pub_key);
-    let tunn = Tunn::new(secret, server_pub, None, Some(jittered_keepalive()), 0, None);
-    let tunnel = Mutex::new(wg::WgState { tunn, server_pub_key: server_pub });
-    let rekey_key = Arc::new(Mutex::new(private_key));
-    let rekey_ctx = wg::RekeyCtx {
-        server: args.server.clone(),
-        control_port: args.control_port,
-        token: args.token.clone(),
-        private_key: Arc::clone(&rekey_key),
-    };
-    let tx = AtomicU64::new(0);
-    let rx = AtomicU64::new(0);
-
-    let dns_peer_map: Arc<std::sync::RwLock<std::collections::HashMap<String, Ipv4Addr>>> =
-        Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-
-    let mesh_mgr = if join_resp.mesh.unwrap_or(false) {
-        let mesh_port = args.listen_port.wrapping_add(1);
-        let mgr = Arc::new(mesh::MeshManager::new(private_key, mesh_port));
-        if let Some(ref peers) = join_resp.mesh_peers {
-            let parsed = api::parse_mesh_peers(peers);
-            let map = dns::extract_peer_map(&parsed);
-            *dns_peer_map.write().unwrap() = map;
-            mgr.update_peers(&parsed, &pub_key_b64);
-        }
-        eprintln!("[vpn-client] mesh mode enabled, port={}, peers={}",
-            mesh_port,
-            join_resp.mesh_peers.as_ref().map_or(0, |p| p.len()));
-
-        let refresh_mgr = Arc::clone(&mgr);
-        let refresh_server = args.server.clone();
-        let refresh_port = args.control_port;
-        let refresh_token = args.token.clone();
-        let refresh_pub_key = pub_key_b64.clone();
-        let dns_map_ref = Arc::clone(&dns_peer_map);
-        std::thread::spawn(move || {
-            let interval = std::time::Duration::from_secs(30);
-            loop {
-                std::thread::sleep(interval);
-                if SHUTDOWN.load(Ordering::Relaxed) { break; }
-                let peers = api::get_mesh_peers(&refresh_server, refresh_port, &refresh_token);
-                let map = dns::extract_peer_map(&peers);
-                *dns_map_ref.write().unwrap() = map;
-                refresh_mgr.update_peers(&peers, &refresh_pub_key);
-            }
-        });
-        Some(mgr)
-    } else {
-        None
-    };
-
-    let dns_guard = if mesh_mgr.is_some() {
-        let upstream = std::env::var("NEXGUARD_DNS_UPSTREAM")
-            .unwrap_or_else(|_| "1.1.1.1".to_string());
-        if let Some(resolver) = dns::DnsResolver::try_start(&upstream, Arc::clone(&dns_peer_map)) {
-            std::thread::spawn(move || {
-                resolver.run_with_shutdown(&SHUTDOWN);
-            });
-        }
-
-        let _ = route::add_route(Ipv4Addr::new(100, 100, 100, 100), 32, tun_dev.name());
-
-        let nat_mgr = mesh_mgr.clone();
-        let nat_server = args.server.clone();
-        let nat_port = args.control_port;
-        let nat_token = args.token.clone();
-        let nat_pub_key = pub_key_b64.clone();
-        std::thread::spawn(move || {
-            let interval = std::time::Duration::from_secs(300);
-            loop {
-                if SHUTDOWN.load(Ordering::Relaxed) { break; }
-                if let Some(ref mgr) = nat_mgr {
-                    let local_port = mgr.local_port();
-                    if local_port > 0 {
-                        if let Some(ep) = stun::discover_public_endpoint_on_port(local_port) {
-                            let _ = api::report_endpoint(&nat_server, nat_port, &nat_token, &nat_pub_key, &ep.to_string());
-                        }
-                    }
-                }
-                std::thread::sleep(interval);
-            }
-        });
-
-        route::set_system_dns(dns::MAGIC_DNS_IP)
-    } else {
-        None
-    };
-
-    let tun_name_for_cleanup = tun_dev.name().to_string();
-    let has_internet = args.internet;
-    std::panic::set_hook({
-        let tun = tun_name_for_cleanup.clone();
-        let internet = has_internet;
-        Box::new(move |info| {
-            eprintln!("[vpn-client] PANIC: {}", info);
-            if internet { route::emergency_cleanup(&tun); }
-        })
-    });
-
-    setup_signal_handler();
-
-    let _kill_switch = if args.kill_switch {
-        let server_ip = server_endpoint.ip().to_string();
-        Some(route::KillSwitch::activate(tun_dev.name(), &[&server_ip]))
-    } else {
-        None
-    };
-
-    let relay_target = args.relay_name.as_deref().unwrap_or(&args.server).to_string();
-    let mesh_ref = mesh_mgr.as_ref().map(|m| m.as_ref());
-
-    let relay_addrs = args.relay.clone().unwrap_or_default();
-    let relay_auth_token = args.token.clone();
-    let mut backoff_ms: u64 = 1000;
-    const MAX_BACKOFF_MS: u64 = 30_000;
-
-    let net = netmon::NetMonitor::start();
-    if let Some(first_relay) = relay_addrs.split(',').next().filter(|s| !s.is_empty()) {
-        net.set_target(first_relay.trim());
-    } else {
-        net.set_target(&server_endpoint.to_string());
-    }
-
-    if relay_addrs.is_empty() {
-        // Relayless / direct mode: WireGuard straight to the server's UDP
-        // endpoint, no relay hop. Used when --relay is not provided.
-        eprintln!("[vpn-client] relayless mode: direct WireGuard to {}", server_endpoint);
-        match std::net::UdpSocket::bind("0.0.0.0:0") {
-            Ok(udp) => {
-                let _ = udp.set_read_timeout(Some(std::time::Duration::from_millis(50)));
-                wg::run_data_plane_udp(&tun_dev, &udp, server_endpoint, &tunnel, &tx, &rx, &SHUTDOWN, mesh_ref);
-            }
-            Err(e) => eprintln!("[vpn-client] udp bind failed: {}", e),
-        }
-        drop(exit_state);
-        drop(dns_guard);
-        return;
-    }
-
-    loop {
-        if SHUTDOWN.load(Ordering::Relaxed) { break; }
-
-        let relays: Vec<&str> = relay_addrs.split(',').map(|s| s.trim()).collect();
-        let mut connected = false;
-        for addr in &relays {
-            if SHUTDOWN.load(Ordering::Relaxed) { break; }
-
-            eprintln!("[vpn-client] connecting TLS relay {}...", addr);
-            match wg::connect_relay(addr, &relay_target, &relay_auth_token) {
-                Ok(mut stream) => {
-                    eprintln!("[vpn-client] relay connected via TLS {}", addr);
-                    connected = true;
-                    wg::run_data_plane_tls(&tun_dev, &mut stream, &tunnel, &tx, &rx, &SHUTDOWN,
-                        mesh_ref, Some(&rekey_ctx));
-                    break;
-                }
-                Err(e) => eprintln!("[vpn-client] TLS {} failed: {}", addr, e),
-            }
-        }
-
-        if SHUTDOWN.load(Ordering::Relaxed) { break; }
-
-        if connected {
-            backoff_ms = 1000;
-            eprintln!("[vpn-client] disconnected, reconnecting in 1s...");
-        } else {
-            eprintln!("[vpn-client] reconnecting in {}s...", backoff_ms / 1000);
-        }
-        if net.wait(std::time::Duration::from_millis(backoff_ms)) {
-            eprintln!("[vpn-client] network changed — reconnecting now");
-            backoff_ms = 1000;
-        } else {
-            backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
-        }
-    }
-
-    eprintln!("[vpn-client] cleaning up routes...");
-    drop(exit_state);
-    drop(mesh_mgr);
-    drop(dns_guard);
-    if has_internet {
-        route::emergency_cleanup(&tun_name_for_cleanup);
+    #[cfg(feature = "gui")]
+    ui::run_gui();
+    #[cfg(not(feature = "gui"))]
+    {
+        eprintln!("[nexguard] this build has no interface; use --mesh");
+        print_help();
     }
 }
 
@@ -444,27 +115,8 @@ fn key_path() -> std::path::PathBuf {
     dir.join("client.key")
 }
 
-fn dirs_next() -> Option<std::path::PathBuf> {
-    let home = std::env::var("SUDO_USER").ok()
-        .filter(|u| u.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'))
-        .and_then(|u| {
-            #[cfg(unix)]
-            {
-                let out = std::process::Command::new("getent")
-                    .args(["passwd", &u])
-                    .output().ok()?;
-                let line = String::from_utf8_lossy(&out.stdout);
-                let h = line.split(':').nth(5)?.trim().to_string();
-                if h.is_empty() { None } else { Some(h) }
-            }
-            #[cfg(not(unix))]
-            { None }
-        })
-        .or_else(|| std::env::var("HOME").ok())
-        .or_else(|| std::env::var("USERPROFILE").ok())?;
-    let dir = std::path::PathBuf::from(home).join(".nexguard");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
+pub fn dirs_next() -> Option<std::path::PathBuf> {
+    profiles::config_dir()
 }
 
 pub fn load_or_generate_key() -> [u8; 32] {
@@ -482,15 +134,17 @@ pub fn load_or_generate_key() -> [u8; 32] {
     };
 
     if let Some(key) = try_load(&path) {
+        secure_key_file(&path);
         return key;
     }
 
     #[cfg(unix)]
     {
-        let root_path = std::path::PathBuf::from("/var/root/.nexguard/client.key");
+        let root_path = std::path::PathBuf::from(LEGACY_ROOT_KEY);
         if root_path != path {
             if let Some(key) = try_load(&root_path) {
                 let _ = std::fs::write(&path, b64.encode(key));
+                secure_key_file(&path);
                 let _ = std::fs::remove_file(&root_path);
                 return key;
             }
@@ -499,13 +153,22 @@ pub fn load_or_generate_key() -> [u8; 32] {
 
     let key = generate_private_key();
     let _ = std::fs::write(&path, b64.encode(key));
+    secure_key_file(&path);
+    key
+}
+
+#[cfg(unix)]
+const LEGACY_ROOT_KEY: &str = "/var/root/.nexguard/client.key";
+
+fn secure_key_file(path: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        fix_ownership(&path);
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        fix_ownership(path);
     }
-    key
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 #[cfg(unix)]
@@ -522,79 +185,15 @@ fn fix_ownership(path: &std::path::Path) {
     }
 }
 
-pub fn jittered_keepalive() -> u16 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0) as u16;
-    18 + (nanos % 15)
-}
-
 pub fn generate_private_key() -> [u8; 32] {
     let mut key = [0u8; 32];
-    #[cfg(unix)]
-    {
-        let fd = unsafe { libc::open(b"/dev/urandom\0".as_ptr() as *const _, libc::O_RDONLY) };
-        if fd >= 0 {
-            unsafe {
-                libc::read(fd, key.as_mut_ptr() as *mut _, 32);
-                libc::close(fd);
-            }
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::Security::Cryptography::*;
-        unsafe {
-            BCryptGenRandom(
-                std::ptr::null_mut(),
-                key.as_mut_ptr(),
-                key.len() as u32,
-                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-            );
-        }
-    }
+    rng::fill(&mut key);
     key
 }
 
 pub fn b64_encode(d: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(d)
-}
-
-pub fn b64_decode(s: &str) -> [u8; 32] {
-    use base64::Engine;
-    let b = base64::engine::general_purpose::STANDARD
-        .decode(s.trim())
-        .expect("invalid base64");
-    assert!(b.len() == 32, "key must be 32 bytes, got {}", b.len());
-    let mut k = [0u8; 32];
-    k.copy_from_slice(&b);
-    k
-}
-
-pub fn parse_cidr(s: &str) -> (Ipv4Addr, u8) {
-    let (ip, prefix) = s.split_once('/').unwrap_or_else(|| {
-        eprintln!("[vpn-client] invalid CIDR: {}", s);
-        std::process::exit(1);
-    });
-    let ip: Ipv4Addr = ip.parse().unwrap_or_else(|_| {
-        eprintln!("[vpn-client] invalid IP in CIDR: {}", s);
-        std::process::exit(1);
-    });
-    let prefix: u8 = prefix.parse().unwrap_or_else(|_| {
-        eprintln!("[vpn-client] invalid prefix in CIDR: {}", s);
-        std::process::exit(1);
-    });
-    (ip, prefix)
-}
-
-pub fn parse_ipv6_cidr(s: &str) -> Option<(std::net::Ipv6Addr, u8)> {
-    let (ip_str, prefix_str) = s.split_once('/')?;
-    let ip: std::net::Ipv6Addr = ip_str.parse().ok()?;
-    let prefix: u8 = prefix_str.parse().ok()?;
-    if prefix > 128 { return None; }
-    Some((ip, prefix))
 }
 
 fn setup_signal_handler() {
@@ -608,104 +207,6 @@ fn setup_signal_handler() {
 #[cfg(unix)]
 extern "C" fn handle_signal(_: libc::c_int) {
     SHUTDOWN.store(true, Ordering::Relaxed);
-}
-
-struct Args {
-    server: String,
-    token: String,
-    name: String,
-    control_port: u16,
-    listen_port: u16,
-    mtu: usize,
-    vpn_network: Option<String>,
-    internet: bool,
-    relay: Option<String>,
-    relay_name: Option<String>,
-    join_url: Option<String>,
-    advertise_routes: Vec<String>,
-    kill_switch: bool,
-}
-
-fn parse_args() -> Args {
-    let argv: Vec<String> = std::env::args().collect();
-    let mut server = String::new();
-    let mut token = String::new();
-    let mut name = String::new();
-    let mut control_port = 9190u16;
-    let mut listen_port = 0u16;
-    let mut mtu = 1420usize;
-    let mut vpn_network = None;
-    let mut internet = false;
-    let mut relay = None;
-    let mut advertise_routes = Vec::new();
-    let mut kill_switch = false;
-
-    let mut i = 1;
-    while i < argv.len() {
-        match argv[i].as_str() {
-            "--server" | "-s" => { i += 1; if i < argv.len() { server = argv[i].clone(); } }
-            "--token" | "-t" => { i += 1; if i < argv.len() { token = argv[i].clone(); } }
-            "--name" | "-n" => { i += 1; if i < argv.len() { name = argv[i].clone(); } }
-            "--relay" | "-r" => { i += 1; if i < argv.len() { relay = Some(argv[i].clone()); } }
-            "--control-port" => { i += 1; if i < argv.len() { control_port = argv[i].parse().unwrap_or(9190); } }
-            "--listen-port" => { i += 1; if i < argv.len() { listen_port = argv[i].parse().unwrap_or(0); } }
-            "--mtu" => { i += 1; if i < argv.len() { mtu = argv[i].parse().unwrap_or(1420); } }
-            "--vpn-network" | "--network" => { i += 1; if i < argv.len() { vpn_network = Some(argv[i].clone()); } }
-            "--advertise-routes" | "--routes" => {
-                i += 1;
-                if i < argv.len() {
-                    advertise_routes = argv[i].split(',').map(|s| s.trim().to_string()).collect();
-                }
-            }
-            "--internet" | "--exit" => { internet = true; }
-            "--kill-switch" | "--killswitch" => { kill_switch = true; }
-            "--gui" | "--cli" | "--no-gui" => {}
-            "--version" | "-v" | "--help" | "-h" => {}
-            _ => {
-                if server.is_empty() {
-                    server = argv[i].clone();
-                }
-            }
-        }
-        i += 1;
-    }
-
-    if server.is_empty() { server = std::env::var("VPN_SERVER").unwrap_or_default(); }
-    if token.is_empty() { token = std::env::var("VPN_TOKEN").unwrap_or_default(); }
-    if name.is_empty() { name = generate_client_name(); }
-
-    let mut relay_name: Option<String> = None;
-    let mut join_url: Option<String> = None;
-
-    if server.is_empty() && !token.is_empty() {
-        eprintln!("[nexguard] resolving server from token...");
-        match crate::api::try_fetch_connect_info(&token) {
-            Ok(info) => {
-                join_url = info.join_url;
-                if let Some(s) = info.server {
-                    server = s;
-                } else if let Some(r) = info.relay {
-                    relay = Some(r.clone());
-                    relay_name = info.relay_name;
-                    server = r.split(':').next().unwrap_or(&r).to_string();
-                }
-            }
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if server.is_empty() && join_url.is_none() {
-        eprintln!("Error: --server or --token required");
-        std::process::exit(1);
-    }
-    if server.is_empty() { server = "api-proxy".to_string(); }
-
-    if relay.is_none() { relay = std::env::var("VPN_RELAY").ok(); }
-
-    Args { server, token, name, control_port, listen_port, mtu, vpn_network, internet, relay, relay_name, join_url, advertise_routes, kill_switch }
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
@@ -783,42 +284,181 @@ fn get_hostname() -> String {
     "device".to_string()
 }
 
+const MESH_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+const LOGIN_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn run_login() {
+    let request = match api::request_account_login() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[nexguard] sign-in failed: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    eprintln!("[nexguard] open this link in a browser and confirm:");
+    println!("{}", request.login_url);
+    eprintln!("[nexguard] waiting...");
+
+    let deadline = std::time::Instant::now() + LOGIN_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        match api::poll_account_login(&request.token) {
+            Ok(Some(_)) => {
+                let who = api::account_email().unwrap_or_default();
+                if who.is_empty() {
+                    eprintln!("[nexguard] signed in");
+                } else {
+                    eprintln!("[nexguard] signed in as {}", who);
+                }
+                return;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("[nexguard] sign-in failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        std::thread::sleep(LOGIN_POLL);
+    }
+    eprintln!("[nexguard] sign-in timed out");
+    std::process::exit(1);
+}
+const MESH_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn list_networks(argv: &[String]) {
+    let token = arg_value(argv, "--token")
+        .or_else(|| arg_value(argv, "-t"))
+        .or_else(api::load_account_token)
+        .unwrap_or_default();
+    if token.is_empty() {
+        eprintln!("[nexguard] mesh: sign in first, or pass --token");
+        std::process::exit(1);
+    }
+    match meshapi::networks(&token) {
+        Ok(networks) if networks.is_empty() => {
+            println!("No mesh networks yet. Start one with --mesh, or accept an invite with --join-mesh.");
+        }
+        Ok(networks) => {
+            for network in networks {
+                println!(
+                    "{}  {}  {}  {} device(s)  [{}]",
+                    network.id, network.cidr, network.dns_suffix, network.device_count, network.role
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("[nexguard] mesh: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_mesh(argv: &[String]) {
+    setup_signal_handler();
+
+    let user_token = arg_value(argv, "--token")
+        .or_else(|| arg_value(argv, "-t"))
+        .or_else(api::load_account_token)
+        .unwrap_or_default();
+
+    let mut network_id = arg_value(argv, "--network");
+    if let Some(invite) = arg_value(argv, "--join-mesh") {
+        if user_token.is_empty() {
+            eprintln!("[nexguard] mesh: sign in first, or pass --token");
+            std::process::exit(1);
+        }
+        match meshapi::accept_invite(&user_token, &invite) {
+            Ok(accepted) => {
+                eprintln!(
+                    "[nexguard] joined {} as {}",
+                    accepted.network.dns_suffix, accepted.role
+                );
+                network_id = Some(accepted.network.id);
+                meshapi::clear_identity();
+            }
+            Err(e) => {
+                eprintln!("[nexguard] mesh: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let config = meshnet::MeshConfig {
+        user_token,
+        network_id,
+        device_name: arg_value(argv, "--name")
+            .or_else(|| arg_value(argv, "-n"))
+            .unwrap_or_else(generate_client_name),
+        exit_node: arg_value(argv, "--exit-node"),
+        advertise_exit_node: argv.iter().any(|a| a == "--share-internet"),
+        manage_dns: argv.iter().any(|a| a == "--magic-dns"),
+        advertise_routes: arg_value(argv, "--advertise-routes")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default(),
+        ..Default::default()
+    };
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let status = match meshnet::connect(config, Arc::clone(&shutdown)) {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("[nexguard] mesh: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    eprintln!(
+        "[nexguard] mesh up: {} as {} on {} ({})",
+        status.address, status.name, status.network, status.tun_name
+    );
+    if status.serving_exit {
+        eprintln!("[nexguard] serving as exit node for {}", status.network);
+    } else if status.advertising_exit {
+        eprintln!("[nexguard] exit node advertised but not active on this platform");
+    }
+
+    while !SHUTDOWN.load(Ordering::Relaxed)
+        && !status.connection_dropped.load(Ordering::Relaxed)
+    {
+        std::thread::sleep(MESH_POLL);
+    }
+
+    shutdown.store(true, Ordering::Relaxed);
+    let deadline = std::time::Instant::now() + MESH_SHUTDOWN_GRACE;
+    while !status.stopped.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+        std::thread::sleep(MESH_POLL);
+    }
+    if !status.stopped.load(Ordering::Relaxed) {
+        eprintln!("[nexguard] mesh cleanup did not finish in time");
+    }
+    eprintln!("[nexguard] mesh stopped");
+}
+
+const SERVICE_FLAGS: [&str; 2] = ["--share-internet", "--magic-dns"];
+const SERVICE_OPTIONS: [&str; 3] = ["--network", "--exit-node", "--advertise-routes"];
+
 fn install_service(args: &[String]) {
     let exe = std::env::current_exe().expect("current exe");
     let exe_path = exe.to_str().expect("exe path");
 
-    let token = arg_value(args, "--token").or_else(|| arg_value(args, "-t"));
-    let name = arg_value(args, "--name").or_else(|| arg_value(args, "-n"));
-    let internet = args.iter().any(|a| a == "--internet" || a == "--exit");
-
-    if let Some(ref t) = token {
-        let profile_name = name.clone().unwrap_or_else(|| "Server".to_string());
-        let profile = crate::profiles::ServerProfile {
-            name: profile_name.clone(),
-            server: String::new(),
-            token: t.clone(),
-            server_id: String::new(),
-            internet,
-            share_lan: false,
-            auto_connect: false,
-            last_used: 0,
-        };
-        let mut profiles_list = crate::profiles::load();
-        crate::profiles::add(&mut profiles_list, profile);
-        eprintln!("[nexguard] profile saved: {}", profile_name);
+    let mut cli_args = vec!["--mesh".to_string()];
+    for flag in SERVICE_FLAGS {
+        if args.iter().any(|a| a == flag) {
+            cli_args.push(flag.to_string());
+        }
     }
-
-    let mut cli_args = vec!["--cli".to_string()];
-    if let Some(t) = &token {
-        cli_args.push("--token".to_string());
-        cli_args.push(t.clone());
+    for option in SERVICE_OPTIONS {
+        if let Some(value) = arg_value(args, option) {
+            cli_args.push(option.to_string());
+            cli_args.push(value);
+        }
     }
-    if let Some(n) = &name {
-        cli_args.push("--name".to_string());
-        cli_args.push(n.clone());
-    }
-    if internet {
-        cli_args.push("--internet".to_string());
+    for (long, short) in [("--token", "-t"), ("--name", "-n")] {
+        if let Some(value) = arg_value(args, long).or_else(|| arg_value(args, short)) {
+            cli_args.push(long.to_string());
+            cli_args.push(value);
+        }
     }
 
     #[cfg(target_os = "macos")]
