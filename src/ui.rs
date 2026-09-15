@@ -164,7 +164,7 @@ struct VpnApp {
     settings_start_login: bool,
     auto_reconnect: bool,
     saved_settings: AppSettings,
-    copied: Option<(String, std::time::Instant)>,
+    copied: Option<(String, std::time::Instant, bool)>,
     netmon: crate::netmon::NetMonitor,
     last_net_epoch: u64,
     connected_frame_since: Option<std::time::Instant>,
@@ -524,6 +524,7 @@ impl VpnApp {
             self.reconcile_exit_node();
         }
         self.exit_geo.poll();
+        self.join_token.poll();
         if self.project_task.poll() {
             if let Some(project) = self.project_task.value.take() {
                 self.project_name.clear();
@@ -780,16 +781,18 @@ impl VpnApp {
     }
 
     fn copy(&mut self, text: String) {
-        let Ok(mut clipboard) = arboard::Clipboard::new() else { return };
-        if clipboard.set_text(text.clone()).is_ok() {
-            self.copied = Some((text, std::time::Instant::now()));
-        }
+        let ok = copy_to_clipboard(&text);
+        self.copied = Some((text, std::time::Instant::now(), ok));
     }
 
-    fn is_copied(&self, text: &str) -> bool {
+    /// `Some(true)` right after this text reached the clipboard, `Some(false)`
+    /// when the attempt failed, so a copy that goes nowhere is visible instead
+    /// of looking like a click that did nothing.
+    fn copy_result(&self, text: &str) -> Option<bool> {
         self.copied
             .as_ref()
-            .is_some_and(|(value, at)| value == text && at.elapsed() < COPY_FEEDBACK)
+            .filter(|(value, at, _)| value == text && at.elapsed() < COPY_FEEDBACK)
+            .map(|(_, _, ok)| *ok)
     }
 
     fn start_update(&mut self, url: String) {
@@ -1110,7 +1113,11 @@ const STATUS_IDLE: &str = "Not connected";
 const RELAY_DOWN: &str = "Relay offline";
 const RELAY_DOWN_TIP: &str = "only devices reachable peer-to-peer are up right now";
 const COPY_IP_TIP: &str = "click to copy this address";
+const COPY_GLYPH: &str = "⧉";
 const COPY_DONE: &str = "Copied ✓";
+const COPY_FAILED: &str = "Copy failed";
+#[cfg(target_os = "macos")]
+const CLIPBOARD_BIN: &str = "pbcopy";
 const MS_SUFFIX: &str = "ms";
 
 const EXIT_LABEL: &str = "Internet";
@@ -1777,8 +1784,11 @@ fn link_box(ui: &mut egui::Ui, url: &str) {
 
 fn copy_row(ui: &mut egui::Ui, app: &VpnApp, value: &str, action: &mut Option<Action>) {
     let t = theme();
-    let copied = app.is_copied(value);
-    let (label, color) = if copied { (COPY_DONE, t.success) } else { (ACTION_COPY_LINK, t.text) };
+    let (label, color) = match app.copy_result(value) {
+        Some(true) => (COPY_DONE, t.success),
+        Some(false) => (COPY_FAILED, t.danger),
+        None => (ACTION_COPY_LINK, t.text),
+    };
     let btn = egui::Button::new(egui::RichText::new(label).size(12.0).color(color))
         .fill(t.surface_hover)
         .min_size(egui::vec2(100.0, 28.0));
@@ -2364,18 +2374,68 @@ fn draw_this_device(
 
 fn copyable_address(ui: &mut egui::Ui, app: &VpnApp, address: &str, action: &mut Option<Action>) {
     let t = theme();
-    let copied = app.is_copied(address);
-    let (text, color) = if copied { (COPY_DONE, t.success) } else { (address, t.text_secondary) };
+    let (text, color) = match app.copy_result(address) {
+        Some(true) => (COPY_DONE.to_string(), t.success),
+        Some(false) => (COPY_FAILED.to_string(), t.danger),
+        None => (format!("{}  {}", address, COPY_GLYPH), t.text_secondary),
+    };
     let resp = ui
         .add(
-            egui::Label::new(egui::RichText::new(text).size(12.0).monospace().color(color))
-                .sense(egui::Sense::click()),
+            egui::Button::new(egui::RichText::new(text).size(12.0).monospace().color(color))
+                .fill(t.surface_hover)
+                .stroke(egui::Stroke::new(1.0_f32, t.border))
+                .min_size(egui::vec2(0.0, 24.0)),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(COPY_IP_TIP);
     if resp.clicked() {
         *action = Some(Action::Copy(address.to_string()));
     }
+}
+
+fn copy_to_clipboard(text: &str) -> bool {
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        if clipboard.set_text(text.to_string()).is_ok() {
+            return true;
+        }
+    }
+    clipboard_command(text)
+}
+
+#[cfg(target_os = "macos")]
+fn clipboard_command(text: &str) -> bool {
+    pipe_to(CLIPBOARD_BIN, &[], text)
+}
+
+#[cfg(target_os = "linux")]
+fn clipboard_command(text: &str) -> bool {
+    pipe_to("wl-copy", &[], text) || pipe_to("xclip", &["-selection", "clipboard"], text)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn clipboard_command(_text: &str) -> bool {
+    false
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn pipe_to(binary: &str, args: &[&str], text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let Ok(mut child) = Command::new(binary)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(stdin) = child.stdin.as_mut() {
+        if stdin.write_all(text.as_bytes()).is_err() {
+            return false;
+        }
+    }
+    child.wait().map(|status| status.success()).unwrap_or(false)
 }
 
 fn geo_summary(geo: &crate::api::GeoInfo) -> String {
