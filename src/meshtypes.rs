@@ -83,8 +83,6 @@ pub struct Project {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
-    pub slug: String,
-    #[serde(default)]
     pub role: String,
     #[serde(default)]
     pub device_count: u32,
