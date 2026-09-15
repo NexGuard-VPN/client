@@ -38,6 +38,7 @@ enum Action {
     ShareInternet(bool),
     SelectProject(String),
     CreateProject,
+    CreateJoinToken,
     AcceptInvite,
     CreateInvite,
     RemoveMember(String, String),
@@ -140,6 +141,7 @@ struct VpnApp {
     projects: Remote<Vec<Project>>,
     project_id: Option<String>,
     project_task: Remote<Project>,
+    join_token: Remote<String>,
     project_name: String,
     members: Remote<Vec<MeshMember>>,
     devices: Remote<Vec<MeshDeviceView>>,
@@ -209,6 +211,7 @@ impl Default for VpnApp {
             projects: Remote::new(),
             project_id: optional(&settings.project_id),
             project_task: Remote::new(),
+            join_token: Remote::new(),
             project_name: String::new(),
             members: Remote::new(),
             devices: Remote::new(),
@@ -940,6 +943,19 @@ impl VpnApp {
                 }
             }
             Action::SelectProject(id) => self.select_project(id),
+            Action::CreateJoinToken => {
+                let Some(project) = self.current_project().map(|p| p.id.clone()) else {
+                    return;
+                };
+                if self.join_token.loading {
+                    return;
+                }
+                self.join_token.reset();
+                self.join_token.start(move || {
+                    crate::meshapi::create_join_token(&account_token(), &project)
+                        .map(|minted| minted.token)
+                });
+            }
             Action::CreateProject => {
                 let name = self.project_name.trim().to_string();
                 if name.is_empty() || self.project_task.loading {
@@ -1011,7 +1027,7 @@ impl VpnApp {
 
 const APP_NAME: &str = "NexGuard";
 const DOWNLOAD_URL: &str = "https://nexguard.sh/download";
-const HEADLESS_COMMAND: &str = "nexguard --login && nexguard --mesh --share-internet";
+const INSTALL_COMMAND: &str = "curl -fsSL https://nexguard.sh/install | sudo bash";
 const HTTP_MARKER: &str = "HTTP ";
 const PLACEHOLDER: &str = "{}";
 const CANCELLED_MARKER: &str = "cancelled";
@@ -1080,8 +1096,6 @@ const PROJECT_NEW_TITLE: &str = "New project";
 const PROJECT_JOIN: &str = "Join with an invite";
 const PROJECT_PEOPLE: &str = "People";
 const PROJECT_SLUG_TIP: &str = "project name used in device DNS names";
-const WORD_SERVER: &str = "server";
-const WORD_SERVERS: &str = "servers";
 const WORD_DEVICE: &str = "device";
 const WORD_DEVICES: &str = "devices";
 const WORD_PERSON: &str = "person";
@@ -1130,11 +1144,12 @@ const ADD_OWN_LABEL: &str = "On your own machine";
 const ADD_OWN_BODY: &str =
     "Install NexGuard there and sign in with this account. It joins this project by itself.";
 const ADD_SERVER_LABEL: &str = "On a server, with no screen";
-const ADD_SERVER_BODY: &str = "Install the same build, then run:";
-const ADD_RENT_LABEL: &str = "Or rent one from us";
-const ADD_RENT_ACTION: &str = "Provision a machine";
-const ADD_RENT_DISABLED: &str =
-    "Renting is paused until provisioned machines join projects as ordinary devices.";
+const ADD_SERVER_BODY: &str =
+    "Create a token and run these two lines there. No sign-in on the machine.";
+const ADD_SERVER_ACTION: &str = "Create a join token";
+const ADD_SERVER_HINT: &str =
+    "Good for 24 hours, reusable. Drop --share-internet if it should not offer its connection.";
+const ADD_SERVER_ADMIN_ONLY: &str = "Only a project admin can add a machine this way.";
 
 const PEOPLE_TITLE: &str = "People";
 const TEAM_LOADING: &str = "Loading...";
@@ -2193,15 +2208,15 @@ fn draw_project_bar(
         }
         role_badge(ui, &current.role);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let mut counts = Vec::new();
-            if current.server_count > 0 {
-                counts.push(plural(current.server_count as usize, WORD_SERVER, WORD_SERVERS));
-            }
-            counts.push(plural(current.device_count as usize, WORD_DEVICE, WORD_DEVICES));
-            counts.push(plural(current.member_count as usize, WORD_PERSON, WORD_PEOPLE));
-            ui.label(
-                egui::RichText::new(counts.join(SEPARATOR)).size(11.0).color(t.text_muted),
+            // A machine we provision is an ordinary device in the network now, so
+            // counting it separately would count it twice.
+            let counts = format!(
+                "{}{}{}",
+                plural(current.device_count as usize, WORD_DEVICE, WORD_DEVICES),
+                SEPARATOR,
+                plural(current.member_count as usize, WORD_PERSON, WORD_PEOPLE)
             );
+            ui.label(egui::RichText::new(counts).size(11.0).color(t.text_muted));
         });
         egui::popup_below_widget(
             ui,
@@ -2502,26 +2517,39 @@ fn draw_add_device(ui: &mut egui::Ui, app: &mut VpnApp) {
         ui.add_space(4.0);
         ui.add(egui::Label::new(lbl(ADD_SERVER_BODY)).wrap());
         ui.add_space(8.0);
-        link_box(ui, HEADLESS_COMMAND);
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            copy_row(ui, app, HEADLESS_COMMAND, &mut action);
-        });
-    });
-
-    ui.add_space(10.0);
-    card(ui, |ui| {
-        ui.label(egui::RichText::new(ADD_RENT_LABEL).size(12.0).strong().color(t.text));
-        ui.add_space(8.0);
-        ui.add_enabled(
-            false,
-            egui::Button::new(egui::RichText::new(ADD_RENT_ACTION).size(12.0).color(t.text_muted))
-                .fill(egui::Color32::TRANSPARENT)
-                .stroke(egui::Stroke::new(1.0_f32, t.border))
-                .min_size(egui::vec2(190.0, 30.0)),
-        );
-        ui.add_space(6.0);
-        ui.add(egui::Label::new(lbl(ADD_RENT_DISABLED)).wrap());
+        if !app.is_admin() {
+            ui.add(egui::Label::new(lbl(ADD_SERVER_ADMIN_ONLY)).wrap());
+            return;
+        }
+        match app.join_token.value.clone() {
+            Some(token) => {
+                let join = format!("sudo nexguard join {} --install-service --share-internet", token);
+                link_box(ui, INSTALL_COMMAND);
+                ui.add_space(4.0);
+                link_box(ui, &join);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    copy_row(ui, app, &format!("{}\n{}", INSTALL_COMMAND, join), &mut action);
+                });
+                ui.add_space(6.0);
+                ui.add(egui::Label::new(lbl(ADD_SERVER_HINT)).wrap());
+            }
+            None if app.join_token.loading => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(lbl(TEAM_LOADING));
+                });
+            }
+            None => {
+                if primary_button(ui, ADD_SERVER_ACTION, 190.0).clicked() {
+                    action = Some(Action::CreateJoinToken);
+                }
+                if let Some(error) = app.join_token.error.clone() {
+                    ui.add_space(6.0);
+                    ui.add(egui::Label::new(egui::RichText::new(error).size(11.0).color(theme().danger)).wrap());
+                }
+            }
+        }
     });
     ui.add_space(10.0);
 

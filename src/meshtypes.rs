@@ -87,13 +87,17 @@ pub struct Project {
     #[serde(default)]
     pub role: String,
     #[serde(default)]
-    pub server_count: u32,
-    #[serde(default)]
     pub device_count: u32,
     #[serde(default)]
     pub member_count: u32,
     #[serde(default)]
     pub network: Option<MeshNetwork>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+pub struct JoinToken {
+    #[serde(default)]
+    pub token: String,
 }
 
 #[derive(Clone, serde::Deserialize)]

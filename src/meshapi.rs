@@ -9,6 +9,7 @@ const INVITES_PATH: &str = "/api/mesh/invites";
 const NETWORKS_PATH: &str = "/api/mesh/networks";
 const MEMBERS_PATH: &str = "/api/mesh/members";
 const PROJECTS_PATH: &str = "/api/projects";
+const JOIN_TOKENS_SUFFIX: &str = "/join-tokens";
 const IDENTITY_FILE: &str = "mesh.json";
 const NETMAP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
 
@@ -113,6 +114,29 @@ pub fn create_project(user_token: &str, name: &str) -> Result<Project, String> {
             .map_err(|e| format!("parse project: {} — {}", e, resp)),
         402 => Err("Your plan does not include this.".to_string()),
         _ => Err(format!("create project: HTTP {} — {}", status, resp)),
+    }
+}
+
+/// Mints a join token for a project. The secret comes back once, which is why
+/// the caller shows it immediately rather than storing it.
+pub fn create_join_token(user_token: &str, project_id: &str) -> Result<JoinToken, String> {
+    let path = format!("{}/{}{}", PROJECTS_PATH, project_id, JOIN_TOKENS_SUFFIX);
+    let (status, resp) = http_tls_request(
+        &api_host(),
+        TlsRequest {
+            method: "POST",
+            path: &path,
+            body: Some("{}"),
+            auth: Some(user_token),
+            read_timeout: DEFAULT_READ_TIMEOUT,
+        },
+    )?;
+    match status {
+        200 | 201 => {
+            serde_json::from_str(&resp).map_err(|e| format!("parse join token: {} — {}", e, resp))
+        }
+        403 => Err("Only a project admin can add a machine.".to_string()),
+        _ => Err(format!("join token: HTTP {} — {}", status, resp)),
     }
 }
 
