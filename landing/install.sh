@@ -30,6 +30,15 @@ echo "Downloading NexGuard for $OS/$ARCH..."
 curl -fsSL -o "$INSTALL_DIR/$BIN" "$URL"
 chmod +x "$INSTALL_DIR/$BIN"
 
+# Fix ownership for existing config
+REAL_USER=${SUDO_USER:-$USER}
+if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
+  REAL_HOME=$(eval echo ~$REAL_USER)
+  if [ -d "$REAL_HOME/.nexguard" ]; then
+    chown -R "$REAL_USER" "$REAL_HOME/.nexguard" 2>/dev/null
+  fi
+fi
+
 echo ""
-echo "NexGuard installed to $INSTALL_DIR/$BIN"
+echo "$("$INSTALL_DIR/$BIN" --version 2>&1 | head -1) installed"
 echo "Run: sudo nexguard"
