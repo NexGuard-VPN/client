@@ -139,7 +139,6 @@ jobs:
           jq -n \
             --arg v "${VERSION}" \
             --arg base "${BASE_URL}" \
-            --slurpfile repo landing/version.json \
             '{
               client: {
                 version: $v,
@@ -151,8 +150,7 @@ jobs:
                   "linux-arm64": { url: ($base + "/nexguard-linux-arm64-" + $v) },
                   "windows-amd64": { url: ($base + "/nexguard-windows-" + $v + ".exe") }
                 }
-              },
-              server: $repo[0].server
+              }
             }' > artifacts/version.json
           cat artifacts/version.json
 
