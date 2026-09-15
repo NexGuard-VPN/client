@@ -141,7 +141,10 @@ pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStat
     let public_key_b64 = crate::b64_encode(PublicKey::from(&secret).as_bytes());
 
     let identity = resolve_identity(&config, &public_key_b64)?;
-    let netmap = meshapi::netmap(&identity.token, 0)?;
+    let mut netmap = meshapi::netmap(&identity.token, 0)?;
+    if let Some(updated) = reconcile_advertisement(&config, &identity, &netmap)? {
+        netmap = updated;
+    }
     let network = if netmap.network.cidr.is_empty() {
         identity.network.clone()
     } else {
@@ -467,6 +470,29 @@ fn run_session(
         .status
         .connection_dropped
         .store(true, Ordering::Relaxed);
+}
+
+// Enrolment happens once, so a device that is restarted with different flags
+// would otherwise keep advertising whatever it offered the first time. Restate
+// the advertisement whenever it no longer matches what the network believes.
+fn reconcile_advertisement(
+    config: &MeshConfig,
+    identity: &MeshIdentity,
+    netmap: &NetMap,
+) -> Result<Option<NetMap>, String> {
+    let routes_match = netmap.device.routes == config.advertise_routes;
+    if netmap.device.exit_node == config.advertise_exit_node && routes_match {
+        return Ok(None);
+    }
+    let patch = meshapi::DevicePatch {
+        name: None,
+        exit_node: Some(config.advertise_exit_node),
+        routes: Some(config.advertise_routes.clone()),
+        exit_node_approved: None,
+        approved_routes: None,
+    };
+    meshapi::update_device(&identity.token, &netmap.device.device_id, &patch)?;
+    meshapi::netmap(&identity.token, 0).map(Some)
 }
 
 fn resolve_identity(config: &MeshConfig, public_key_b64: &str) -> Result<MeshIdentity, String> {

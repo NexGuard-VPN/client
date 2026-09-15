@@ -370,6 +370,14 @@ impl VpnApp {
         self.project_list().iter().find(|p| p.id == id)
     }
 
+    fn project_dns_suffix(&self) -> Option<&str> {
+        self.current_project()?
+            .network
+            .as_ref()
+            .map(|network| network.dns_suffix.as_str())
+            .filter(|suffix| !suffix.is_empty())
+    }
+
     fn project_network(&self) -> Option<&str> {
         self.current_project()?
             .network
@@ -1079,7 +1087,7 @@ const WORD_DEVICES: &str = "devices";
 const WORD_PERSON: &str = "person";
 const WORD_PEOPLE: &str = "people";
 
-const THIS_DEVICE: &str = "This device";
+const THIS_DEVICE: &str = "Connection";
 const THIS_DEVICE_TAG: &str = "this device";
 const STATUS_CONNECTED: &str = "Connected";
 const STATUS_CONNECTING: &str = "Connecting...";
@@ -1104,6 +1112,7 @@ const SHARE_UNSUPPORTED: &str = "Sharing is not available on this platform yet."
 const MEMBER_EXIT_NOTE: &str = "An admin approves sharing before anyone can pick this device.";
 
 const SECTION_DEVICES: &str = "Devices";
+const DEVICES_ONLINE: &str = " online";
 const DEVICES_EMPTY: &str = "Only this device so far.";
 const DEVICES_LOADING: &str = "Loading devices...";
 const DEVICE_ADD: &str = "+ Add a device";
@@ -2240,11 +2249,6 @@ fn draw_this_device(
     let t = theme();
     let mesh = app.mesh_status.lock().unwrap().clone();
     let disconnecting = app.shutdown.load(Ordering::Relaxed);
-    let address = mesh
-        .as_ref()
-        .map(|status| status.address.clone())
-        .or_else(|| app.mesh_identity.as_ref().map(|i| i.mesh_ip.clone()))
-        .unwrap_or_default();
     let relay_down = mesh
         .as_ref()
         .is_some_and(|status| !status.relay_connected.load(Ordering::Relaxed));
@@ -2270,11 +2274,6 @@ fn draw_this_device(
                 }
             });
         });
-        if !address.is_empty() {
-            ui.add_space(2.0);
-            copyable_address(ui, app, &address, action);
-        }
-
         ui.add_space(10.0);
         if busy {
             ui.horizontal(|ui| {
@@ -2386,7 +2385,25 @@ fn draw_devices(
     let t = theme();
     let pending = if app.is_admin() { app.pending_devices() } else { 0 };
 
-    section_header(ui, SECTION_DEVICES, |_ui| {});
+    let online = rows.iter().filter(|r| r.is_self || r.online).count();
+    section_header(ui, SECTION_DEVICES, |ui| {
+        let t = theme();
+        ui.label(
+            egui::RichText::new(format!(
+                "{}{}{}{}",
+                plural(rows.len(), WORD_DEVICE, WORD_DEVICES),
+                SEPARATOR,
+                online,
+                DEVICES_ONLINE
+            ))
+            .size(11.0)
+            .color(t.text_muted),
+        );
+    });
+    if let Some(suffix) = app.project_dns_suffix() {
+        ui.label(egui::RichText::new(suffix).size(11.0).monospace().color(theme().text_muted));
+        ui.add_space(6.0);
+    }
 
     if rows.is_empty() {
         if app.devices.loading {
