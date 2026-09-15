@@ -114,6 +114,10 @@ struct Candidate {
     lan: bool,
     last_ping: Option<Instant>,
     last_pong: Option<Instant>,
+    /// When this address last carried a packet that authenticated. Disco proves
+    /// a path is reachable; this proves it is carrying traffic right now, which
+    /// is what keeps a peer reachable when its advertised endpoint is wrong.
+    last_data: Option<Instant>,
     rtt: Option<Duration>,
     tx_id: [u8; 8],
 }
@@ -655,6 +659,7 @@ fn add_candidate(peer: &mut Peer, addr: SocketAddr) {
         lan: is_private(addr.ip()),
         last_ping: None,
         last_pong: None,
+        last_data: None,
         rtt: None,
         tx_id: [0u8; 8],
     });
@@ -758,7 +763,25 @@ fn decapsulate_into_tun(
     if received > 0 {
         peer.rx_bytes += received;
     }
+    // boringtun only reaches this point for a packet that authenticated, so the
+    // address it came from is the peer's real one. Adopt it: the endpoint a peer
+    // advertises can be wrong (a NAT that maps a different port per destination,
+    // an older client, a laptop that changed networks), and what it says matters
+    // less than where its packets actually come from.
+    if let Some(addr) = from {
+        adopt_endpoint(peer, addr);
+    }
     Some(received)
+}
+
+fn adopt_endpoint(peer: &mut Peer, addr: SocketAddr) {
+    add_candidate(peer, addr);
+    if let Some(cand) = peer.candidates.iter_mut().find(|c| c.addr == addr) {
+        cand.last_data = Some(Instant::now());
+    }
+    if peer.best.is_none() {
+        peer.best = Some(addr);
+    }
 }
 
 fn handle_disco(
@@ -912,26 +935,18 @@ fn disco_tick(
 }
 
 fn select_path(peer: &mut Peer, now: Instant) {
-    let mut best: Option<(SocketAddr, Duration, bool)> = None;
-    for cand in &peer.candidates {
-        let (pong, rtt) = match (cand.last_pong, cand.rtt) {
-            (Some(p), Some(r)) => (p, r),
-            _ => continue,
-        };
-        if now.duration_since(pong) > PATH_FRESH {
-            continue;
-        }
-        let better = match best {
-            None => true,
-            Some((_, best_rtt, best_lan)) => {
-                (cand.lan && !best_lan) || (cand.lan == best_lan && rtt < best_rtt)
-            }
-        };
-        if better {
-            best = Some((cand.addr, rtt, cand.lan));
-        }
-    }
-    peer.best = best.map(|(addr, _, _)| addr);
+    let samples: Vec<crate::path::PathSample> = peer
+        .candidates
+        .iter()
+        .map(|c| crate::path::PathSample {
+            addr: c.addr,
+            lan: c.lan,
+            rtt: c.rtt,
+            last_pong: c.last_pong,
+            last_data: c.last_data,
+        })
+        .collect();
+    peer.best = crate::path::choose(&samples, now, PATH_FRESH);
 }
 
 fn rebuild_index(

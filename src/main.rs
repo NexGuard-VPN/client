@@ -13,6 +13,7 @@ pub mod exitnode;
 mod meshapi;
 mod meshtypes;
 pub mod meshnet;
+pub mod path;
 pub mod allowed;
 pub mod rng;
 pub mod netmon;

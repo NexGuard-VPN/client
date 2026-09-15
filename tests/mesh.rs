@@ -459,3 +459,110 @@ fn enroll_request_carries_the_join_token_only_when_joining() {
     .unwrap();
     assert!(with.contains("\"join_token\":\"ngj_abc\""), "token must be sent: {}", with);
 }
+
+#[path = "../src/path.rs"]
+mod path;
+
+mod path_choice {
+    use super::path::{choose, PathSample};
+    use std::net::SocketAddr;
+    use std::time::{Duration, Instant};
+
+    const FRESH: Duration = Duration::from_secs(20);
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    fn measured(a: &str, lan: bool, rtt_ms: u64, age: Duration, now: Instant) -> PathSample {
+        PathSample {
+            addr: addr(a),
+            lan,
+            rtt: Some(Duration::from_millis(rtt_ms)),
+            last_pong: Some(now - age),
+            last_data: None,
+        }
+    }
+
+    fn claimed(a: &str) -> PathSample {
+        PathSample { addr: addr(a), lan: false, rtt: None, last_pong: None, last_data: None }
+    }
+
+    fn carrying(a: &str, age: Duration, now: Instant) -> PathSample {
+        PathSample {
+            addr: addr(a),
+            lan: false,
+            rtt: None,
+            last_pong: None,
+            last_data: Some(now - age),
+        }
+    }
+
+    #[test]
+    fn a_measured_path_beats_one_that_is_only_claimed() {
+        let now = Instant::now();
+        let samples = [claimed("1.1.1.1:1111"), measured("2.2.2.2:2222", false, 30, Duration::ZERO, now)];
+        assert_eq!(choose(&samples, now, FRESH), Some(addr("2.2.2.2:2222")));
+    }
+
+    #[test]
+    fn the_lan_wins_even_when_it_is_slower() {
+        let now = Instant::now();
+        let samples = [
+            measured("9.9.9.9:9999", false, 5, Duration::ZERO, now),
+            measured("192.168.1.7:7777", true, 40, Duration::ZERO, now),
+        ];
+        assert_eq!(choose(&samples, now, FRESH), Some(addr("192.168.1.7:7777")));
+    }
+
+    #[test]
+    fn the_lower_round_trip_wins_among_equals() {
+        let now = Instant::now();
+        let samples = [
+            measured("1.1.1.1:1111", false, 80, Duration::ZERO, now),
+            measured("2.2.2.2:2222", false, 20, Duration::ZERO, now),
+        ];
+        assert_eq!(choose(&samples, now, FRESH), Some(addr("2.2.2.2:2222")));
+    }
+
+    #[test]
+    fn a_stale_measurement_is_not_used() {
+        let now = Instant::now();
+        let samples = [measured("1.1.1.1:1111", false, 10, Duration::from_secs(60), now)];
+        assert_eq!(choose(&samples, now, FRESH), None);
+    }
+
+    #[test]
+    fn packets_arriving_beat_an_endpoint_that_only_claims_to_work() {
+        let now = Instant::now();
+        let samples = [claimed("5.5.5.5:54736"), carrying("5.5.5.5:51821", Duration::from_secs(1), now)];
+        assert_eq!(choose(&samples, now, FRESH), Some(addr("5.5.5.5:51821")));
+    }
+
+    #[test]
+    fn the_most_recent_arrival_wins_when_nothing_is_measured() {
+        let now = Instant::now();
+        let samples = [
+            carrying("5.5.5.5:1111", Duration::from_secs(10), now),
+            carrying("6.6.6.6:2222", Duration::from_secs(2), now),
+        ];
+        assert_eq!(choose(&samples, now, FRESH), Some(addr("6.6.6.6:2222")));
+    }
+
+    #[test]
+    fn arrivals_that_stopped_are_not_used() {
+        let now = Instant::now();
+        let samples = [carrying("5.5.5.5:1111", Duration::from_secs(60), now)];
+        assert_eq!(choose(&samples, now, FRESH), None);
+    }
+
+    #[test]
+    fn a_measured_path_still_wins_over_a_fresher_arrival() {
+        let now = Instant::now();
+        let samples = [
+            measured("1.1.1.1:1111", false, 30, Duration::from_secs(5), now),
+            carrying("2.2.2.2:2222", Duration::ZERO, now),
+        ];
+        assert_eq!(choose(&samples, now, FRESH), Some(addr("1.1.1.1:1111")));
+    }
+}
