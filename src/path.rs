@@ -44,3 +44,30 @@ pub fn choose(samples: &[PathSample], now: Instant, fresh: Duration) -> Option<S
         .max_by_key(|(_, seen)| *seen)
         .map(|(addr, _)| addr)
 }
+
+/// The address a peer's traffic appears to come from. Endpoints also carry the
+/// peer's own LAN and mesh addresses, which say nothing about the internet, so
+/// only a routable public address counts.
+pub fn public_ip(endpoints: &[String]) -> Option<String> {
+    endpoints
+        .iter()
+        .filter_map(|endpoint| endpoint.parse::<SocketAddr>().ok())
+        .map(|addr| addr.ip())
+        .find(|ip| is_public(ip))
+        .map(|ip| ip.to_string())
+}
+
+fn is_public(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !v4.is_private()
+                && !v4.is_loopback()
+                && !v4.is_link_local()
+                && !v4.is_broadcast()
+                && !v4.is_unspecified()
+                // 100.64.0.0/10 is the carrier-grade range the mesh itself uses
+                && !(v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]))
+        }
+        std::net::IpAddr::V6(v6) => !v6.is_loopback() && !v6.is_unspecified(),
+    }
+}

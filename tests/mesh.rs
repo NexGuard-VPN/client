@@ -566,3 +566,37 @@ mod path_choice {
         assert_eq!(choose(&samples, now, FRESH), Some(addr("1.1.1.1:1111")));
     }
 }
+
+mod public_endpoint {
+    use super::path::public_ip;
+
+    fn list(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_routable_address_is_the_one_traffic_appears_from() {
+        assert_eq!(
+            public_ip(&list(&["188.245.161.55:51821"])),
+            Some("188.245.161.55".into())
+        );
+    }
+
+    #[test]
+    fn a_devices_own_lan_and_mesh_addresses_say_nothing_about_the_internet() {
+        // real data from a device that reported its mesh address as an endpoint
+        assert_eq!(
+            public_ip(&list(&["217.237.74.6:51821", "100.64.0.2:51821"])),
+            Some("217.237.74.6".into())
+        );
+        assert_eq!(public_ip(&list(&["192.168.1.107:54736", "10.0.0.4:1"])), None);
+        assert_eq!(public_ip(&list(&["100.64.0.3:51821"])), None);
+        assert_eq!(public_ip(&list(&["127.0.0.1:51821", "169.254.1.1:1"])), None);
+    }
+
+    #[test]
+    fn nothing_to_report_is_not_a_guess() {
+        assert_eq!(public_ip(&[]), None);
+        assert_eq!(public_ip(&list(&["not-an-address", ""])), None);
+    }
+}

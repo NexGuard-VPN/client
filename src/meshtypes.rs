@@ -156,6 +156,8 @@ pub struct MeshDeviceView {
     #[serde(default)]
     pub client_version: String,
     #[serde(default)]
+    pub endpoints: Vec<String>,
+    #[serde(default)]
     pub exit_node: bool,
     #[serde(default)]
     pub exit_node_approved: bool,

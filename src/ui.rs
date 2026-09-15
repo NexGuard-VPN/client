@@ -108,6 +108,7 @@ struct DeviceRow {
     is_self: bool,
     provisioned: bool,
     shares_internet: bool,
+    exit_ip: Option<String>,
     path: Option<PeerPath>,
     rtt_ms: Option<u32>,
     online: bool,
@@ -443,6 +444,7 @@ impl VpnApp {
                         is_self: !self_id.is_empty() && device.device_id == self_id,
                         provisioned: device.provisioned,
                         shares_internet: device.exit_node && device.exit_node_approved,
+                        exit_ip: crate::path::public_ip(&device.endpoints),
                         path: seen.map(|p| p.path),
                         rtt_ms: seen.and_then(|p| p.rtt_ms),
                         online: device.online || seen.is_some_and(|p| p.online),
@@ -459,6 +461,7 @@ impl VpnApp {
                     is_self: false,
                     provisioned: false,
                     shares_internet: peer.exit_node,
+                    exit_ip: None,
                     path: Some(peer.path),
                     rtt_ms: peer.rtt_ms,
                     online: peer.online,
@@ -476,6 +479,7 @@ impl VpnApp {
                     is_self: true,
                     provisioned: false,
                     shares_internet: status.serving_exit,
+                    exit_ip: None,
                     path: None,
                     rtt_ms: None,
                     online: true,
@@ -1106,12 +1110,10 @@ const PROJECT_CREATE: &str = "Create project";
 const PROJECT_CREATING: &str = "Creating...";
 const PROJECT_NAME_LABEL: &str = "Project name";
 const PROJECT_NAME_HINT: &str = "e.g. Home";
-const PROJECT_LABEL: &str = "PROJECT";
-const PROJECT_MENU: &str = "Switch ▾";
-const PROJECT_MENU_OPEN: &str = "Switch ▴";
-const PROJECT_SWITCH_TO: &str = "SWITCH TO";
-const PROJECT_NEW_TITLE: &str = "+ New project";
-const PROJECT_JOIN: &str = "Join with an invite";
+const PROJECT_ADD_CHIP: &str = "+";
+const PROJECT_ADD_TIP: &str = "new project";
+const PROJECT_NEW_TITLE: &str = "New project";
+const PROJECT_JOIN: &str = "Have an invite? Join a project instead";
 const PROJECT_PEOPLE: &str = "People";
 const WORD_DEVICE: &str = "device";
 const WORD_DEVICES: &str = "devices";
@@ -1128,6 +1130,10 @@ const RELAY_DOWN: &str = "Relay offline";
 const RELAY_DOWN_TIP: &str = "only devices reachable peer-to-peer are up right now";
 const COPY_IP_TIP: &str = "click to copy this address";
 const COPY_GLYPH: &str = "⧉";
+const EXIT_OFFERS: &str = "internet exit ·";
+const EXIT_IN_USE: &str = "your internet goes out here ·";
+const EXIT_USE: &str = "Use";
+const EXIT_STOP: &str = "Stop using";
 const COPY_DONE: &str = "Copied ✓";
 const COPY_FAILED: &str = "Copy failed";
 #[cfg(target_os = "macos")]
@@ -1969,8 +1975,6 @@ impl eframe::App for VpnApp {
 }
 
 const MENU_WIDTH: f32 = 196.0;
-const SELECTED_MARK: &str = "●";
-const SELECTED_BLANK: &str = "  ";
 const GEAR: &str = "⚙";
 const CARET_SIZE: f32 = 12.0;
 
@@ -2213,91 +2217,70 @@ fn draw_project_bar(
     let t = theme();
     let current = app.current_project().cloned().or_else(|| projects.first().cloned());
     let Some(current) = current else { return };
-    let admin = app.is_admin();
-    let popup_id = egui::Id::new("project_switcher");
     let suffix = current.network.as_ref().map(|n| n.dns_suffix.clone()).unwrap_or_default();
 
-    // The project and the network it owns are one thing, so they read as one
-    // line: what it is called, and what its devices answer to.
-    card(ui, |ui| {
+    // Projects are few and switching between them is the common move, so they
+    // are all on screen as tabs rather than hidden behind a menu.
+    egui::ScrollArea::horizontal().max_height(34.0).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(egui::RichText::new(PROJECT_LABEL).size(10.0).color(t.text_muted));
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&current.name).size(15.0).strong().color(t.text));
-                    role_badge(ui, &current.role);
-                });
-                if !suffix.is_empty() {
-                    ui.label(
-                        egui::RichText::new(&suffix).size(11.0).monospace().color(t.text_muted),
-                    );
-                }
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let open = ui.memory(|m| m.is_popup_open(popup_id));
-                let switch = egui::Button::new(
-                    egui::RichText::new(if open { PROJECT_MENU_OPEN } else { PROJECT_MENU })
-                        .size(12.0)
-                        .color(t.text),
+            for project in projects {
+                let selected = project.id == current.id;
+                let (fill, text) =
+                    if selected { (t.accent, t.accent_ink) } else { (t.surface, t.text_secondary) };
+                let chip = egui::Button::new(
+                    egui::RichText::new(&project.name).size(12.0).strong().color(text),
                 )
-                .fill(t.surface_hover)
-                .stroke(egui::Stroke::new(1.0_f32, t.border))
-                .min_size(egui::vec2(96.0, 28.0));
-                let resp = ui.add(switch).on_hover_cursor(egui::CursorIcon::PointingHand);
-                if resp.clicked() {
-                    ui.memory_mut(|m| m.toggle_popup(popup_id));
+                .fill(fill)
+                .stroke(egui::Stroke::new(1.0_f32, if selected { t.accent } else { t.border }))
+                .corner_radius(cr(14))
+                .min_size(egui::vec2(0.0, 28.0));
+                if ui.add(chip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+                    && !selected
+                {
+                    *action = Some(Action::SelectProject(project.id.clone()));
                 }
-                // A machine we provision is an ordinary device in the network now,
-                // so counting it separately would count it twice.
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{}{}{}",
-                        plural(current.device_count as usize, WORD_DEVICE, WORD_DEVICES),
-                        SEPARATOR,
-                        plural(current.member_count as usize, WORD_PERSON, WORD_PEOPLE)
-                    ))
-                    .size(11.0)
-                    .color(t.text_muted),
-                );
-                egui::popup_below_widget(
-                    ui,
-                    popup_id,
-                    &resp,
-                    egui::PopupCloseBehavior::CloseOnClick,
-                    |ui| {
-                        ui.set_min_width(MENU_WIDTH);
-                        if projects.len() > 1 {
-                            ui.label(
-                                egui::RichText::new(PROJECT_SWITCH_TO)
-                                    .size(10.0)
-                                    .color(t.text_muted),
-                            );
-                            for project in projects {
-                                let selected = project.id == current.id;
-                                let label = if selected {
-                                    format!("{} {}", SELECTED_MARK, project.name)
-                                } else {
-                                    format!("{} {}", SELECTED_BLANK, project.name)
-                                };
-                                let color = if selected { t.accent } else { t.text };
-                                if menu_item(ui, &label, color) && !selected {
-                                    *action = Some(Action::SelectProject(project.id.clone()));
-                                }
-                            }
-                            ui.separator();
-                        }
-                        if menu_item(ui, PROJECT_NEW_TITLE, t.accent) {
-                            *action = Some(Action::Open(View::NewProject));
-                        }
-                        if menu_item(ui, PROJECT_JOIN, t.text) {
-                            *action = Some(Action::Open(View::JoinInvite));
-                        }
-                        if admin && menu_item(ui, PROJECT_PEOPLE, t.text) {
-                            *action = Some(Action::Open(View::People));
-                        }
-                    },
-                );
-            });
+            }
+            let add = egui::Button::new(
+                egui::RichText::new(PROJECT_ADD_CHIP).size(13.0).strong().color(t.accent),
+            )
+            .fill(t.surface)
+            .stroke(egui::Stroke::new(1.0_f32, t.border))
+            .corner_radius(cr(14))
+            .min_size(egui::vec2(32.0, 28.0));
+            if ui
+                .add(add)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(PROJECT_ADD_TIP)
+                .clicked()
+            {
+                *action = Some(Action::Open(View::NewProject));
+            }
+        });
+    });
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if !suffix.is_empty() {
+            ui.label(egui::RichText::new(&suffix).size(11.0).monospace().color(t.text_muted));
+            ui.label(egui::RichText::new(SEPARATOR).size(11.0).color(t.text_muted));
+        }
+        // A machine we provision is an ordinary device in the network now, so
+        // counting it separately would count it twice.
+        ui.label(
+            egui::RichText::new(format!(
+                "{}{}{}",
+                plural(current.device_count as usize, WORD_DEVICE, WORD_DEVICES),
+                SEPARATOR,
+                plural(current.member_count as usize, WORD_PERSON, WORD_PEOPLE)
+            ))
+            .size(11.0)
+            .color(t.text_muted),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if app.is_admin() && quiet_button(ui, PROJECT_PEOPLE, t.accent).clicked() {
+                *action = Some(Action::Open(View::People));
+            }
+            role_badge(ui, &current.role);
         });
     });
 }
@@ -2555,6 +2538,28 @@ fn draw_devices(
                         );
                     }
                 });
+                if row.shares_internet && !row.is_self {
+                    let selected = app.mesh_exit_node.as_deref() == Some(row.device_id.as_str());
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let line = match (&row.exit_ip, selected) {
+                            (Some(ip), true) => format!("{} {}", EXIT_IN_USE, ip),
+                            (Some(ip), false) => format!("{} {}", EXIT_OFFERS, ip),
+                            (None, true) => EXIT_IN_USE.to_string(),
+                            (None, false) => EXIT_OFFERS.to_string(),
+                        };
+                        let color = if selected { t.accent } else { t.text_muted };
+                        ui.label(egui::RichText::new(line).size(11.0).color(color));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let label = if selected { EXIT_STOP } else { EXIT_USE };
+                            if quiet_button(ui, label, t.accent).clicked() {
+                                *action = Some(Action::SelectExit(
+                                    (!selected).then(|| row.device_id.clone()),
+                                ));
+                            }
+                        });
+                    });
+                }
             });
         ui.add_space(3.0);
     }
@@ -2695,6 +2700,12 @@ fn draw_new_project(ui: &mut egui::Ui, app: &mut VpnApp) {
                 )
                 .wrap(),
             );
+        }
+    });
+    ui.add_space(14.0);
+    ui.vertical_centered(|ui| {
+        if quiet_button(ui, PROJECT_JOIN, t.text_muted).clicked() {
+            action = Some(Action::Open(View::JoinInvite));
         }
     });
     if submit {
