@@ -402,3 +402,60 @@ fn device_patch_omits_untouched_fields() {
     let empty = meshtypes::DevicePatch::default();
     assert_eq!(serde_json::to_string(&empty).unwrap(), "{}");
 }
+
+#[path = "../src/cli.rs"]
+mod cli;
+
+fn argv(args: &[&str]) -> Vec<String> {
+    std::iter::once("nexguard")
+        .chain(args.iter().copied())
+        .map(String::from)
+        .collect()
+}
+
+#[test]
+fn join_token_is_read_from_the_bare_command_and_the_flag() {
+    assert_eq!(cli::join_token(&argv(&["join", "ngj_abc"])), Some("ngj_abc".into()));
+    assert_eq!(
+        cli::join_token(&argv(&["--join-token", "ngj_abc", "--mesh"])),
+        Some("ngj_abc".into())
+    );
+    assert_eq!(
+        cli::join_token(&argv(&["join", "ngj_abc", "--share-internet"])),
+        Some("ngj_abc".into())
+    );
+}
+
+#[test]
+fn join_token_is_absent_without_one() {
+    assert_eq!(cli::join_token(&argv(&["--mesh"])), None);
+    assert_eq!(cli::join_token(&argv(&["join"])), None);
+    assert_eq!(cli::join_token(&argv(&["join", "--share-internet"])), None);
+    assert_eq!(cli::join_token(&argv(&["--join-token"])), None);
+    assert_eq!(cli::join_token(&argv(&["--login", "join", "ngj_abc"])), None);
+}
+
+#[test]
+fn enroll_request_carries_the_join_token_only_when_joining() {
+    let base = meshtypes::EnrollRequest {
+        network_id: None,
+        project_id: None,
+        join_token: None,
+        name: "web-01".into(),
+        public_key: "key".into(),
+        os: "linux".into(),
+        os_version: "ubuntu 24.04".into(),
+        client_version: "1.16.0".into(),
+        advertise_exit_node: true,
+        advertise_routes: vec![],
+    };
+    let without = serde_json::to_string(&base).unwrap();
+    assert!(!without.contains("join_token"), "absent token must not be sent: {}", without);
+
+    let with = serde_json::to_string(&meshtypes::EnrollRequest {
+        join_token: Some("ngj_abc".into()),
+        ..base
+    })
+    .unwrap();
+    assert!(with.contains("\"join_token\":\"ngj_abc\""), "token must be sent: {}", with);
+}

@@ -14,13 +14,16 @@ const NETMAP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 pub fn enroll(user_token: &str, req: &EnrollRequest) -> Result<MeshIdentity, String> {
     let body = serde_json::to_string(req).map_err(|e| format!("encode enroll: {}", e))?;
+    // A join token authenticates the request on its own, so the machine needs
+    // no account credential of its own.
+    let auth = if req.join_token.is_some() { None } else { Some(user_token) };
     let (status, resp) = http_tls_request(
         &api_host(),
         TlsRequest {
             method: "POST",
             path: ENROLL_PATH,
             body: Some(&body),
-            auth: Some(user_token),
+            auth,
             read_timeout: DEFAULT_READ_TIMEOUT,
         },
     )?;

@@ -126,6 +126,8 @@ pub struct EnrollRequest {
     pub network_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join_token: Option<String>,
     pub name: String,
     pub public_key: String,
     pub os: String,

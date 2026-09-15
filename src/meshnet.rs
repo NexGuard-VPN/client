@@ -36,6 +36,7 @@ static PEER_INDEX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::
 
 pub struct MeshConfig {
     pub user_token: String,
+    pub join_token: Option<String>,
     pub network_id: Option<String>,
     pub project_id: Option<String>,
     pub device_name: String,
@@ -52,6 +53,7 @@ impl Default for MeshConfig {
     fn default() -> Self {
         Self {
             user_token: String::new(),
+            join_token: None,
             network_id: None,
             project_id: None,
             device_name: String::new(),
@@ -477,15 +479,16 @@ fn resolve_identity(config: &MeshConfig, public_key_b64: &str) -> Result<MeshIde
             return Ok(existing);
         }
     }
-    let user_token = if config.user_token.is_empty() {
-        crate::api::load_account_token()
-            .ok_or_else(|| "Sign in to join your mesh network.".to_string())?
-    } else {
-        config.user_token.clone()
+    let user_token = match &config.join_token {
+        Some(_) => String::new(),
+        None if config.user_token.is_empty() => crate::api::load_account_token()
+            .ok_or_else(|| "Sign in, or join with a token from your project.".to_string())?,
+        None => config.user_token.clone(),
     };
     let request = meshapi::EnrollRequest {
         network_id: config.network_id.clone(),
         project_id: config.project_id.clone(),
+        join_token: config.join_token.clone(),
         name: config.device_name.clone(),
         public_key: public_key_b64.to_string(),
         os: meshapi::os_name(),

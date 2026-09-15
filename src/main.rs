@@ -1,5 +1,6 @@
 #![cfg_attr(not(feature = "gui"), allow(dead_code))]
 mod api;
+pub mod cli;
 pub mod autostart;
 #[cfg(feature = "gui")]
 mod modal;
@@ -24,6 +25,7 @@ pub mod tun;
 #[cfg(feature = "gui")]
 mod ui;
 
+use cli::{arg_value, join_token};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -33,6 +35,7 @@ fn print_help() {
     println!("Usage: nexguard [OPTIONS]");
     println!();
     println!("  nexguard                              Open the app (default)");
+    println!("  nexguard join TOKEN                   Join a project with a token from the dashboard");
     println!("  nexguard --mesh --share-internet      Run headless as an exit node");
     println!();
     println!("Options:");
@@ -41,6 +44,7 @@ fn print_help() {
     println!("  --login                   Sign in to your NexGuard account (headless)");
     println!("  --mesh                    Join the project network (headless)");
     println!("  --join-mesh TOKEN         Accept an invite, then join that project");
+    println!("  --join-token TOKEN        Join with a project token, without signing in");
     println!("  --list-networks           Print the project networks this account can join");
     println!("  --network NETWORK_ID      Join a specific project network");
     println!("  --exit-node DEVICE_ID     Route all traffic through that device");
@@ -96,7 +100,7 @@ fn main() {
         list_networks(&args);
         return;
     }
-    if args.iter().any(|a| a == "--mesh") {
+    if args.iter().any(|a| a == "--mesh") || join_token(&args).is_some() {
         run_mesh(&args);
         return;
     }
@@ -207,10 +211,6 @@ fn setup_signal_handler() {
 #[cfg(unix)]
 extern "C" fn handle_signal(_: libc::c_int) {
     SHUTDOWN.store(true, Ordering::Relaxed);
-}
-
-fn arg_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
 }
 
 pub fn generate_client_name() -> String {
@@ -386,6 +386,7 @@ fn run_mesh(argv: &[String]) {
 
     let config = meshnet::MeshConfig {
         user_token,
+        join_token: join_token(argv),
         network_id,
         device_name: arg_value(argv, "--name")
             .or_else(|| arg_value(argv, "-n"))
