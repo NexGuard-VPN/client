@@ -52,12 +52,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux' && !matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libglib2.0-dev libgtk-3-dev libxdo-dev libayatana-appindicator3-dev pkg-config
-
       - name: Update Cargo.toml version
         shell: bash
         run: sed -i.bak "s/^version = .*/version = \"${{ needs.prepare.outputs.version }}\"/" Cargo.toml && rm -f Cargo.toml.bak
@@ -66,10 +60,13 @@ jobs:
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
+      # The Linux artifact is headless on purpose: the desktop build links
+      # libxdo and friends through the tray, so it cannot start on a server —
+      # which is where Linux installs live. `--mesh` and `join` work either way.
       - name: Build
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
+            cross build --release --target ${{ matrix.target }} --no-default-features
           else
             cargo build --release --target ${{ matrix.target }}
           fi
