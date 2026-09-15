@@ -149,6 +149,7 @@ struct VpnApp {
     accept: Remote<crate::meshapi::AcceptedInvite>,
     team_task: Remote<()>,
     exit_geo: Remote<crate::api::GeoInfo>,
+    exit_geo_at: Option<std::time::Instant>,
     invite_email: String,
     invite_role: String,
     invite_devices: u32,
@@ -219,6 +220,7 @@ impl Default for VpnApp {
             accept: Remote::new(),
             team_task: Remote::new(),
             exit_geo: Remote::new(),
+            exit_geo_at: None,
             invite_email: String::new(),
             invite_role: ROLE_MEMBER.to_string(),
             invite_devices: DEFAULT_INVITE_DEVICES,
@@ -268,6 +270,7 @@ impl VpnApp {
         self.shutdown = Arc::new(AtomicBool::new(false));
         *self.state.lock().unwrap() = ConnectionState::Connecting;
         self.exit_geo.reset();
+        self.exit_geo_at = None;
         let config = MeshConfig {
             network_id: self.mesh_network_id.clone(),
             project_id: self.project_id.clone(),
@@ -309,6 +312,7 @@ impl VpnApp {
     fn disconnect(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         self.exit_geo.reset();
+        self.exit_geo_at = None;
         let mesh_slot = Arc::clone(&self.mesh_status);
         let state = Arc::clone(&self.state);
         *self.state.lock().unwrap() = ConnectionState::Connecting;
@@ -502,7 +506,12 @@ impl VpnApp {
         }
         let routed = self.mesh_exit_node.is_some()
             && matches!(*self.state.lock().unwrap(), ConnectionState::Connected);
-        if routed && self.exit_geo.idle() {
+        let settled = self
+            .connected_frame_since
+            .is_some_and(|since| since.elapsed() >= GEO_SETTLE);
+        let stale = self.exit_geo_at.is_some_and(|at| at.elapsed() >= GEO_REFRESH);
+        if routed && settled && (self.exit_geo.idle() || stale) {
+            self.exit_geo.reset();
             self.exit_geo.start(crate::api::fetch_geo_self);
         }
     }
@@ -515,7 +524,9 @@ impl VpnApp {
         if self.devices.poll() {
             self.reconcile_exit_node();
         }
-        self.exit_geo.poll();
+        if self.exit_geo.poll() {
+            self.exit_geo_at = Some(std::time::Instant::now());
+        }
         self.join_token.poll();
         if self.project_task.poll() {
             if let Some(project) = self.project_task.value.take() {
@@ -563,6 +574,7 @@ impl VpnApp {
         }
         self.mesh_exit_node = None;
         self.exit_geo.reset();
+        self.exit_geo_at = None;
         self.persist_settings();
         if self.busy() {
             self.reconnect();
@@ -920,6 +932,7 @@ impl VpnApp {
                 if self.mesh_exit_node != device_id {
                     self.mesh_exit_node = device_id;
                     self.exit_geo.reset();
+                    self.exit_geo_at = None;
                     self.persist_settings();
                     if self.busy() {
                         self.reconnect();
@@ -1035,6 +1048,12 @@ const TRANSPORT_PREFIXES: [&str; 6] =
 const UPDATE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4 * 3600);
 const DISCONNECT_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 const COPY_FEEDBACK: std::time::Duration = std::time::Duration::from_secs(2);
+/// The exit route is not in place the instant the session reports Connected, so
+/// asking where we appear from too early answers with this machine's own
+/// address. Wait for the tunnel to settle, then keep re-checking, because the
+/// answer also changes when the exit node moves or the selection changes.
+const GEO_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+const GEO_REFRESH: std::time::Duration = std::time::Duration::from_secs(20);
 const SIGNIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const SIGNIN_POLLS: u32 = 300;
 const BUSY_REPAINT: std::time::Duration = std::time::Duration::from_millis(200);
@@ -1094,7 +1113,6 @@ const PROJECT_SWITCH_TO: &str = "SWITCH TO";
 const PROJECT_NEW_TITLE: &str = "+ New project";
 const PROJECT_JOIN: &str = "Join with an invite";
 const PROJECT_PEOPLE: &str = "People";
-const PROJECT_SLUG_TIP: &str = "project name used in device DNS names";
 const WORD_DEVICE: &str = "device";
 const WORD_DEVICES: &str = "devices";
 const WORD_PERSON: &str = "person";
