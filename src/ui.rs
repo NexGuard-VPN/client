@@ -1137,7 +1137,11 @@ const EXIT_STOP: &str = "Stop using";
 const COPY_DONE: &str = "Copied ✓";
 const COPY_FAILED: &str = "Copy failed";
 #[cfg(target_os = "macos")]
-const CLIPBOARD_BIN: &str = "pbcopy";
+const CLIPBOARD_COPY_BIN: &str = "/usr/bin/pbcopy";
+#[cfg(target_os = "macos")]
+const CLIPBOARD_PASTE_BIN: &str = "/usr/bin/pbpaste";
+#[cfg(target_os = "macos")]
+const CONSOLE_DEVICE: &str = "/dev/console";
 const MS_SUFFIX: &str = "ms";
 
 const EXIT_LABEL: &str = "Internet";
@@ -1421,7 +1425,50 @@ fn identity_serves(identity: &MeshIdentity, project: &Project) -> bool {
 }
 
 fn read_clipboard() -> Option<String> {
-    arboard::Clipboard::new().ok()?.get_text().ok()
+    arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut c| c.get_text().ok())
+        .filter(|t| !t.is_empty())
+        .or_else(clipboard_read_command)
+}
+
+#[cfg(target_os = "macos")]
+fn clipboard_read_command() -> Option<String> {
+    let output = console_user_command(CLIPBOARD_PASTE_BIN)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    String::from_utf8(output.stdout).ok().filter(|t| !t.is_empty())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clipboard_read_command() -> Option<String> {
+    None
+}
+
+/// The elevated process lives outside the signed-in user's bootstrap
+/// namespace, so the pasteboard server does not answer it. `launchctl asuser`
+/// runs the helper inside that namespace, as that user, which is the only way
+/// the text lands where Cmd+V will find it.
+#[cfg(target_os = "macos")]
+fn console_user_command(binary: &str) -> std::process::Command {
+    use std::os::unix::fs::MetadataExt;
+    let console_uid = std::fs::metadata(CONSOLE_DEVICE).map(|m| m.uid()).unwrap_or(0);
+    let is_root = unsafe { libc::geteuid() } == 0;
+    if !is_root || console_uid == 0 {
+        return std::process::Command::new(binary);
+    }
+    let mut cmd = std::process::Command::new("/bin/launchctl");
+    cmd.args([
+        "asuser",
+        &console_uid.to_string(),
+        "/usr/bin/sudo",
+        "-u",
+        &format!("#{}", console_uid),
+        binary,
+    ]);
+    cmd
 }
 
 #[cfg(unix)]
@@ -1561,20 +1608,20 @@ pub(crate) struct Theme {
 
 fn dark_theme() -> Theme {
     Theme {
-        bg: egui::Color32::from_rgb(19, 17, 8),
-        surface: egui::Color32::from_rgb(27, 24, 16),
-        surface_hover: egui::Color32::from_rgb(34, 30, 19),
-        border: egui::Color32::from_rgb(46, 40, 28),
-        border_active: egui::Color32::from_rgb(242, 172, 60),
-        text: egui::Color32::from_rgb(234, 227, 210),
-        text_secondary: egui::Color32::from_rgb(178, 170, 148),
-        text_muted: egui::Color32::from_rgb(154, 145, 124),
-        accent: egui::Color32::from_rgb(242, 172, 60),
-        accent_ink: egui::Color32::from_rgb(26, 18, 4),
-        success: egui::Color32::from_rgb(124, 201, 139),
-        danger: egui::Color32::from_rgb(229, 83, 75),
-        warning: egui::Color32::from_rgb(224, 177, 92),
-        input_bg: egui::Color32::from_rgb(15, 13, 6),
+        bg: egui::Color32::from_rgb(18, 18, 21),
+        surface: egui::Color32::from_rgb(28, 28, 33),
+        surface_hover: egui::Color32::from_rgb(40, 40, 46),
+        border: egui::Color32::from_rgb(58, 58, 66),
+        border_active: egui::Color32::from_rgb(245, 178, 66),
+        text: egui::Color32::from_rgb(243, 243, 246),
+        text_secondary: egui::Color32::from_rgb(204, 204, 212),
+        text_muted: egui::Color32::from_rgb(160, 160, 172),
+        accent: egui::Color32::from_rgb(245, 178, 66),
+        accent_ink: egui::Color32::from_rgb(24, 18, 6),
+        success: egui::Color32::from_rgb(112, 212, 142),
+        danger: egui::Color32::from_rgb(240, 96, 90),
+        warning: egui::Color32::from_rgb(236, 184, 92),
+        input_bg: egui::Color32::from_rgb(12, 12, 15),
     }
 }
 
@@ -1633,7 +1680,7 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 fn lbl(text: &str) -> egui::RichText {
-    egui::RichText::new(text).size(12.0).color(theme().text_muted)
+    egui::RichText::new(text).size(13.0).color(theme().text_muted)
 }
 
 fn title_text(text: &str, size: f32) -> egui::RichText {
@@ -1660,7 +1707,7 @@ fn badge(ui: &mut egui::Ui, label: &str, color: egui::Color32, tip: &str) {
         .corner_radius(cr(6))
         .inner_margin(egui::Margin::symmetric(6, 2))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new(label).size(10.0).strong().color(color));
+            ui.label(egui::RichText::new(label).size(11.0).strong().color(color));
         })
         .response
         .on_hover_text(tip);
@@ -1696,7 +1743,7 @@ fn role_badge(ui: &mut egui::Ui, role: &str) {
 fn primary_button(ui: &mut egui::Ui, label: &str, width: f32) -> egui::Response {
     let t = theme();
     ui.add(
-        egui::Button::new(egui::RichText::new(label).size(13.0).strong().color(t.accent_ink))
+        egui::Button::new(egui::RichText::new(label).size(14.0).strong().color(t.accent_ink))
             .fill(t.accent)
             .min_size(egui::vec2(width, 38.0)),
     )
@@ -1705,7 +1752,7 @@ fn primary_button(ui: &mut egui::Ui, label: &str, width: f32) -> egui::Response 
 
 fn ghost_button(ui: &mut egui::Ui, label: &str, color: egui::Color32, width: f32) -> egui::Response {
     ui.add(
-        egui::Button::new(egui::RichText::new(label).size(12.0).color(color))
+        egui::Button::new(egui::RichText::new(label).size(13.0).color(color))
             .fill(egui::Color32::TRANSPARENT)
             .stroke(egui::Stroke::new(1.0_f32, color))
             .min_size(egui::vec2(width, 30.0)),
@@ -1715,7 +1762,7 @@ fn ghost_button(ui: &mut egui::Ui, label: &str, color: egui::Color32, width: f32
 
 fn quiet_button(ui: &mut egui::Ui, label: &str, color: egui::Color32) -> egui::Response {
     ui.add(
-        egui::Button::new(egui::RichText::new(label).size(12.0).color(color))
+        egui::Button::new(egui::RichText::new(label).size(13.0).color(color))
             .fill(egui::Color32::TRANSPARENT)
             .stroke(egui::Stroke::NONE),
     )
@@ -1725,7 +1772,7 @@ fn quiet_button(ui: &mut egui::Ui, label: &str, color: egui::Color32) -> egui::R
 fn icon_button(ui: &mut egui::Ui, glyph: &str, tip: &str) -> bool {
     let t = theme();
     ui.add(
-        egui::Button::new(egui::RichText::new(glyph).size(14.0).color(t.text_muted))
+        egui::Button::new(egui::RichText::new(glyph).size(15.0).color(t.text_muted))
             .fill(egui::Color32::TRANSPARENT)
             .stroke(egui::Stroke::NONE)
             .min_size(egui::vec2(26.0, 24.0)),
@@ -1737,7 +1784,7 @@ fn icon_button(ui: &mut egui::Ui, glyph: &str, tip: &str) -> bool {
 
 fn section_header(ui: &mut egui::Ui, title: &str, trailing: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
-        ui.label(title_text(title, 13.0));
+        ui.label(title_text(title, 14.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
     });
     ui.add_space(6.0);
@@ -1748,7 +1795,7 @@ fn back_bar(ui: &mut egui::Ui, title: &str) -> bool {
     ui.add_space(4.0);
     let back = ui.horizontal(|ui| {
         let clicked = quiet_button(ui, ACTION_BACK, t.text_secondary).clicked();
-        ui.label(title_text(title, 14.0));
+        ui.label(title_text(title, 15.0));
         clicked
     });
     ui.add_space(8.0);
@@ -1761,7 +1808,7 @@ fn notice(ui: &mut egui::Ui, message: &str, action: Option<&str>) -> bool {
     ui.vertical_centered(|ui| {
         ui.add_space(24.0);
         ui.add(
-            egui::Label::new(egui::RichText::new(message).size(12.0).color(t.text_secondary))
+            egui::Label::new(egui::RichText::new(message).size(13.0).color(t.text_secondary))
                 .wrap(),
         );
         if let Some(label) = action {
@@ -1779,7 +1826,7 @@ fn centered_spinner(ui: &mut egui::Ui, message: &str) {
         ui.add_space(24.0);
         ui.spinner();
         ui.add_space(6.0);
-        ui.label(egui::RichText::new(message).size(12.0).color(t.text_muted));
+        ui.label(egui::RichText::new(message).size(13.0).color(t.text_muted));
         ui.add_space(20.0);
     });
 }
@@ -1794,7 +1841,7 @@ fn link_box(ui: &mut egui::Ui, url: &str) {
         .show(ui, |ui| {
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(url).size(11.0).monospace().color(t.text_secondary),
+                    egui::RichText::new(url).size(12.0).monospace().color(t.text_secondary),
                 )
                 .wrap()
                 .selectable(true),
@@ -1809,7 +1856,7 @@ fn copy_row(ui: &mut egui::Ui, app: &VpnApp, value: &str, action: &mut Option<Ac
         Some(false) => (COPY_FAILED, t.danger),
         None => (ACTION_COPY_LINK, t.text),
     };
-    let btn = egui::Button::new(egui::RichText::new(label).size(12.0).color(color))
+    let btn = egui::Button::new(egui::RichText::new(label).size(13.0).color(color))
         .fill(t.surface_hover)
         .min_size(egui::vec2(100.0, 28.0));
     if ui.add(btn).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -1970,6 +2017,7 @@ impl eframe::App for VpnApp {
         } else {
             IDLE_REPAINT
         };
+        take_over_copies(ctx);
         ctx.request_repaint_after(repaint);
     }
 }
@@ -1999,7 +2047,7 @@ fn caret(ui: &mut egui::Ui, color: egui::Color32, up: bool) -> bool {
 
 fn menu_item(ui: &mut egui::Ui, label: &str, color: egui::Color32) -> bool {
     ui.add(
-        egui::Button::new(egui::RichText::new(label).size(12.0).color(color))
+        egui::Button::new(egui::RichText::new(label).size(13.0).color(color))
             .fill(egui::Color32::TRANSPARENT)
             .min_size(egui::vec2(MENU_WIDTH, 26.0)),
     )
@@ -2066,7 +2114,7 @@ fn draw_sign_in(ui: &mut egui::Ui, app: &mut VpnApp) {
         draw_logo(ui, LOGO_LARGE);
         ui.add_space(8.0);
         ui.label(title_text(APP_NAME, 22.0));
-        ui.label(egui::RichText::new(version_text()).size(10.0).color(t.text_muted));
+        ui.label(egui::RichText::new(version_text()).size(11.0).color(t.text_muted));
     });
     ui.add_space(18.0);
 
@@ -2077,9 +2125,9 @@ fn draw_sign_in(ui: &mut egui::Ui, app: &mut VpnApp) {
                 ui.add_space(6.0);
                 ui.spinner();
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new(SIGNIN_WAITING).size(14.0).color(t.text));
+                ui.label(egui::RichText::new(SIGNIN_WAITING).size(15.0).color(t.text));
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new(SIGNIN_HINT).size(11.0).color(t.text_muted));
+                ui.label(egui::RichText::new(SIGNIN_HINT).size(12.0).color(t.text_muted));
                 ui.add_space(6.0);
             });
         });
@@ -2093,7 +2141,7 @@ fn draw_sign_in(ui: &mut egui::Ui, app: &mut VpnApp) {
                 ui.horizontal(|ui| {
                     copy_row(ui, app, &url, &mut action);
                     let open = egui::Button::new(
-                        egui::RichText::new(ACTION_OPEN_BROWSER).size(12.0).strong().color(t.accent_ink),
+                        egui::RichText::new(ACTION_OPEN_BROWSER).size(13.0).strong().color(t.accent_ink),
                     )
                     .fill(t.accent)
                     .min_size(egui::vec2(120.0, 28.0));
@@ -2115,13 +2163,13 @@ fn draw_sign_in(ui: &mut egui::Ui, app: &mut VpnApp) {
             ui.label(egui::RichText::new(SIGNIN_TITLE).size(16.0).strong().color(t.text));
             ui.add_space(6.0);
             ui.add(
-                egui::Label::new(egui::RichText::new(SIGNIN_BODY).size(12.0).color(t.text_muted))
+                egui::Label::new(egui::RichText::new(SIGNIN_BODY).size(13.0).color(t.text_muted))
                     .wrap(),
             );
             ui.add_space(16.0);
             if let Some(ref message) = error {
                 ui.add(
-                    egui::Label::new(egui::RichText::new(message).size(11.0).color(t.danger)).wrap(),
+                    egui::Label::new(egui::RichText::new(message).size(12.0).color(t.danger)).wrap(),
                 );
                 ui.add_space(10.0);
             }
@@ -2148,7 +2196,7 @@ fn draw_sign_in(ui: &mut egui::Ui, app: &mut VpnApp) {
             card(ui, |ui| {
                 text_field(ui, &mut app.settings_api_host, crate::api::DEFAULT_API_HOST);
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new(SIGNIN_ADVANCED_HINT).size(10.0).color(t.text_muted));
+                ui.label(egui::RichText::new(SIGNIN_ADVANCED_HINT).size(11.0).color(t.text_muted));
             });
         }
     }
@@ -2182,7 +2230,7 @@ fn draw_home(ui: &mut egui::Ui, app: &mut VpnApp, state: &ConnectionState) {
                 ui.add_space(8.0);
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(PROJECT_EMPTY_BODY).size(12.0).color(t.text_muted),
+                        egui::RichText::new(PROJECT_EMPTY_BODY).size(13.0).color(t.text_muted),
                     )
                     .wrap(),
                 );
@@ -2228,7 +2276,7 @@ fn draw_project_bar(
                 let (fill, text) =
                     if selected { (t.accent, t.accent_ink) } else { (t.surface, t.text_secondary) };
                 let chip = egui::Button::new(
-                    egui::RichText::new(&project.name).size(12.0).strong().color(text),
+                    egui::RichText::new(&project.name).size(13.0).strong().color(text),
                 )
                 .fill(fill)
                 .stroke(egui::Stroke::new(1.0_f32, if selected { t.accent } else { t.border }))
@@ -2241,7 +2289,7 @@ fn draw_project_bar(
                 }
             }
             let add = egui::Button::new(
-                egui::RichText::new(PROJECT_ADD_CHIP).size(13.0).strong().color(t.accent),
+                egui::RichText::new(PROJECT_ADD_CHIP).size(14.0).strong().color(t.accent),
             )
             .fill(t.surface)
             .stroke(egui::Stroke::new(1.0_f32, t.border))
@@ -2261,8 +2309,8 @@ fn draw_project_bar(
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         if !suffix.is_empty() {
-            ui.label(egui::RichText::new(&suffix).size(11.0).monospace().color(t.text_muted));
-            ui.label(egui::RichText::new(SEPARATOR).size(11.0).color(t.text_muted));
+            ui.label(egui::RichText::new(&suffix).size(12.0).monospace().color(t.text_muted));
+            ui.label(egui::RichText::new(SEPARATOR).size(12.0).color(t.text_muted));
         }
         // A machine we provision is an ordinary device in the network now, so
         // counting it separately would count it twice.
@@ -2273,7 +2321,7 @@ fn draw_project_bar(
                 SEPARATOR,
                 plural(current.member_count as usize, WORD_PERSON, WORD_PEOPLE)
             ))
-            .size(11.0)
+            .size(12.0)
             .color(t.text_muted),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2311,9 +2359,9 @@ fn draw_this_device(
 
     card(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(THIS_DEVICE).size(13.0).strong().color(t.text));
+            ui.label(egui::RichText::new(THIS_DEVICE).size(14.0).strong().color(t.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(status_label).size(11.0).strong().color(status_color));
+                ui.label(egui::RichText::new(status_label).size(12.0).strong().color(status_color));
                 status_dot(ui, status_filled, status_color);
                 if relay_down {
                     badge(ui, RELAY_DOWN, t.warning, RELAY_DOWN_TIP);
@@ -2341,14 +2389,14 @@ fn draw_this_device(
                 .width(ui.available_width())
                 .selected_text(
                     egui::RichText::new(exit_label(selected.as_deref(), rows))
-                        .size(12.0)
+                        .size(13.0)
                         .color(t.text),
                 )
                 .show_ui(ui, |ui| {
                     if ui
                         .selectable_label(
                             selected.is_none(),
-                            egui::RichText::new(EXIT_DIRECT).size(12.0),
+                            egui::RichText::new(EXIT_DIRECT).size(13.0),
                         )
                         .clicked()
                     {
@@ -2357,7 +2405,7 @@ fn draw_this_device(
                     for row in &candidates {
                         let picked = selected.as_deref() == Some(row.device_id.as_str());
                         if ui
-                            .selectable_label(picked, egui::RichText::new(&row.name).size(12.0))
+                            .selectable_label(picked, egui::RichText::new(&row.name).size(13.0))
                             .clicked()
                         {
                             *action = Some(Action::SelectExit(Some(row.device_id.clone())));
@@ -2402,7 +2450,7 @@ fn copyable_address(ui: &mut egui::Ui, app: &VpnApp, address: &str, action: &mut
     };
     let resp = ui
         .add(
-            egui::Button::new(egui::RichText::new(text).size(12.0).monospace().color(color))
+            egui::Button::new(egui::RichText::new(text).size(13.0).monospace().color(color))
                 .fill(t.surface_hover)
                 .stroke(egui::Stroke::new(1.0_f32, t.border))
                 .min_size(egui::vec2(0.0, 24.0)),
@@ -2425,7 +2473,7 @@ fn copy_to_clipboard(text: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 fn clipboard_command(text: &str) -> bool {
-    pipe_to(CLIPBOARD_BIN, &[], text)
+    pipe_into(console_user_command(CLIPBOARD_COPY_BIN), text)
 }
 
 #[cfg(target_os = "linux")]
@@ -2433,17 +2481,43 @@ fn clipboard_command(text: &str) -> bool {
     pipe_to("wl-copy", &[], text) || pipe_to("xclip", &["-selection", "clipboard"], text)
 }
 
+/// Selecting text and pressing Cmd+C goes through egui's own clipboard, which
+/// fails the same way as the direct call when elevated; take those copies over
+/// so every path lands in the user's pasteboard.
+fn take_over_copies(ctx: &egui::Context) {
+    let copies: Vec<String> = ctx.output_mut(|o| {
+        let mut taken = Vec::new();
+        o.commands.retain(|c| match c {
+            egui::OutputCommand::CopyText(text) => {
+                taken.push(text.clone());
+                false
+            }
+            _ => true,
+        });
+        taken
+    });
+    for text in copies {
+        copy_to_clipboard(&text);
+    }
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn clipboard_command(_text: &str) -> bool {
     false
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 fn pipe_to(binary: &str, args: &[&str], text: &str) -> bool {
+    let mut cmd = std::process::Command::new(binary);
+    cmd.args(args);
+    pipe_into(cmd, text)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn pipe_into(mut cmd: std::process::Command, text: &str) -> bool {
     use std::io::Write;
-    use std::process::{Command, Stdio};
-    let Ok(mut child) = Command::new(binary)
-        .args(args)
+    use std::process::Stdio;
+    let Ok(mut child) = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2492,7 +2566,7 @@ fn draw_devices(
                 online,
                 DEVICES_ONLINE
             ))
-            .size(11.0)
+            .size(12.0)
             .color(t.text_muted),
         );
     });
@@ -2514,12 +2588,12 @@ fn draw_devices(
             .stroke(egui::Stroke::new(1.0_f32, if row.is_self { t.border_active } else { t.border }))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&row.name).size(13.0).strong().color(t.text));
+                    ui.label(egui::RichText::new(&row.name).size(14.0).strong().color(t.text));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if !row.is_self && !row.online {
                             ui.label(
                                 egui::RichText::new(fmt_since(row.last_seen))
-                                    .size(10.0)
+                                    .size(11.0)
                                     .color(t.text_muted),
                             );
                         }
@@ -2533,7 +2607,7 @@ fn draw_devices(
                     if !details.is_empty() {
                         ui.label(
                             egui::RichText::new(format!("{}{}", SEPARATOR, details))
-                                .size(11.0)
+                                .size(12.0)
                                 .color(t.text_muted),
                         );
                     }
@@ -2549,7 +2623,7 @@ fn draw_devices(
                             (None, false) => EXIT_OFFERS.to_string(),
                         };
                         let color = if selected { t.accent } else { t.text_muted };
-                        ui.label(egui::RichText::new(line).size(11.0).color(color));
+                        ui.label(egui::RichText::new(line).size(12.0).color(color));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let label = if selected { EXIT_STOP } else { EXIT_USE };
                             if quiet_button(ui, label, t.accent).clicked() {
@@ -2574,7 +2648,7 @@ fn draw_devices(
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(plural(pending, PENDING_ONE, PENDING_MANY))
-                    .size(12.0)
+                    .size(13.0)
                     .color(t.warning),
             );
             if quiet_button(ui, PENDING_REVIEW, t.accent).clicked() {
@@ -2592,7 +2666,7 @@ fn draw_add_device(ui: &mut egui::Ui, app: &mut VpnApp) {
     }
 
     card(ui, |ui| {
-        ui.label(egui::RichText::new(ADD_OWN_LABEL).size(12.0).strong().color(t.text));
+        ui.label(egui::RichText::new(ADD_OWN_LABEL).size(13.0).strong().color(t.text));
         ui.add_space(4.0);
         ui.add(egui::Label::new(lbl(ADD_OWN_BODY)).wrap());
         ui.add_space(10.0);
@@ -2601,7 +2675,7 @@ fn draw_add_device(ui: &mut egui::Ui, app: &mut VpnApp) {
         ui.horizontal(|ui| {
             copy_row(ui, app, DOWNLOAD_URL, &mut action);
             let open = egui::Button::new(
-                egui::RichText::new(ACTION_OPEN_BROWSER).size(12.0).strong().color(t.accent_ink),
+                egui::RichText::new(ACTION_OPEN_BROWSER).size(13.0).strong().color(t.accent_ink),
             )
             .fill(t.accent)
             .min_size(egui::vec2(120.0, 28.0));
@@ -2613,7 +2687,7 @@ fn draw_add_device(ui: &mut egui::Ui, app: &mut VpnApp) {
 
     ui.add_space(10.0);
     card(ui, |ui| {
-        ui.label(egui::RichText::new(ADD_SERVER_LABEL).size(12.0).strong().color(t.text));
+        ui.label(egui::RichText::new(ADD_SERVER_LABEL).size(13.0).strong().color(t.text));
         ui.add_space(4.0);
         ui.add(egui::Label::new(lbl(ADD_SERVER_BODY)).wrap());
         ui.add_space(8.0);
@@ -2646,7 +2720,7 @@ fn draw_add_device(ui: &mut egui::Ui, app: &mut VpnApp) {
                 }
                 if let Some(error) = app.join_token.error.clone() {
                     ui.add_space(6.0);
-                    ui.add(egui::Label::new(egui::RichText::new(error).size(11.0).color(theme().danger)).wrap());
+                    ui.add(egui::Label::new(egui::RichText::new(error).size(12.0).color(theme().danger)).wrap());
                 }
             }
         }
@@ -2669,7 +2743,7 @@ fn draw_new_project(ui: &mut egui::Ui, app: &mut VpnApp) {
     let mut submit = false;
     card(ui, |ui| {
         ui.add(
-            egui::Label::new(egui::RichText::new(PROJECT_EMPTY_BODY).size(11.0).color(t.text_muted))
+            egui::Label::new(egui::RichText::new(PROJECT_EMPTY_BODY).size(12.0).color(t.text_muted))
                 .wrap(),
         );
         ui.add_space(12.0);
@@ -2685,7 +2759,7 @@ fn draw_new_project(ui: &mut egui::Ui, app: &mut VpnApp) {
         let ready = !app.project_name.trim().is_empty() && !pending;
         let label = if pending { PROJECT_CREATING } else { PROJECT_CREATE };
         let btn = egui::Button::new(
-            egui::RichText::new(label).size(13.0).strong().color(t.accent_ink),
+            egui::RichText::new(label).size(14.0).strong().color(t.accent_ink),
         )
         .fill(t.accent)
         .min_size(egui::vec2(220.0, 38.0));
@@ -2696,7 +2770,7 @@ fn draw_new_project(ui: &mut egui::Ui, app: &mut VpnApp) {
             ui.add_space(10.0);
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(explain(message, ERR_NO_MESH)).size(11.0).color(t.danger),
+                    egui::RichText::new(explain(message, ERR_NO_MESH)).size(12.0).color(t.danger),
                 )
                 .wrap(),
             );
@@ -2732,7 +2806,7 @@ fn draw_join_invite(ui: &mut egui::Ui, app: &mut VpnApp) {
         ui.horizontal(|ui| {
             let ready = !app.accept_token.trim().is_empty() && !pending;
             let btn = egui::Button::new(
-                egui::RichText::new(JOIN_ACTION).size(12.0).strong().color(t.accent_ink),
+                egui::RichText::new(JOIN_ACTION).size(13.0).strong().color(t.accent_ink),
             )
             .fill(t.accent)
             .min_size(egui::vec2(90.0, 30.0));
@@ -2752,7 +2826,7 @@ fn draw_join_invite(ui: &mut egui::Ui, app: &mut VpnApp) {
             ui.add_space(8.0);
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(explain(message, ERR_NO_MESH)).size(11.0).color(t.danger),
+                    egui::RichText::new(explain(message, ERR_NO_MESH)).size(12.0).color(t.danger),
                 )
                 .wrap(),
             );
@@ -2785,7 +2859,7 @@ fn draw_pending_approvals(ui: &mut egui::Ui, app: &VpnApp, action: &mut Option<A
         return;
     }
     card(ui, |ui| {
-        ui.label(egui::RichText::new(PENDING_SECTION).size(13.0).strong().color(t.warning));
+        ui.label(egui::RichText::new(PENDING_SECTION).size(14.0).strong().color(t.warning));
         ui.add_space(4.0);
         ui.label(lbl(PENDING_HINT));
         ui.add_space(8.0);
@@ -2793,14 +2867,14 @@ fn draw_pending_approvals(ui: &mut egui::Ui, app: &VpnApp, action: &mut Option<A
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&device.name).size(12.0).strong().color(t.text));
+                        ui.label(egui::RichText::new(&device.name).size(13.0).strong().color(t.text));
                         ui.label(
                             egui::RichText::new(device_owner_label(device, &members))
-                                .size(11.0)
+                                .size(12.0)
                                 .color(t.text_secondary),
                         );
                     });
-                    ui.label(egui::RichText::new(device_details(device)).size(10.0).color(t.text_muted));
+                    ui.label(egui::RichText::new(device_details(device)).size(11.0).color(t.text_muted));
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
                         if device.exit_node && !device.exit_node_approved {
@@ -2811,7 +2885,7 @@ fn draw_pending_approvals(ui: &mut egui::Ui, app: &VpnApp, action: &mut Option<A
                             badge(ui, PENDING_ROUTES, t.warning, PENDING_ROUTES_TIP);
                             ui.label(
                                 egui::RichText::new(routes.join(", "))
-                                    .size(10.0)
+                                    .size(11.0)
                                     .monospace()
                                     .color(t.text_muted),
                             );
@@ -2820,7 +2894,7 @@ fn draw_pending_approvals(ui: &mut egui::Ui, app: &VpnApp, action: &mut Option<A
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let btn = egui::Button::new(
-                        egui::RichText::new(PENDING_APPROVE).size(11.0).strong().color(t.accent_ink),
+                        egui::RichText::new(PENDING_APPROVE).size(12.0).strong().color(t.accent_ink),
                     )
                     .fill(t.accent)
                     .min_size(egui::vec2(80.0, 26.0));
@@ -2845,7 +2919,7 @@ fn draw_members(ui: &mut egui::Ui, app: &VpnApp, action: &mut Option<Action>) {
     let task_pending = app.team_task.loading;
 
     card(ui, |ui| {
-        ui.label(egui::RichText::new(TEAM_MEMBERS).size(13.0).strong().color(t.text));
+        ui.label(egui::RichText::new(TEAM_MEMBERS).size(14.0).strong().color(t.text));
         ui.add_space(8.0);
         if loading {
             ui.horizontal(|ui| {
@@ -2856,7 +2930,7 @@ fn draw_members(ui: &mut egui::Ui, app: &VpnApp, action: &mut Option<Action>) {
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(explain(&message, ERR_NO_MESH))
-                        .size(11.0)
+                        .size(12.0)
                         .color(t.text_secondary),
                 )
                 .wrap(),
@@ -2871,13 +2945,13 @@ fn draw_members(ui: &mut egui::Ui, app: &VpnApp, action: &mut Option<Action>) {
             for member in &members {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(&member.email).size(12.0).strong().color(t.text));
+                        ui.label(egui::RichText::new(&member.email).size(13.0).strong().color(t.text));
                         ui.label(
                             egui::RichText::new(format!(
                                 "{} · {}/{} {}",
                                 member.status, member.device_count, member.max_devices, MEMBER_DEVICES
                             ))
-                            .size(10.0)
+                            .size(11.0)
                             .color(t.text_muted),
                         );
                     });
@@ -2914,11 +2988,11 @@ fn draw_members(ui: &mut egui::Ui, app: &VpnApp, action: &mut Option<Action>) {
         }
         if let Some(message) = task_error {
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(TEAM_ACTION_FAILED).size(11.0).strong().color(t.danger));
+            ui.label(egui::RichText::new(TEAM_ACTION_FAILED).size(12.0).strong().color(t.danger));
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(explain(&message, ERR_NO_MESH))
-                        .size(11.0)
+                        .size(12.0)
                         .color(t.text_secondary),
                 )
                 .wrap(),
@@ -2935,7 +3009,7 @@ fn draw_invite_form(ui: &mut egui::Ui, app: &mut VpnApp, action: &mut Option<Act
     let pending = app.invite.loading;
 
     card(ui, |ui| {
-        ui.label(egui::RichText::new(INVITE_SECTION).size(13.0).strong().color(t.text));
+        ui.label(egui::RichText::new(INVITE_SECTION).size(14.0).strong().color(t.text));
         ui.add_space(8.0);
         text_field(ui, &mut app.invite_email, INVITE_EMAIL_HINT);
         ui.add_space(8.0);
@@ -2945,7 +3019,7 @@ fn draw_invite_form(ui: &mut egui::Ui, app: &mut VpnApp, action: &mut Option<Act
                 let selected = app.invite_role == role;
                 let btn = egui::Button::new(
                     egui::RichText::new(role)
-                        .size(11.0)
+                        .size(12.0)
                         .color(if selected { t.accent_ink } else { t.text_secondary }),
                 )
                 .fill(if selected { t.accent } else { t.surface })
@@ -2966,7 +3040,7 @@ fn draw_invite_form(ui: &mut egui::Ui, app: &mut VpnApp, action: &mut Option<Act
         ui.add_space(10.0);
         let ready = !app.invite_email.trim().is_empty() && !pending;
         let btn = egui::Button::new(
-            egui::RichText::new(INVITE_SEND).size(12.0).strong().color(t.accent_ink),
+            egui::RichText::new(INVITE_SEND).size(13.0).strong().color(t.accent_ink),
         )
         .fill(t.accent)
         .min_size(egui::vec2(130.0, 30.0));
@@ -2981,7 +3055,7 @@ fn draw_invite_form(ui: &mut egui::Ui, app: &mut VpnApp, action: &mut Option<Act
             ui.add_space(6.0);
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(explain(&message, ERR_NO_MESH)).size(11.0).color(t.danger),
+                    egui::RichText::new(explain(&message, ERR_NO_MESH)).size(12.0).color(t.danger),
                 )
                 .wrap(),
             );
@@ -2991,7 +3065,7 @@ fn draw_invite_form(ui: &mut egui::Ui, app: &mut VpnApp, action: &mut Option<Act
                 ui.add_space(10.0);
                 ui.label(
                     egui::RichText::new(format!("{} {} · {}", INVITE_SENT, invite.email, invite.role))
-                        .size(11.0)
+                        .size(12.0)
                         .color(t.success),
                 );
                 ui.add_space(6.0);
@@ -3005,7 +3079,7 @@ fn draw_invite_form(ui: &mut egui::Ui, app: &mut VpnApp, action: &mut Option<Act
                         let date = invite.expires_at.split('T').next().unwrap_or(&invite.expires_at);
                         ui.label(
                             egui::RichText::new(format!("{} {}", INVITE_EXPIRES, date))
-                                .size(11.0)
+                                .size(12.0)
                                 .color(t.text_muted),
                         );
                     }
@@ -3024,7 +3098,7 @@ fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
     }
 
     card(ui, |ui| {
-        ui.label(egui::RichText::new(SETTINGS_GENERAL).size(13.0).strong().color(t.text));
+        ui.label(egui::RichText::new(SETTINGS_GENERAL).size(14.0).strong().color(t.text));
         ui.add_space(8.0);
         if ui.checkbox(&mut app.settings_start_login, SETTINGS_START_LOGIN).changed()
             && crate::autostart::set_enabled(app.settings_start_login).is_err()
@@ -3037,13 +3111,13 @@ fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
     ui.add_space(8.0);
     let joined = app.mesh_identity.is_some();
     card(ui, |ui| {
-        ui.label(egui::RichText::new(SETTINGS_DEVICE_SECTION).size(13.0).strong().color(t.text));
+        ui.label(egui::RichText::new(SETTINGS_DEVICE_SECTION).size(14.0).strong().color(t.text));
         ui.add_space(8.0);
         ui.checkbox(&mut app.settings_magic_dns, MAGIC_DNS).on_hover_text(MAGIC_DNS_TIP);
         ui.add_space(12.0);
         if ui
             .add_enabled(joined, {
-                egui::Button::new(egui::RichText::new(LEAVE_PROJECT).size(12.0).color(t.danger))
+                egui::Button::new(egui::RichText::new(LEAVE_PROJECT).size(13.0).color(t.danger))
                     .fill(egui::Color32::TRANSPARENT)
                     .stroke(egui::Stroke::new(1.0_f32, t.danger))
                     .min_size(egui::vec2(190.0, 30.0))
@@ -3057,7 +3131,7 @@ fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
 
     ui.add_space(8.0);
     card(ui, |ui| {
-        ui.label(egui::RichText::new(SETTINGS_ADVANCED).size(13.0).strong().color(t.text));
+        ui.label(egui::RichText::new(SETTINGS_ADVANCED).size(14.0).strong().color(t.text));
         ui.add_space(8.0);
         ui.label(lbl(SETTINGS_ROUTES_LABEL));
         text_field(ui, &mut app.settings_advertise_routes, SETTINGS_ROUTES_HINT);
@@ -3065,17 +3139,17 @@ fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
         ui.label(lbl(SETTINGS_HOST_LABEL));
         text_field(ui, &mut app.settings_api_host, crate::api::DEFAULT_API_HOST);
         ui.add_space(4.0);
-        ui.label(egui::RichText::new(SIGNIN_ADVANCED_HINT).size(10.0).color(t.text_muted));
+        ui.label(egui::RichText::new(SIGNIN_ADVANCED_HINT).size(11.0).color(t.text_muted));
     });
 
     ui.add_space(8.0);
     card(ui, |ui| {
-        ui.label(egui::RichText::new(ACCOUNT_SECTION).size(13.0).strong().color(t.text));
+        ui.label(egui::RichText::new(ACCOUNT_SECTION).size(14.0).strong().color(t.text));
         ui.add_space(8.0);
         if let Some(ref email) = account {
             ui.horizontal(|ui| {
                 avatar(ui, email);
-                ui.label(egui::RichText::new(email).size(12.0).color(t.text_secondary));
+                ui.label(egui::RichText::new(email).size(13.0).color(t.text_secondary));
             });
         }
         ui.add_space(12.0);
@@ -3085,7 +3159,7 @@ fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
     });
     ui.add_space(8.0);
     ui.vertical_centered(|ui| {
-        ui.label(egui::RichText::new(version_text()).size(10.0).color(t.text_muted));
+        ui.label(egui::RichText::new(version_text()).size(11.0).color(t.text_muted));
     });
     ui.add_space(10.0);
 
@@ -3111,13 +3185,13 @@ fn draw_update_banner(ui: &mut egui::Ui, app: &mut VpnApp) {
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(format!("v{} {}", info.version, UPDATE_AVAILABLE))
-                        .size(13.0)
+                        .size(14.0)
                         .strong()
                         .color(t.text),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let btn = egui::Button::new(
-                        egui::RichText::new(UPDATE_ACTION).size(12.0).strong().color(t.accent_ink),
+                        egui::RichText::new(UPDATE_ACTION).size(13.0).strong().color(t.accent_ink),
                     )
                     .fill(t.accent)
                     .min_size(egui::vec2(80.0, 30.0));

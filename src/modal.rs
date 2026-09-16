@@ -97,11 +97,11 @@ impl Modal {
                     ModalKind::Confirm => ("●", t.warning),
                 };
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(dot).size(10.0).color(title_color));
-                    ui.label(egui::RichText::new(&self.title).size(14.0).strong().color(t.text));
+                    ui.label(egui::RichText::new(dot).size(11.0).color(title_color));
+                    ui.label(egui::RichText::new(&self.title).size(15.0).strong().color(t.text));
                 });
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new(&self.body).size(12.0).color(t.text_secondary));
+                ui.label(egui::RichText::new(&self.body).size(13.0).color(t.text_secondary));
 
                 if let Some(ref p) = self.progress {
                     let done = p.done.load(Ordering::Relaxed);
@@ -122,7 +122,7 @@ impl Modal {
                     } else {
                         "Starting download...".into()
                     };
-                    ui.label(egui::RichText::new(text).size(11.0).color(t.text_muted));
+                    ui.label(egui::RichText::new(text).size(12.0).color(t.text_muted));
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                 }
 
@@ -148,17 +148,17 @@ impl Modal {
         let size = egui::vec2(0.0, 30.0);
         match b.style {
             ButtonStyle::Primary => egui::Button::new(
-                egui::RichText::new(&b.label).size(12.0).strong().color(t.accent_ink),
+                egui::RichText::new(&b.label).size(13.0).strong().color(t.accent_ink),
             )
             .fill(t.accent)
             .min_size(size),
             ButtonStyle::Danger => egui::Button::new(
-                egui::RichText::new(&b.label).size(12.0).strong().color(t.text),
+                egui::RichText::new(&b.label).size(13.0).strong().color(t.text),
             )
             .fill(t.danger)
             .min_size(size),
             ButtonStyle::Ghost => egui::Button::new(
-                egui::RichText::new(&b.label).size(12.0).color(t.text_secondary),
+                egui::RichText::new(&b.label).size(13.0).color(t.text_secondary),
             )
             .fill(egui::Color32::TRANSPARENT)
             .stroke(egui::Stroke::new(1.0_f32, t.border))
