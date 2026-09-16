@@ -35,6 +35,24 @@ fn pick_random_sni() -> &'static str {
     SNI_POOL[crate::rng::index(SNI_POOL.len())]
 }
 
+const DECOY_SNI_SUFFIX: &str = "nexguard.sh";
+
+/// The decoy SNI hides the hosted service from DPI. A self-hosted control
+/// plane sits behind its operator's own edge, which picks the certificate (or
+/// an SNI passthrough) by the name in the ClientHello — so there the real name
+/// goes on the wire, and the certificate is still checked against it.
+pub(crate) fn sni_for(host: &str) -> String {
+    let bare = host.split(':').next().unwrap_or_default();
+    if bare.is_empty()
+        || bare.parse::<std::net::IpAddr>().is_ok()
+        || bare == DECOY_SNI_SUFFIX
+        || bare.ends_with(&format!(".{}", DECOY_SNI_SUFFIX))
+    {
+        return pick_random_sni().to_string();
+    }
+    bare.to_string()
+}
+
 #[derive(Debug)]
 struct LooseHostnameVerifier {
     inner: Arc<rustls::client::WebPkiServerVerifier>,
@@ -120,9 +138,9 @@ fn tls_config(host: &str) -> Result<rustls::ClientConfig, String> {
     )
 }
 
-/// Opens a TLS connection whose SNI names an unrelated popular host, then asks
-/// the peer to switch protocols. The certificate is still verified against the
-/// address we dialled, so the decoy SNI costs nothing in trust.
+/// Opens a TLS connection — with a decoy SNI for the hosted service, the real
+/// name for a self-hosted one (see `sni_for`) — then asks the peer to switch
+/// protocols. The certificate is always verified against the address we dialled.
 pub fn upgrade(
     host: &str,
     path: &str,
@@ -132,7 +150,7 @@ pub fn upgrade(
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = tls_config(host)?;
-    let sni = rustls::pki_types::ServerName::try_from(pick_random_sni().to_string())
+    let sni = rustls::pki_types::ServerName::try_from(sni_for(host))
         .map_err(|e| format!("sni: {}", e))?;
     let conn = rustls::ClientConnection::new(Arc::new(config), sni)
         .map_err(|e| format!("tls {}: {}", host, e))?;
@@ -183,5 +201,29 @@ fn read_handshake(tls: &mut UpgradedStream) -> Result<(), String> {
             }
             Err(e) => return Err(format!("read: {}", e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod sni_tests {
+    use super::{sni_for, SNI_POOL};
+
+    #[test]
+    fn hosted_relay_keeps_the_decoy() {
+        for host in ["tunnel.nexguard.sh:443", "nexguard.sh", "api.nexguard.sh"] {
+            assert!(SNI_POOL.contains(&sni_for(host).as_str()), "{host}");
+        }
+    }
+
+    #[test]
+    fn self_hosted_relay_sends_its_real_name() {
+        assert_eq!(sni_for("relay.aralcloud.uz:443"), "relay.aralcloud.uz");
+        assert_eq!(sni_for("relay.example.com"), "relay.example.com");
+    }
+
+    #[test]
+    fn a_bare_address_cannot_be_a_name() {
+        assert!(SNI_POOL.contains(&sni_for("203.0.113.9:443").as_str()));
+        assert!(SNI_POOL.contains(&sni_for("").as_str()));
     }
 }
