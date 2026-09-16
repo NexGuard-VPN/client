@@ -2,6 +2,10 @@
 mod api;
 pub mod cli;
 pub mod autostart;
+pub mod control;
+pub mod engine;
+pub mod protocol;
+pub mod service;
 #[cfg(feature = "gui")]
 mod modal;
 mod derp;
@@ -26,7 +30,7 @@ pub mod tun;
 #[cfg(feature = "gui")]
 mod ui;
 
-use cli::{arg_value, join_token, service_args};
+use cli::{arg_value, join_token};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -53,6 +57,8 @@ fn print_help() {
     println!("  --magic-dns               Resolve device names (changes system DNS)");
     println!("  --advertise-routes CIDRS  Comma-separated subnets to share");
     println!("  --cleanup                 Remove stale routes from a crashed session");
+    println!("  --daemon                  Wait for the app to ask for a tunnel (used by the boot service)");
+    println!("  --status                  Print what the running daemon is doing");
     println!("  --install-service         Start automatically on boot (needs root)");
     println!("  --uninstall-service       Remove the boot service");
     println!("  -v, --version             Print version and exit");
@@ -78,15 +84,23 @@ fn main() {
         std::env::consts::ARCH,
     );
 
-    if args.iter().any(|a| a == "--install-service") {
+    if args.iter().any(|a| a == service::INSTALL_FLAG) {
         if join_token(&args).is_some() {
             join_project(&args);
         }
-        install_service(&args);
+        service::install(&args);
         return;
     }
-    if args.iter().any(|a| a == "--uninstall-service") {
-        uninstall_service();
+    if args.iter().any(|a| a == service::UNINSTALL_FLAG) {
+        service::uninstall();
+        return;
+    }
+    if args.iter().any(|a| a == "--status") {
+        print_status();
+        return;
+    }
+    if args.iter().any(|a| a == cli::DAEMON_FLAG) {
+        run_daemon(None);
         return;
     }
     if args.iter().any(|a| a == "--cleanup") {
@@ -328,7 +342,6 @@ fn run_login() {
     eprintln!("[nexguard] sign-in timed out");
     std::process::exit(1);
 }
-const MESH_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn list_networks(argv: &[String]) {
     let token = arg_value(argv, "--token")
@@ -400,8 +413,6 @@ fn join_project(argv: &[String]) {
 }
 
 fn run_mesh(argv: &[String]) {
-    setup_signal_handler();
-
     let user_token = account_token(argv);
 
     let mut network_id = arg_value(argv, "--network");
@@ -426,124 +437,83 @@ fn run_mesh(argv: &[String]) {
         }
     }
 
-    let config = mesh_config(argv, user_token, network_id);
+    run_daemon(Some(mesh_config(argv, user_token, network_id)));
+}
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let status = match meshnet::connect(config, Arc::clone(&shutdown)) {
-        Ok(status) => status,
-        Err(e) => {
-            eprintln!("[nexguard] mesh: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    eprintln!(
-        "[nexguard] mesh up: {} as {} on {} ({})",
-        status.address, status.name, status.network, status.tun_name
-    );
-    if status.serving_exit {
-        eprintln!("[nexguard] serving as exit node for {}", status.network);
-    } else if status.advertising_exit {
-        eprintln!("[nexguard] exit node advertised but not active on this platform");
-    }
-
-    while !SHUTDOWN.load(Ordering::Relaxed)
-        && !status.connection_dropped.load(Ordering::Relaxed)
+/// One process shape for every unattended run: an engine, a control socket
+/// for the app or `--status`, and optionally a tunnel brought up right away.
+fn run_daemon(autoconnect: Option<meshnet::MeshConfig>) {
+    setup_signal_handler();
+    let engine = engine::Engine::new();
+    #[cfg(unix)]
     {
-        std::thread::sleep(MESH_POLL);
+        let served = Arc::clone(&engine);
+        let socket_required = autoconnect.is_none();
+        std::thread::spawn(move || {
+            if let Err(e) = control::serve(served) {
+                eprintln!("[nexguard] control socket: {}", e);
+                if socket_required {
+                    std::process::exit(1);
+                }
+            }
+        });
     }
 
-    shutdown.store(true, Ordering::Relaxed);
-    let deadline = std::time::Instant::now() + MESH_SHUTDOWN_GRACE;
-    while !status.stopped.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+    if let Some(config) = autoconnect {
+        match engine.connect(config) {
+            Ok(snapshot) => announce(&snapshot),
+            Err(e) => {
+                eprintln!("[nexguard] mesh: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        eprintln!("[nexguard] daemon ready");
+    }
+
+    let headless = autoconnect_headless();
+    while !SHUTDOWN.load(Ordering::Relaxed)
+        && !control::RESTART_REQUESTED.load(Ordering::Relaxed)
+    {
+        if headless && engine.snapshot().state != protocol::EngineState::Connected {
+            break;
+        }
         std::thread::sleep(MESH_POLL);
     }
-    if !status.stopped.load(Ordering::Relaxed) {
-        eprintln!("[nexguard] mesh cleanup did not finish in time");
-    }
+    engine.disconnect();
     eprintln!("[nexguard] mesh stopped");
 }
 
-fn install_service(args: &[String]) {
-    let exe = std::env::current_exe().expect("current exe");
-    let exe_path = exe.to_str().expect("exe path");
-    let cli_args = service_args(args);
+fn autoconnect_headless() -> bool {
+    std::env::args().any(|a| a == cli::MESH_FLAG) || join_token(&std::env::args().collect::<Vec<_>>()).is_some()
+}
 
-    #[cfg(target_os = "macos")]
-    {
-        let plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>sh.nexguard.vpn</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{}</string>{}
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/var/log/nexguard.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/nexguard.log</string>
-</dict>
-</plist>"#,
-            exe_path,
-            cli_args.iter().map(|a| format!("\n        <string>{}</string>", a)).collect::<String>()
-        );
-
-        let path = "/Library/LaunchDaemons/sh.nexguard.vpn.plist";
-        std::fs::write(path, plist).expect("write plist");
-        let _ = std::process::Command::new("launchctl").args(["unload", path]).status();
-        let _ = std::process::Command::new("launchctl").args(["load", "-w", path]).status();
-        eprintln!("[nexguard] service installed — auto-starts on boot");
-        eprintln!("[nexguard] to uninstall: sudo nexguard --uninstall-service");
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let unit = format!(r#"[Unit]
-Description=NexGuard Client
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart={} {}
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-"#, exe_path, cli_args.join(" "));
-
-        let path = "/etc/systemd/system/nexguard.service";
-        std::fs::write(path, unit).expect("write service");
-        let _ = std::process::Command::new("systemctl").args(["daemon-reload"]).status();
-        let _ = std::process::Command::new("systemctl").args(["enable", "nexguard"]).status();
-        let _ = std::process::Command::new("systemctl").args(["restart", "nexguard"]).status();
-        eprintln!("[nexguard] service installed — auto-starts on boot");
-        eprintln!("[nexguard] to uninstall: sudo nexguard --uninstall-service");
+fn announce(snapshot: &protocol::Snapshot) {
+    let Some(session) = snapshot.session.as_ref() else { return };
+    eprintln!(
+        "[nexguard] mesh up: {} as {} on {} ({})",
+        session.address, session.name, session.network, session.tun_name
+    );
+    if session.serving_exit {
+        eprintln!("[nexguard] serving as exit node for {}", session.network);
+    } else if session.advertising_exit {
+        eprintln!("[nexguard] exit node advertised but not active on this platform");
     }
 }
 
-fn uninstall_service() {
-    #[cfg(target_os = "macos")]
-    {
-        let path = "/Library/LaunchDaemons/sh.nexguard.vpn.plist";
-        let _ = std::process::Command::new("launchctl").args(["unload", "-w", path]).status();
-        let _ = std::fs::remove_file(path);
-        eprintln!("[nexguard] service removed");
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("systemctl").args(["disable", "--now", "nexguard"]).status();
-        let _ = std::fs::remove_file("/etc/systemd/system/nexguard.service");
-        let _ = std::process::Command::new("systemctl").args(["daemon-reload"]).status();
-        eprintln!("[nexguard] service removed");
+#[cfg(unix)]
+fn print_status() {
+    match control::request(&control::Request::Status) {
+        Ok(snapshot) => println!("{}", control::encode(&snapshot).unwrap_or_default()),
+        Err(e) => {
+            eprintln!("[nexguard] {}", e);
+            std::process::exit(1);
+        }
     }
 }
+
+#[cfg(not(unix))]
+fn print_status() {
+    eprintln!("[nexguard] --status needs the daemon, which this platform does not run");
+}
+

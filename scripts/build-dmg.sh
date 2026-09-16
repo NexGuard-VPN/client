@@ -18,8 +18,8 @@ rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/${BUNDLE}/Contents/MacOS"
 mkdir -p "$BUILD_DIR/${BUNDLE}/Contents/Resources"
 
-cp "$BINARY" "$BUILD_DIR/${BUNDLE}/Contents/MacOS/nexguard-bin"
-chmod +x "$BUILD_DIR/${BUNDLE}/Contents/MacOS/nexguard-bin"
+cp "$BINARY" "$BUILD_DIR/${BUNDLE}/Contents/MacOS/NexGuard"
+chmod +x "$BUILD_DIR/${BUNDLE}/Contents/MacOS/NexGuard"
 
 cat > "$BUILD_DIR/${BUNDLE}/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -41,7 +41,7 @@ PLIST
 echo "    <string>${VERSION}</string>" >> "$BUILD_DIR/${BUNDLE}/Contents/Info.plist"
 cat >> "$BUILD_DIR/${BUNDLE}/Contents/Info.plist" << 'PLIST'
     <key>CFBundleExecutable</key>
-    <string>nexguard</string>
+    <string>NexGuard</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
@@ -82,24 +82,6 @@ if command -v python3 &>/dev/null; then
     iconutil -c icns "$ICONSET" -o "$BUILD_DIR/${BUNDLE}/Contents/Resources/AppIcon.icns"
     rm -rf "$ICON_DIR"
 fi
-
-# Create helper that elevates to root
-cat > "$BUILD_DIR/${BUNDLE}/Contents/MacOS/NexGuard" << 'LAUNCHER'
-#!/bin/bash
-DIR="$(cd "$(dirname "$0")" && pwd)"
-SOCK="${HOME}/.nexguard/gui.sock"
-if [ -S "$SOCK" ] && command -v nc >/dev/null 2>&1 && printf show | nc -U -w 1 "$SOCK" >/dev/null 2>&1; then
-    exit 0
-fi
-if [ "$(id -u)" -ne 0 ]; then
-    (osascript -e "do shell script \"'$0'\" with administrator privileges" >/dev/null 2>&1 &)
-    exit 0
-fi
-exec "${DIR}/nexguard-bin"
-LAUNCHER
-chmod +x "$BUILD_DIR/${BUNDLE}/Contents/MacOS/NexGuard"
-
-sed -i '' 's|<string>nexguard</string>|<string>NexGuard</string>|' "$BUILD_DIR/${BUNDLE}/Contents/Info.plist"
 
 echo "Creating DMG..."
 mkdir -p "$BUILD_DIR/dmg-content"

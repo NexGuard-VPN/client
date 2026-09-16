@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
+use crate::protocol::{EngineState, Request, SessionView, Snapshot};
 use crate::meshapi::{MeshDeviceView, MeshIdentity, MeshMember, Project};
-use crate::meshnet::{MeshConfig, MeshPeerView, MeshStatus, PeerPath};
+use crate::meshnet::{MeshConfig, MeshPeerView, PeerPath};
 use crate::profiles::AppSettings;
 
 #[derive(Clone, PartialEq)]
@@ -118,8 +119,15 @@ struct DeviceRow {
 struct VpnApp {
     view: View,
     state: Arc<Mutex<ConnectionState>>,
-    mesh_status: Arc<Mutex<Option<MeshStatus>>>,
-    shutdown: Arc<AtomicBool>,
+    backend: Arc<Backend>,
+    snapshot: Arc<Mutex<Option<Snapshot>>>,
+    snapshot_in_flight: Arc<AtomicBool>,
+    snapshot_at: Option<std::time::Instant>,
+    mesh_status: Arc<Mutex<Option<SessionView>>>,
+    disconnecting: Arc<AtomicBool>,
+    request_in_flight: Arc<AtomicBool>,
+    helper: HelperState,
+    helper_task: Remote<()>,
     connect_trigger: Arc<AtomicBool>,
     tray: Option<crate::tray::NexTray>,
     update_info: Arc<Mutex<Option<crate::api::UpdateInfo>>>,
@@ -189,8 +197,15 @@ impl Default for VpnApp {
         Self {
             view: if signed_in { View::Home } else { View::SignIn },
             state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
+            backend: Arc::new(Backend::new()),
+            snapshot: Arc::new(Mutex::new(None)),
+            snapshot_in_flight: Arc::new(AtomicBool::new(false)),
+            snapshot_at: None,
             mesh_status: Arc::new(Mutex::new(None)),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            disconnecting: Arc::new(AtomicBool::new(false)),
+            request_in_flight: Arc::new(AtomicBool::new(false)),
+            helper: HelperState::Unknown,
+            helper_task: Remote::new(),
             connect_trigger: Arc::new(AtomicBool::new(false)),
             tray: None,
             update_info,
@@ -226,7 +241,7 @@ impl Default for VpnApp {
             invite_role: ROLE_MEMBER.to_string(),
             invite_devices: DEFAULT_INVITE_DEVICES,
             accept_token: String::new(),
-            mesh_identity: crate::meshapi::load_identity(),
+            mesh_identity: None,
             mesh_device_name: crate::generate_client_name(),
             mesh_exit_node: optional(&settings.mesh_exit_node),
             mesh_network_id: optional(&settings.mesh_network_id),
@@ -265,14 +280,18 @@ impl VpnApp {
             return;
         }
         if self.identity_is_foreign() {
-            crate::meshapi::clear_identity();
             self.mesh_identity = None;
+            self.backend.fire(Request::ClearIdentity);
         }
-        self.shutdown = Arc::new(AtomicBool::new(false));
+        if self.request_in_flight.load(Ordering::Relaxed) {
+            return;
+        }
+        self.disconnecting.store(false, Ordering::Relaxed);
         *self.state.lock().unwrap() = ConnectionState::Connecting;
         self.exit_geo.reset();
         self.exit_geo_at = None;
         let config = MeshConfig {
+            user_token: account_token(),
             network_id: self.mesh_network_id.clone(),
             project_id: self.project_id.clone(),
             device_name: self.mesh_device_name.clone(),
@@ -283,14 +302,19 @@ impl VpnApp {
             ..MeshConfig::default()
         };
         let state = Arc::clone(&self.state);
-        let slot = Arc::clone(&self.mesh_status);
-        let shutdown = Arc::clone(&self.shutdown);
-        std::thread::spawn(move || match crate::meshnet::connect(config, shutdown) {
-            Ok(status) => {
-                *slot.lock().unwrap() = Some(status);
-                *state.lock().unwrap() = ConnectionState::Connected;
+        let snapshot = Arc::clone(&self.snapshot);
+        let backend = Arc::clone(&self.backend);
+        let in_flight = Arc::clone(&self.request_in_flight);
+        in_flight.store(true, Ordering::Relaxed);
+        std::thread::spawn(move || {
+            match backend.request(Request::Connect { config }) {
+                Ok(snap) => {
+                    *snapshot.lock().unwrap() = Some(snap);
+                    *state.lock().unwrap() = ConnectionState::Connected;
+                }
+                Err(e) => *state.lock().unwrap() = ConnectionState::Error(e),
             }
-            Err(e) => *state.lock().unwrap() = ConnectionState::Error(e),
+            in_flight.store(false, Ordering::Relaxed);
         });
     }
 
@@ -311,25 +335,143 @@ impl VpnApp {
     }
 
     fn disconnect(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.disconnecting.store(true, Ordering::Relaxed);
         self.exit_geo.reset();
         self.exit_geo_at = None;
-        let mesh_slot = Arc::clone(&self.mesh_status);
         let state = Arc::clone(&self.state);
+        let snapshot = Arc::clone(&self.snapshot);
+        let backend = Arc::clone(&self.backend);
+        let in_flight = Arc::clone(&self.request_in_flight);
         *self.state.lock().unwrap() = ConnectionState::Connecting;
+        in_flight.store(true, Ordering::Relaxed);
         std::thread::spawn(move || {
-            std::thread::sleep(DISCONNECT_SETTLE);
-            if let Some(mesh) = mesh_slot.lock().unwrap().take() {
-                if mesh.exit_node.is_some() {
-                    crate::route::emergency_cleanup(&mesh.tun_name);
-                }
+            if let Ok(snap) = backend.request(Request::Disconnect) {
+                *snapshot.lock().unwrap() = Some(snap);
             }
             *state.lock().unwrap() = ConnectionState::Disconnected;
+            in_flight.store(false, Ordering::Relaxed);
         });
     }
 
+    /// Mirrors what the daemon reports, unless a request of ours is still in
+    /// flight and already knows where things are heading.
+    fn adopt_snapshot(&mut self, snap: Snapshot) {
+        *self.mesh_status.lock().unwrap() = snap.session.clone();
+        if snap.identity.is_some() || self.mesh_identity.is_some() {
+            self.mesh_identity = snap.identity.clone();
+        }
+        if self.request_in_flight.load(Ordering::Relaxed) {
+            return;
+        }
+        let current = self.state.lock().unwrap().clone();
+        match snap.state {
+            EngineState::Connected => {
+                if !matches!(current, ConnectionState::Connected) {
+                    *self.state.lock().unwrap() = ConnectionState::Connected;
+                }
+            }
+            EngineState::Dropped => self.handle_drop(),
+            EngineState::Connecting => {}
+            EngineState::Idle | EngineState::Failed { .. } => {
+                if matches!(current, ConnectionState::Connected | ConnectionState::Connecting) {
+                    *self.state.lock().unwrap() = ConnectionState::Disconnected;
+                }
+            }
+        }
+    }
+
+    fn poll_snapshot(&mut self) {
+        let pending = self.snapshot.lock().unwrap().take();
+        if let Some(snap) = pending {
+            self.adopt_snapshot(snap);
+        }
+        let due = self.snapshot_at.map_or(true, |t| t.elapsed() >= SNAPSHOT_INTERVAL);
+        if !due || self.snapshot_in_flight.load(Ordering::Relaxed) || self.helper != HelperState::Ready {
+            return;
+        }
+        self.snapshot_at = Some(std::time::Instant::now());
+        self.snapshot_in_flight.store(true, Ordering::Relaxed);
+        let slot = Arc::clone(&self.snapshot);
+        let backend = Arc::clone(&self.backend);
+        let in_flight = Arc::clone(&self.snapshot_in_flight);
+        std::thread::spawn(move || {
+            if let Ok(snap) = backend.request(Request::Status) {
+                *slot.lock().unwrap() = Some(snap);
+            }
+            in_flight.store(false, Ordering::Relaxed);
+        });
+    }
+
+    /// The app cannot open a tunnel itself; it needs the daemon, installed
+    /// once with administrator rights. Until it answers, nothing else runs.
+    fn check_helper(&mut self) {
+        use crate::modal::{ButtonStyle, Modal, ModalAction, ModalButton};
+        match self.helper {
+            HelperState::Ready => return,
+            HelperState::Installing => {
+                self.helper_task.poll();
+                if self.helper_task.loading {
+                    return;
+                }
+                if let Some(err) = self.helper_task.error.take() {
+                    self.helper = HelperState::Missing;
+                    self.modal = Some(Modal::error(
+                        HELPER_TITLE,
+                        &explain(&err, HELPER_INSTALL_FAILED),
+                        vec![
+                            ModalButton::new(ACTION_DISMISS, ButtonStyle::Ghost, ModalAction::Dismiss),
+                            ModalButton::new(HELPER_INSTALL, ButtonStyle::Primary, ModalAction::InstallHelper),
+                        ],
+                    ));
+                    return;
+                }
+                self.helper = HelperState::Unknown;
+            }
+            _ => {}
+        }
+        match self.backend.request(Request::Status) {
+            Ok(snap) => {
+                if snap.version != env!("CARGO_PKG_VERSION") {
+                    if let HelperState::Restarting(since) = self.helper {
+                        if since.elapsed() < HELPER_RESTART_GRACE {
+                            return;
+                        }
+                    }
+                    self.backend.fire(Request::Restart);
+                    self.helper = HelperState::Restarting(std::time::Instant::now());
+                    return;
+                }
+                self.helper = HelperState::Ready;
+                self.adopt_snapshot(snap);
+                if self.modal.as_ref().is_some_and(|m| m.title == HELPER_TITLE) {
+                    self.modal = None;
+                }
+                if self.signed_in && self.mesh_identity.is_some() && self.auto_reconnect {
+                    self.connect();
+                }
+            }
+            Err(_) if matches!(self.helper, HelperState::Restarting(since) if since.elapsed() < HELPER_RESTART_GRACE) => {}
+            Err(_) if matches!(self.helper, HelperState::Unknown | HelperState::Restarting(_)) => {
+                self.helper = HelperState::Missing;
+                self.modal = Some(Modal::confirm(
+                    HELPER_TITLE,
+                    HELPER_BODY,
+                    vec![ModalButton::new(HELPER_INSTALL, ButtonStyle::Primary, ModalAction::InstallHelper)],
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+
+    fn install_helper(&mut self) {
+        self.modal = None;
+        self.helper = HelperState::Installing;
+        self.helper_task.reset();
+        self.helper_task.start(Backend::install);
+    }
+
     fn handle_drop(&mut self) {
-        if self.auto_reconnect && !self.shutdown.load(Ordering::Relaxed) {
+        if self.auto_reconnect && !self.disconnecting.load(Ordering::Relaxed) {
             *self.state.lock().unwrap() = ConnectionState::Connecting;
             self.connect();
         } else {
@@ -359,14 +501,9 @@ impl VpnApp {
     }
 
     fn publish_exit_advertisement(&self, enabled: bool) {
-        let Some(identity) = self.mesh_identity.clone() else { return };
-        std::thread::spawn(move || {
-            let patch = crate::meshapi::DevicePatch {
-                exit_node: Some(enabled),
-                ..crate::meshapi::DevicePatch::default()
-            };
-            let _ = crate::meshapi::update_device(&identity.token, &identity.device_id, &patch);
-        });
+        if self.mesh_identity.is_some() {
+            self.backend.fire(Request::AdvertiseExit { enabled });
+        }
     }
 
     fn project_list(&self) -> &[Project] {
@@ -422,7 +559,7 @@ impl VpnApp {
             .lock()
             .unwrap()
             .as_ref()
-            .map(|status| status.peers.lock().map(|p| p.clone()).unwrap_or_default())
+            .map(|status| status.peers.clone())
             .unwrap_or_default();
         let self_id = self.self_device_id().unwrap_or_default();
         let network = self.project_network().unwrap_or_default().to_string();
@@ -587,7 +724,7 @@ impl VpnApp {
 
     fn adopt_invite(&mut self, accepted: crate::meshapi::AcceptedInvite) {
         self.accept_token.clear();
-        crate::meshapi::clear_identity();
+        self.backend.fire(Request::ClearIdentity);
         self.mesh_identity = None;
         self.mesh_network_id = optional(&accepted.network.id);
         if let Some(project_id) = optional(&accepted.project_id) {
@@ -674,13 +811,8 @@ impl VpnApp {
         self.share_internet = false;
         self.persist_settings();
         self.devices.reset();
-        let identity = self.mesh_identity.take();
-        std::thread::spawn(move || {
-            if let Some(identity) = identity {
-                let _ = crate::meshapi::leave(&identity.token, &identity.device_id);
-            }
-            crate::meshapi::clear_identity();
-        });
+        self.mesh_identity = None;
+        self.backend.fire(Request::Leave);
     }
 
     fn refresh_account(&mut self) {
@@ -776,11 +908,9 @@ impl VpnApp {
             return;
         }
         self.quit_cleanup_done = true;
-        self.shutdown.store(true, Ordering::Relaxed);
-        if let Some(mesh) = self.mesh_status.lock().unwrap().take() {
-            if mesh.exit_node.is_some() {
-                crate::route::emergency_cleanup(&mesh.tun_name);
-            }
+        self.disconnecting.store(true, Ordering::Relaxed);
+        if self.mesh_status.lock().unwrap().take().is_some() {
+            let _ = self.backend.request(Request::Disconnect);
         }
         #[cfg(unix)]
         if let Some(dir) = crate::profiles::config_dir() {
@@ -830,12 +960,20 @@ impl VpnApp {
         let done = Arc::clone(&self.dl_progress.done);
         let total = Arc::clone(&self.dl_progress.total);
         let cancel = Arc::clone(&self.update_cancel);
+        let backend = Arc::clone(&self.backend);
         std::thread::spawn(move || {
             let progress = move |d: u64, t: u64| {
                 done.store(d, Ordering::Relaxed);
                 total.store(t, Ordering::Relaxed);
             };
-            let r = crate::api::self_update(&url, &progress, &cancel);
+            let r = crate::api::fetch_update(&url, &progress, &cancel).and_then(|files| {
+                backend
+                    .request(Request::ApplyUpdate {
+                        binary: files.binary.to_string_lossy().into_owned(),
+                        signature: files.signature.to_string_lossy().into_owned(),
+                    })
+                    .map(|_| ())
+            });
             *result.lock().unwrap() = Some(r);
             updating.store(false, Ordering::Relaxed);
         });
@@ -896,11 +1034,11 @@ impl VpnApp {
                 self.modal = None;
             }
             RestartApp => {
-                if self.busy() {
-                    self.disconnect();
-                }
+                self.quit_cleanup();
+                let _ = self.backend.request(Request::Restart);
                 crate::api::restart_self();
             }
+            InstallHelper => self.install_helper(),
             LeaveMesh => {
                 self.modal = None;
                 self.leave_project();
@@ -1050,7 +1188,71 @@ const TRANSPORT_PREFIXES: [&str; 6] =
     ["resolve ", "connect ", "tls ", "send:", "read:", "invalid host "];
 
 const UPDATE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4 * 3600);
-const DISCONNECT_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+const SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
+const HELPER_TITLE: &str = "One-time setup";
+const HELPER_BODY: &str = "NexGuard needs a small background service to open tunnels. Installing it asks for your administrator password once; the app itself never runs as administrator.";
+const HELPER_INSTALL: &str = "Install";
+const HELPER_INSTALL_FAILED: &str = "The background service could not be installed.";
+
+const HELPER_RESTART_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Clone, Copy, PartialEq)]
+enum HelperState {
+    Unknown,
+    Missing,
+    Installing,
+    Restarting(std::time::Instant),
+    Ready,
+}
+
+/// Where tunnel requests go. On a desktop with a daemon that is a socket; on a
+/// platform without one, the same engine runs inside this process.
+enum Backend {
+    #[cfg(unix)]
+    Daemon,
+    #[cfg(not(unix))]
+    Local(Arc<crate::engine::Engine>),
+}
+
+impl Backend {
+    fn new() -> Self {
+        #[cfg(unix)]
+        {
+            Backend::Daemon
+        }
+        #[cfg(not(unix))]
+        {
+            Backend::Local(crate::engine::Engine::new())
+        }
+    }
+
+    fn request(&self, request: Request) -> Result<Snapshot, String> {
+        match self {
+            #[cfg(unix)]
+            Backend::Daemon => crate::control::request(&request),
+            #[cfg(not(unix))]
+            Backend::Local(engine) => crate::control::dispatch(engine, request).into_result(),
+        }
+    }
+
+    fn fire(self: &Arc<Self>, request: Request) {
+        let backend = Arc::clone(self);
+        std::thread::spawn(move || {
+            let _ = backend.request(request);
+        });
+    }
+
+    fn install() -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            crate::service::install_elevated()
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
+    }
+}
 const COPY_FEEDBACK: std::time::Duration = std::time::Duration::from_secs(2);
 /// The exit route is not in place the instant the session reports Connected, so
 /// asking where we appear from too early answers with this machine's own
@@ -1574,9 +1776,6 @@ pub fn run_gui() {
                 connect_trigger: Arc::clone(&app.connect_trigger),
             });
 
-            if app.signed_in && app.mesh_identity.is_some() && app.auto_reconnect {
-                app.connect();
-            }
             Ok(Box::new(app))
         }),
     )
@@ -1920,14 +2119,9 @@ impl eframe::App for VpnApp {
             self.view = View::Home;
         }
 
+        self.check_helper();
+        self.poll_snapshot();
         let state = self.state.lock().unwrap().clone();
-        let mesh_status = self.mesh_status.lock().unwrap().clone();
-        if mesh_status.is_some()
-            && self.mesh_identity.is_none()
-            && matches!(state, ConnectionState::Connected)
-        {
-            self.mesh_identity = crate::meshapi::load_identity();
-        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -2000,13 +2194,6 @@ impl eframe::App for VpnApp {
             if now_connected && grace_over && self.auto_reconnect {
                 self.reconnect_pending = true;
                 self.disconnect();
-            }
-        }
-
-        if let Some(ref st) = mesh_status {
-            if st.connection_dropped.swap(false, Ordering::Relaxed) {
-                let _ = self.mesh_status.lock().unwrap().take();
-                self.handle_drop();
             }
         }
 
@@ -2342,10 +2529,8 @@ fn draw_this_device(
 ) {
     let t = theme();
     let mesh = app.mesh_status.lock().unwrap().clone();
-    let disconnecting = app.shutdown.load(Ordering::Relaxed);
-    let relay_down = mesh
-        .as_ref()
-        .is_some_and(|status| !status.relay_connected.load(Ordering::Relaxed));
+    let disconnecting = app.disconnecting.load(Ordering::Relaxed);
+    let relay_down = mesh.as_ref().is_some_and(|status| !status.relay_connected);
     let (status_label, status_color, status_filled) = match state {
         ConnectionState::Connected => (STATUS_CONNECTED, t.success, true),
         ConnectionState::Connecting if disconnecting => (STATUS_DISCONNECTING, t.warning, false),

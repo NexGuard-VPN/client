@@ -642,3 +642,54 @@ fn joining_with_a_token_always_enrolls_afresh() {
     assert!(!saved_identity().covers("pk", None, true));
     assert!(!saved_identity().covers("pk", Some("n-1"), true));
 }
+
+#[test]
+fn service_without_a_tunnel_of_its_own_is_the_idle_daemon() {
+    assert_eq!(cli::service_args(&argv(&["--install-service"])), vec!["--daemon"]);
+    assert_eq!(cli::service_args(&argv(&["--install-service", "--share-internet"])), vec!["--daemon"]);
+    assert_eq!(
+        cli::service_args(&argv(&["--mesh", "--install-service", "--share-internet"])),
+        vec!["--mesh", "--share-internet"]
+    );
+}
+
+#[path = "../src/protocol.rs"]
+mod protocol;
+
+#[test]
+fn control_requests_round_trip_as_tagged_json() {
+    let config = meshtypes::MeshConfig { device_name: "box".into(), ..Default::default() };
+    let request = protocol::Request::Connect { config };
+    let line = protocol::encode(&request).unwrap();
+    assert!(line.starts_with(r#"{"cmd":"connect""#), "{}", line);
+    assert_eq!(protocol::decode::<protocol::Request>(&line).unwrap(), request);
+    assert_eq!(
+        protocol::decode::<protocol::Request>(r#"{"cmd":"advertise_exit","enabled":true}"#).unwrap(),
+        protocol::Request::AdvertiseExit { enabled: true }
+    );
+    assert!(protocol::decode::<protocol::Request>(r#"{"cmd":"format_disk"}"#).is_err());
+}
+
+#[test]
+fn a_failed_reply_carries_its_error_and_a_good_one_its_snapshot() {
+    let err = protocol::Response::from(Err("no tun".into()));
+    assert_eq!(err.into_result().unwrap_err(), "no tun");
+    let snapshot = protocol::Snapshot {
+        version: "1.0.0".into(),
+        state: protocol::EngineState::Connected,
+        session: None,
+        identity: None,
+    };
+    let line = protocol::encode(&protocol::Response::from(Ok(snapshot))).unwrap();
+    let back: protocol::Response = protocol::decode(&line).unwrap();
+    assert!(back.into_result().unwrap().connected());
+    let state: protocol::EngineState = protocol::decode(r#"{"state":"failed","message":"x"}"#).unwrap();
+    assert_eq!(state, protocol::EngineState::Failed { message: "x".into() });
+}
+
+#[test]
+fn slow_requests_get_a_longer_deadline_than_status_polls() {
+    let status = protocol::Request::Status.timeout();
+    let connect = protocol::Request::Connect { config: Default::default() }.timeout();
+    assert!(connect > status);
+}

@@ -281,27 +281,69 @@ fn verify_signature(binary: &[u8], signature: &[u8]) -> Result<(), String> {
     pk.verify(binary, &sig).map_err(|e| format!("signature verification failed: {}", e))
 }
 
-pub fn download_update(
+const UPDATE_BINARY_FILE: &str = "update.bin";
+const UPDATE_SIGNATURE_FILE: &str = "update.sig";
+
+pub struct UpdateFiles {
+    pub binary: std::path::PathBuf,
+    pub signature: std::path::PathBuf,
+}
+
+fn decode_signature(raw: Vec<u8>) -> Result<Vec<u8>, String> {
+    let text = std::str::from_utf8(&raw).unwrap_or("").trim();
+    if text.len() == 128 {
+        hex::decode(text).map_err(|e| format!("bad signature hex: {}", e))
+    } else {
+        Ok(raw)
+    }
+}
+
+/// Downloads a release and its signature, verifies them, and leaves both on
+/// disk for whoever is allowed to replace the running binary.
+pub fn fetch_update(
     url: &str,
     progress: &dyn Fn(u64, u64),
     cancel: &std::sync::atomic::AtomicBool,
-) -> Result<Vec<u8>, String> {
+) -> Result<UpdateFiles, String> {
     let (host, path) = parse_url(url)?;
     let body = download_tls(&host, &path, Some(progress), Some(cancel))?;
     if body.len() < 1000 || body.starts_with(b"<html") || body.starts_with(b"<!DOCTYPE") {
         return Err("download returned HTML, not a binary".into());
     }
     let sig_path = format!("{}.sig", path);
-    let sig_raw = download_tls(&host, &sig_path, None, None)
-        .map_err(|e| format!("missing signature {}: {}", sig_path, e))?;
-    let sig_text = std::str::from_utf8(&sig_raw).unwrap_or("").trim();
-    let sig_bytes = if sig_text.len() == 128 {
-        hex::decode(sig_text).map_err(|e| format!("bad signature hex: {}", e))?
-    } else {
-        sig_raw
+    let signature = download_tls(&host, &sig_path, None, None)
+        .map_err(|e| format!("missing signature {}: {}", sig_path, e))
+        .and_then(decode_signature)?;
+    verify_signature(&body, &signature)?;
+    let dir = crate::dirs_next().ok_or("no config dir")?;
+    let files = UpdateFiles {
+        binary: dir.join(UPDATE_BINARY_FILE),
+        signature: dir.join(UPDATE_SIGNATURE_FILE),
     };
-    verify_signature(&body, &sig_bytes)?;
-    Ok(body)
+    std::fs::write(&files.binary, &body).map_err(|e| format!("write update: {}", e))?;
+    std::fs::write(&files.signature, &signature).map_err(|e| format!("write signature: {}", e))?;
+    Ok(files)
+}
+
+/// Verifies again before touching anything: the request may come from a less
+/// privileged process, and the signature is what makes the swap safe.
+pub fn apply_update(binary: &std::path::Path, signature: &std::path::Path) -> Result<(), String> {
+    let body = std::fs::read(binary).map_err(|e| format!("read update: {}", e))?;
+    let signature = std::fs::read(signature)
+        .map_err(|e| format!("read signature: {}", e))
+        .and_then(decode_signature)?;
+    verify_signature(&body, &signature)?;
+    let exe = std::env::current_exe().map_err(|e| format!("current exe: {}", e))?;
+    let tmp = exe.with_extension("update");
+    std::fs::write(&tmp, &body).map_err(|e| format!("write tmp: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+    }
+    std::fs::rename(&tmp, &exe).map_err(|e| format!("replace: {}", e))?;
+    let _ = std::fs::remove_file(binary);
+    Ok(())
 }
 
 fn download_tls(
@@ -347,34 +389,30 @@ fn download_tls(
     Ok(body)
 }
 
-pub fn self_update(
-    url: &str,
-    progress: &dyn Fn(u64, u64),
-    cancel: &std::sync::atomic::AtomicBool,
-) -> Result<(), String> {
-    let binary = download_update(url, progress, cancel)?;
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("current exe: {}", e))?;
+const MACOS_BUNDLE_SUFFIX: &str = ".app/Contents/MacOS/";
 
-    let tmp = exe.with_extension("update");
-    std::fs::write(&tmp, &binary)
-        .map_err(|e| format!("write tmp: {}", e))?;
+/// A bundled app must come back through LaunchServices, or the Dock ends up
+/// pointing at a process that no longer exists.
+#[cfg(target_os = "macos")]
+fn relaunch_bundle(exe: &std::path::Path) -> bool {
+    let path = exe.to_string_lossy();
+    let Some(idx) = path.find(MACOS_BUNDLE_SUFFIX) else { return false };
+    let bundle = &path[..idx + ".app".len()];
+    std::process::Command::new("open").args(["-n", bundle]).spawn().is_ok()
+}
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
-    }
-
-    std::fs::rename(&tmp, &exe)
-        .map_err(|e| format!("replace: {}", e))?;
-    Ok(())
+#[cfg(not(target_os = "macos"))]
+fn relaunch_bundle(_exe: &std::path::Path) -> bool {
+    false
 }
 
 pub fn restart_self() -> ! {
     let exe = std::env::current_exe().expect("current exe");
     let args: Vec<String> = std::env::args().collect();
     eprintln!("[nexguard] restarting...");
+    if relaunch_bundle(&exe) {
+        std::process::exit(0);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

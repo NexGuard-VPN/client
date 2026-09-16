@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder, TrayIcon};
 
-use crate::meshnet::{MeshStatus, PeerPath};
+use crate::protocol::SessionView;
+use crate::meshnet::PeerPath;
 
 const ICON_SIZE: u32 = 22;
 const TITLE_IDLE: &str = "NexGuard — Not connected";
@@ -27,7 +28,7 @@ pub struct NexTray {
     icon_on: Icon,
     icon_off: Icon,
     was_connected: bool,
-    mesh_status: Arc<Mutex<Option<MeshStatus>>>,
+    mesh_status: Arc<Mutex<Option<SessionView>>>,
     connect_trigger: Arc<AtomicBool>,
     pub quit_requested: bool,
     pub disconnect_requested: bool,
@@ -35,7 +36,7 @@ pub struct NexTray {
 }
 
 pub struct TrayChannels {
-    pub mesh_status: Arc<Mutex<Option<MeshStatus>>>,
+    pub mesh_status: Arc<Mutex<Option<SessionView>>>,
     pub connect_trigger: Arc<AtomicBool>,
 }
 
@@ -147,17 +148,13 @@ impl NexTray {
                 connected: false,
             };
         };
-        let peers = status.peers.lock().map(|p| p.clone()).unwrap_or_default();
-        let direct = peers.iter().filter(|p| p.path == PeerPath::Direct).count();
-        let online = peers.iter().filter(|p| p.path != PeerPath::Offline).count();
+        let direct = status.peers.iter().filter(|p| p.path == PeerPath::Direct).count();
+        let online = status.peers.iter().filter(|p| p.path != PeerPath::Offline).count();
         TrayView {
             title: TITLE_CONNECTED,
             toggle: ACTION_DISCONNECT,
             ip: format!("IP: {}", status.address),
-            traffic: traffic_text(
-                status.tx.load(Ordering::Relaxed),
-                status.rx.load(Ordering::Relaxed),
-            ),
+            traffic: traffic_text(status.tx, status.rx),
             devices: format!("Devices: {} online, {} direct", online, direct),
             connected: true,
         }

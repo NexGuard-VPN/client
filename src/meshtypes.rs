@@ -1,4 +1,7 @@
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub const DEFAULT_MTU: usize = 1280;
+pub const DEFAULT_MESH_PORT: u16 = 51821;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MeshNetwork {
     #[serde(default)]
     pub id: String,
@@ -12,7 +15,7 @@ pub struct MeshNetwork {
     pub disco_secret: String,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MeshIdentity {
     #[serde(default)]
     pub device_id: String,
@@ -259,3 +262,61 @@ impl Default for MeshNetwork {
         }
     }
 }
+
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct MeshConfig {
+    pub user_token: String,
+    pub join_token: Option<String>,
+    pub network_id: Option<String>,
+    pub project_id: Option<String>,
+    pub device_name: String,
+    pub mtu: usize,
+    pub mesh_port: u16,
+    pub exit_node: Option<String>,
+    pub advertise_exit_node: bool,
+    pub advertise_routes: Vec<String>,
+    pub dns_upstream: String,
+    pub manage_dns: bool,
+}
+
+impl Default for MeshConfig {
+    fn default() -> Self {
+        Self {
+            user_token: String::new(),
+            join_token: None,
+            network_id: None,
+            project_id: None,
+            device_name: String::new(),
+            mtu: DEFAULT_MTU,
+            mesh_port: DEFAULT_MESH_PORT,
+            exit_node: None,
+            advertise_exit_node: false,
+            advertise_routes: Vec::new(),
+            dns_upstream: String::new(),
+            manage_dns: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerPath {
+    Offline,
+    Relay,
+    Direct,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct MeshPeerView {
+    pub device_id: String,
+    pub name: String,
+    pub ip: String,
+    pub path: PeerPath,
+    pub rtt_ms: Option<u32>,
+    pub exit_node: bool,
+    pub online: bool,
+    pub tx: u64,
+    pub rx: u64,
+}
+

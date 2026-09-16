@@ -9,11 +9,11 @@ use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 
 use crate::meshapi::{self, MeshIdentity, MeshPeer, NetMap};
+pub use crate::meshtypes::{MeshConfig, MeshPeerView, PeerPath};
 use crate::allowed::{self, Cidr};
 use crate::{derp, disco, dns, exitnode, route, stun, tun};
 
-pub const DEFAULT_MESH_PORT: u16 = 51821;
-const BATCH: usize = 64;
+pub const BATCH: usize = 64;
 const IDLE_SLEEP: Duration = Duration::from_micros(50);
 const TIMER_TICK: Duration = Duration::from_millis(250);
 const DISCO_PING_FAST: Duration = Duration::from_secs(2);
@@ -26,67 +26,12 @@ const PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
 const KEEPALIVE_SECS: u16 = 25;
 const MAX_PACKET: usize = 65535;
 const WG_OVERHEAD: usize = 148;
-const DEFAULT_MTU: usize = 1280;
 const IPV4_HEADER_MIN: usize = 20;
 const IPV4_DST_OFFSET: usize = 16;
 const PROBE_TARGET: &str = "8.8.8.8:53";
 const ENDPOINT_QUEUE: usize = 4;
 
 static PEER_INDEX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-
-pub struct MeshConfig {
-    pub user_token: String,
-    pub join_token: Option<String>,
-    pub network_id: Option<String>,
-    pub project_id: Option<String>,
-    pub device_name: String,
-    pub mtu: usize,
-    pub mesh_port: u16,
-    pub exit_node: Option<String>,
-    pub advertise_exit_node: bool,
-    pub advertise_routes: Vec<String>,
-    pub dns_upstream: String,
-    pub manage_dns: bool,
-}
-
-impl Default for MeshConfig {
-    fn default() -> Self {
-        Self {
-            user_token: String::new(),
-            join_token: None,
-            network_id: None,
-            project_id: None,
-            device_name: String::new(),
-            mtu: DEFAULT_MTU,
-            mesh_port: DEFAULT_MESH_PORT,
-            exit_node: None,
-            advertise_exit_node: false,
-            advertise_routes: Vec::new(),
-            dns_upstream: String::new(),
-            manage_dns: false,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum PeerPath {
-    Offline,
-    Relay,
-    Direct,
-}
-
-#[derive(Clone)]
-pub struct MeshPeerView {
-    pub device_id: String,
-    pub name: String,
-    pub ip: String,
-    pub path: PeerPath,
-    pub rtt_ms: Option<u32>,
-    pub exit_node: bool,
-    pub online: bool,
-    pub tx: u64,
-    pub rx: u64,
-}
 
 #[derive(Clone)]
 pub struct MeshStatus {

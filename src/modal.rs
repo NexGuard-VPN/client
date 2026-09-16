@@ -18,6 +18,7 @@ pub enum ModalAction {
     StartUpdate(String),
     CancelUpdate,
     RestartApp,
+    InstallHelper,
     LeaveMesh,
     RevokeMember(String),
     SignOut,

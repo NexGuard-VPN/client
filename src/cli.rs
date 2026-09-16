@@ -1,6 +1,7 @@
 pub const JOIN_COMMAND: &str = "join";
 pub const JOIN_TOKEN_FLAG: &str = "--join-token";
 pub const MESH_FLAG: &str = "--mesh";
+pub const DAEMON_FLAG: &str = "--daemon";
 
 const SERVICE_FLAGS: [&str; 2] = ["--share-internet", "--magic-dns"];
 const SERVICE_OPTIONS: [(&str, Option<&str>); 5] = [
@@ -28,10 +29,15 @@ pub fn join_token(args: &[String]) -> Option<String> {
     rest.next().filter(|t| !t.is_empty() && !t.starts_with('-')).cloned()
 }
 
-/// What the boot service runs. A join token is redeemed once, in the
-/// foreground, before the service is written; the unit file is world-readable,
-/// so the secret never goes in it and the service starts from the saved identity.
+/// What the boot service runs. With `--mesh` or a join token it is the headless
+/// node that connects at boot; otherwise it is the idle daemon a desktop app
+/// drives. A join token is redeemed once, in the foreground, before the service
+/// is written; the unit file is world-readable, so the secret never goes in it.
 pub fn service_args(args: &[String]) -> Vec<String> {
+    let headless = args.iter().any(|a| a == MESH_FLAG) || join_token(args).is_some();
+    if !headless {
+        return vec![DAEMON_FLAG.to_string()];
+    }
     let mut out = vec![MESH_FLAG.to_string()];
     for flag in SERVICE_FLAGS {
         if args.iter().any(|a| a == flag) {
