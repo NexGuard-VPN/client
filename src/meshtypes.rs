@@ -28,6 +28,18 @@ pub struct MeshIdentity {
     pub relays: Vec<String>,
 }
 
+impl MeshIdentity {
+    /// A saved identity stands in for enrolling again, unless the caller is
+    /// joining with a token: that is an explicit "put this machine in that
+    /// project", and a stale identity from another account must not swallow it.
+    pub fn covers(&self, public_key: &str, network_id: Option<&str>, joining: bool) -> bool {
+        !joining
+            && !self.token.is_empty()
+            && self.public_key == public_key
+            && network_id.map_or(true, |id| id == self.network.id)
+    }
+}
+
 #[derive(Clone, serde::Deserialize)]
 pub struct MeshSelf {
     #[serde(default)]

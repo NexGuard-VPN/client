@@ -139,6 +139,14 @@ struct Peer {
     rx_bytes: u64,
 }
 
+/// Resolves this machine's identity in the network without bringing the tunnel
+/// up: the saved one when it still applies, otherwise a fresh enrolment.
+pub fn enroll(config: &MeshConfig) -> Result<MeshIdentity, String> {
+    let secret = StaticSecret::from(crate::load_or_generate_key());
+    let public_key_b64 = crate::b64_encode(PublicKey::from(&secret).as_bytes());
+    resolve_identity(config, &public_key_b64)
+}
+
 pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStatus, String> {
     let private_key = crate::load_or_generate_key();
     let secret = StaticSecret::from(private_key);
@@ -501,11 +509,7 @@ fn reconcile_advertisement(
 
 fn resolve_identity(config: &MeshConfig, public_key_b64: &str) -> Result<MeshIdentity, String> {
     if let Some(existing) = meshapi::load_identity() {
-        let network_matches = config
-            .network_id
-            .as_ref()
-            .map_or(true, |id| id == &existing.network.id);
-        if existing.public_key == public_key_b64 && !existing.token.is_empty() && network_matches {
+        if existing.covers(public_key_b64, config.network_id.as_deref(), config.join_token.is_some()) {
             return Ok(existing);
         }
     }

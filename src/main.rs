@@ -26,7 +26,7 @@ pub mod tun;
 #[cfg(feature = "gui")]
 mod ui;
 
-use cli::{arg_value, join_token};
+use cli::{arg_value, join_token, service_args};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -79,6 +79,9 @@ fn main() {
     );
 
     if args.iter().any(|a| a == "--install-service") {
+        if join_token(&args).is_some() {
+            join_project(&args);
+        }
         install_service(&args);
         return;
     }
@@ -101,7 +104,7 @@ fn main() {
         list_networks(&args);
         return;
     }
-    if args.iter().any(|a| a == "--mesh") || join_token(&args).is_some() {
+    if args.iter().any(|a| a == cli::MESH_FLAG) || join_token(&args).is_some() {
         run_mesh(&args);
         return;
     }
@@ -355,13 +358,51 @@ fn list_networks(argv: &[String]) {
     }
 }
 
+fn account_token(argv: &[String]) -> String {
+    arg_value(argv, "--token")
+        .or_else(|| arg_value(argv, "-t"))
+        .or_else(api::load_account_token)
+        .unwrap_or_default()
+}
+
+fn mesh_config(argv: &[String], user_token: String, network_id: Option<String>) -> meshnet::MeshConfig {
+    meshnet::MeshConfig {
+        user_token,
+        join_token: join_token(argv),
+        network_id,
+        device_name: arg_value(argv, "--name")
+            .or_else(|| arg_value(argv, "-n"))
+            .unwrap_or_else(generate_client_name),
+        exit_node: arg_value(argv, "--exit-node"),
+        advertise_exit_node: argv.iter().any(|a| a == "--share-internet"),
+        manage_dns: argv.iter().any(|a| a == "--magic-dns"),
+        advertise_routes: arg_value(argv, "--advertise-routes")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default(),
+        ..Default::default()
+    }
+}
+
+/// Redeems the join token now, while the person is watching, so a bad or
+/// revoked token fails here rather than in a service log nobody reads.
+fn join_project(argv: &[String]) {
+    let config = mesh_config(argv, String::new(), arg_value(argv, "--network"));
+    match meshnet::enroll(&config) {
+        Ok(identity) => eprintln!(
+            "[nexguard] joined {} as {} ({})",
+            identity.network.dns_suffix, config.device_name, identity.mesh_ip
+        ),
+        Err(e) => {
+            eprintln!("[nexguard] join: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn run_mesh(argv: &[String]) {
     setup_signal_handler();
 
-    let user_token = arg_value(argv, "--token")
-        .or_else(|| arg_value(argv, "-t"))
-        .or_else(api::load_account_token)
-        .unwrap_or_default();
+    let user_token = account_token(argv);
 
     let mut network_id = arg_value(argv, "--network");
     if let Some(invite) = arg_value(argv, "--join-mesh") {
@@ -385,21 +426,7 @@ fn run_mesh(argv: &[String]) {
         }
     }
 
-    let config = meshnet::MeshConfig {
-        user_token,
-        join_token: join_token(argv),
-        network_id,
-        device_name: arg_value(argv, "--name")
-            .or_else(|| arg_value(argv, "-n"))
-            .unwrap_or_else(generate_client_name),
-        exit_node: arg_value(argv, "--exit-node"),
-        advertise_exit_node: argv.iter().any(|a| a == "--share-internet"),
-        manage_dns: argv.iter().any(|a| a == "--magic-dns"),
-        advertise_routes: arg_value(argv, "--advertise-routes")
-            .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
-            .unwrap_or_default(),
-        ..Default::default()
-    };
+    let config = mesh_config(argv, user_token, network_id);
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let status = match meshnet::connect(config, Arc::clone(&shutdown)) {
@@ -437,31 +464,10 @@ fn run_mesh(argv: &[String]) {
     eprintln!("[nexguard] mesh stopped");
 }
 
-const SERVICE_FLAGS: [&str; 2] = ["--share-internet", "--magic-dns"];
-const SERVICE_OPTIONS: [&str; 3] = ["--network", "--exit-node", "--advertise-routes"];
-
 fn install_service(args: &[String]) {
     let exe = std::env::current_exe().expect("current exe");
     let exe_path = exe.to_str().expect("exe path");
-
-    let mut cli_args = vec!["--mesh".to_string()];
-    for flag in SERVICE_FLAGS {
-        if args.iter().any(|a| a == flag) {
-            cli_args.push(flag.to_string());
-        }
-    }
-    for option in SERVICE_OPTIONS {
-        if let Some(value) = arg_value(args, option) {
-            cli_args.push(option.to_string());
-            cli_args.push(value);
-        }
-    }
-    for (long, short) in [("--token", "-t"), ("--name", "-n")] {
-        if let Some(value) = arg_value(args, long).or_else(|| arg_value(args, short)) {
-            cli_args.push(long.to_string());
-            cli_args.push(value);
-        }
-    }
+    let cli_args = service_args(args);
 
     #[cfg(target_os = "macos")]
     {
@@ -491,6 +497,7 @@ fn install_service(args: &[String]) {
 
         let path = "/Library/LaunchDaemons/sh.nexguard.vpn.plist";
         std::fs::write(path, plist).expect("write plist");
+        let _ = std::process::Command::new("launchctl").args(["unload", path]).status();
         let _ = std::process::Command::new("launchctl").args(["load", "-w", path]).status();
         eprintln!("[nexguard] service installed — auto-starts on boot");
         eprintln!("[nexguard] to uninstall: sudo nexguard --uninstall-service");
@@ -516,7 +523,8 @@ WantedBy=multi-user.target
         let path = "/etc/systemd/system/nexguard.service";
         std::fs::write(path, unit).expect("write service");
         let _ = std::process::Command::new("systemctl").args(["daemon-reload"]).status();
-        let _ = std::process::Command::new("systemctl").args(["enable", "--now", "nexguard"]).status();
+        let _ = std::process::Command::new("systemctl").args(["enable", "nexguard"]).status();
+        let _ = std::process::Command::new("systemctl").args(["restart", "nexguard"]).status();
         eprintln!("[nexguard] service installed — auto-starts on boot");
         eprintln!("[nexguard] to uninstall: sudo nexguard --uninstall-service");
     }

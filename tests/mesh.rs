@@ -600,3 +600,45 @@ mod public_endpoint {
         assert_eq!(public_ip(&list(&["not-an-address", ""])), None);
     }
 }
+
+#[test]
+fn service_never_carries_the_join_token() {
+    let args = cli::service_args(&argv(&["join", "ngj_abc", "--install-service", "--share-internet"]));
+    assert_eq!(args, vec!["--mesh", "--share-internet"]);
+    let args = cli::service_args(&argv(&["--join-token", "ngj_abc", "--install-service"]));
+    assert_eq!(args, vec!["--mesh"]);
+}
+
+#[test]
+fn service_keeps_the_flags_it_was_installed_with() {
+    let args = cli::service_args(&argv(&[
+        "--mesh", "--install-service", "--magic-dns", "--network", "n-1",
+        "--advertise-routes", "10.0.0.0/24", "-n", "box", "-t", "acct",
+    ]));
+    assert_eq!(
+        args,
+        vec!["--mesh", "--magic-dns", "--network", "n-1", "--advertise-routes", "10.0.0.0/24", "--token", "acct", "--name", "box"]
+    );
+}
+
+fn saved_identity() -> meshtypes::MeshIdentity {
+    serde_json::from_str(r#"{"token":"tok","public_key":"pk","network":{"id":"n-1"}}"#).unwrap()
+}
+
+#[test]
+fn a_saved_identity_is_reused_only_when_it_still_applies() {
+    let id = saved_identity();
+    assert!(id.covers("pk", None, false));
+    assert!(id.covers("pk", Some("n-1"), false));
+    assert!(!id.covers("pk", Some("n-2"), false), "another network was asked for");
+    assert!(!id.covers("other", None, false), "the machine key changed");
+    let mut blank = saved_identity();
+    blank.token.clear();
+    assert!(!blank.covers("pk", None, false), "no token means nothing to reuse");
+}
+
+#[test]
+fn joining_with_a_token_always_enrolls_afresh() {
+    assert!(!saved_identity().covers("pk", None, true));
+    assert!(!saved_identity().covers("pk", Some("n-1"), true));
+}
