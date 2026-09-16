@@ -61,3 +61,15 @@ fn unchanged_settings_compare_equal_so_no_write_is_needed() {
     current.project_id = "prj_41c8".to_string();
     assert!(current != saved);
 }
+
+#[cfg(unix)]
+#[test]
+fn home_directories_come_from_the_passwd_database() {
+    let root = profiles::passwd_home("0").expect("root has a home");
+    assert!(root == "/var/root" || root == "/root", "{}", root);
+    let uid = unsafe { libc::getuid() }.to_string();
+    let mine = profiles::passwd_home(&uid).expect("current user has a home");
+    assert_eq!(std::env::var("HOME").unwrap(), mine);
+    assert_eq!(profiles::user_config_dir(0).unwrap(), std::path::PathBuf::from(root).join(".nexguard"));
+    assert!(profiles::passwd_home("no-such-user-xyz").is_none());
+}

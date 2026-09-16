@@ -132,9 +132,44 @@ fn main() {
     }
 }
 
+const KEY_FILE: &str = "client.key";
+
 fn key_path() -> std::path::PathBuf {
     let dir = dirs_next().unwrap_or_else(|| std::path::PathBuf::from("."));
-    dir.join("client.key")
+    dir.join(KEY_FILE)
+}
+
+/// Before the daemon existed the app ran elevated but kept its key and
+/// identity in the signed-in user's directory. The first daemon run adopts
+/// them, so the machine keeps its address instead of enrolling as a new device.
+#[cfg(unix)]
+fn adopt_operator_identity() {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    let Some(own) = dirs_next() else { return };
+    let files = [KEY_FILE, meshapi::IDENTITY_FILE];
+    if files.iter().any(|f| own.join(f).exists()) {
+        return;
+    }
+    let operator = std::env::var(control::OPERATOR_UID_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .or_else(control::console_uid)
+        .filter(|uid| *uid != 0);
+    let Some(theirs) = operator.and_then(profiles::user_config_dir) else { return };
+    for file in files {
+        let source = theirs.join(file);
+        if !source.exists() {
+            continue;
+        }
+        let target = own.join(file);
+        if std::fs::copy(&source, &target).is_ok() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600));
+            eprintln!("[nexguard] adopted {} from {}", file, theirs.display());
+        }
+    }
 }
 
 pub fn dirs_next() -> Option<std::path::PathBuf> {
@@ -444,6 +479,8 @@ fn run_mesh(argv: &[String]) {
 /// for the app or `--status`, and optionally a tunnel brought up right away.
 fn run_daemon(autoconnect: Option<meshnet::MeshConfig>) {
     setup_signal_handler();
+    #[cfg(unix)]
+    adopt_operator_identity();
     let engine = engine::Engine::new();
     #[cfg(unix)]
     {

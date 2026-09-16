@@ -10,7 +10,7 @@ const NETWORKS_PATH: &str = "/api/mesh/networks";
 const MEMBERS_PATH: &str = "/api/mesh/members";
 const PROJECTS_PATH: &str = "/api/projects";
 const JOIN_TOKENS_SUFFIX: &str = "/join-tokens";
-const IDENTITY_FILE: &str = "mesh.json";
+pub const IDENTITY_FILE: &str = "mesh.json";
 const NETMAP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
 
 pub fn enroll(user_token: &str, req: &EnrollRequest) -> Result<MeshIdentity, String> {

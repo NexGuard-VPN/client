@@ -10,19 +10,33 @@ const APP_DIR_UNIX: &str = ".nexguard";
 #[cfg(windows)]
 const APP_DIR_WINDOWS: &str = "NexGuard";
 
+/// Looks the account up in the passwd database directly: a launchd daemon has
+/// no HOME, and macOS has no `getent`.
 #[cfg(unix)]
-fn passwd_home(key: &str) -> Option<String> {
-    let out = std::process::Command::new("getent")
-        .args(["passwd", key])
-        .output()
-        .ok()?;
-    let line = String::from_utf8_lossy(&out.stdout);
-    let home = line.split(':').nth(5)?.trim().to_string();
-    if home.is_empty() {
-        None
-    } else {
-        Some(home)
+pub(crate) fn passwd_home(key: &str) -> Option<String> {
+    let entry = match key.parse::<u32>() {
+        Ok(uid) => unsafe { libc::getpwuid(uid) },
+        Err(_) => {
+            let name = std::ffi::CString::new(key).ok()?;
+            unsafe { libc::getpwnam(name.as_ptr()) }
+        }
+    };
+    if entry.is_null() {
+        return None;
     }
+    let dir = unsafe { (*entry).pw_dir };
+    if dir.is_null() {
+        return None;
+    }
+    let home = unsafe { std::ffi::CStr::from_ptr(dir) }.to_string_lossy().trim().to_string();
+    (!home.is_empty()).then_some(home)
+}
+
+/// The per-user state directory of another account, for the daemon to adopt
+/// what the app used to keep there when it still ran as that user.
+#[cfg(unix)]
+pub(crate) fn user_config_dir(uid: u32) -> Option<PathBuf> {
+    passwd_home(&uid.to_string()).map(|home| PathBuf::from(home).join(APP_DIR_UNIX))
 }
 
 #[cfg(unix)]
