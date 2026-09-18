@@ -85,7 +85,7 @@ impl PacketDns {
     }
 
     fn deliver(&self, client: &Client, response: &[u8]) {
-        if let Some(packet) = datagram(client, response, self.capacity) {
+        if let Some(packet) = answer(client, response, self.capacity) {
             let _ = self.answered.send(packet);
         }
     }
@@ -103,10 +103,13 @@ fn forward(
             queue.recv()
         };
         let Ok(exchange) = taken else { return };
-        let Some(response) = upstream.exchange(&exchange.query) else {
+        // The query leaves asking for no more than the tunnel can hand back, so
+        // the resolver cuts an oversized answer on its own record boundaries
+        // instead of leaving it to `dns::fit` on the way home.
+        let Some(response) = upstream.exchange(&dns::clamp(&exchange.query, capacity)) else {
             continue;
         };
-        let Some(packet) = datagram(&exchange.client, &response, capacity) else {
+        let Some(packet) = answer(&exchange.client, &response, capacity) else {
             continue;
         };
         if answered.send(packet).is_err() {
@@ -145,8 +148,14 @@ fn query_in(packet: &[u8]) -> Option<(Client, &[u8])> {
     Some((client, &udp[UDP_HEADER_LEN..length]))
 }
 
-fn datagram(client: &Client, payload: &[u8], capacity: usize) -> Option<Vec<u8>> {
-    if payload.is_empty() || payload.len() > capacity {
+/// What the tunnel can carry decides how much of a reply the client may see, so
+/// the reply is fitted to it before it is framed.
+fn answer(client: &Client, reply: &[u8], capacity: usize) -> Option<Vec<u8>> {
+    datagram(client, &dns::fit(reply, capacity)?)
+}
+
+fn datagram(client: &Client, payload: &[u8]) -> Option<Vec<u8>> {
+    if payload.is_empty() {
         return None;
     }
     let total = IPV4_HEADER_LEN + UDP_HEADER_LEN + payload.len();
@@ -218,6 +227,26 @@ mod packet_tests {
     const QTYPE_AAAA: u16 = 28;
     const RCODE_MASK: u8 = 0x0f;
     const RCODE_NXDOMAIN: u8 = 3;
+    const QR: u8 = 0x80;
+    const TC: u8 = 0x02;
+    const CLASS_IN: u16 = 1;
+    const RECORD_TTL: u32 = 32;
+    const NAME_AT_QUESTION: u16 = 0xc00c;
+    const DNS_HEADER_LEN: usize = 12;
+    const SECTIONS: usize = 4;
+    const COUNTS_AT: usize = 4;
+    const QUESTION_SECTION: usize = 0;
+    const QUESTION_TRAILER: usize = 4;
+    const RECORD_TRAILER: usize = 10;
+    const RDLENGTH_AT: usize = 8;
+    const CAPACITY: usize = MTU - IPV4_HEADER_LEN - UDP_HEADER_LEN;
+    const MANY_ANSWERS: u16 = 100;
+    const ONE_ANSWER: u16 = 1;
+    const LOOPBACK_V6: &str = "[::1]:0";
+    const OPT_TYPE: u16 = 41;
+    const ROOT_NAME: u8 = 0;
+    const OPT_FLAGS: u32 = 0;
+    const OPT_RDLENGTH: u16 = 0;
 
     struct Canned {
         response: Vec<u8>,
@@ -360,7 +389,7 @@ mod packet_tests {
         assert!(resolver.intercept(&request(dns::RESOLVER, &asked)));
 
         assert_eq!(reply_payload(&awaited(&resolver)), forwarded);
-        assert_eq!(seen.read().unwrap().as_slice(), &[asked]);
+        assert_eq!(seen.read().unwrap().as_slice(), &[dns::clamp(&asked, CAPACITY).to_vec()]);
     }
 
     #[test]
@@ -380,5 +409,182 @@ mod packet_tests {
 
         assert!(resolver.intercept(&whole));
         assert!(!reply_payload(&awaited(&resolver)).is_empty());
+    }
+
+    /// An answer of a size we choose: the mesh's own answers are tiny, and only
+    /// a forwarded one ever comes back too big for the tunnel.
+    fn answers(name: &str, count: u16) -> Vec<u8> {
+        let mut message = query(name, QTYPE_A);
+        message[2] |= QR;
+        message[6..8].copy_from_slice(&count.to_be_bytes());
+        for _ in 0..count {
+            message.extend_from_slice(&NAME_AT_QUESTION.to_be_bytes());
+            message.extend_from_slice(&QTYPE_A.to_be_bytes());
+            message.extend_from_slice(&CLASS_IN.to_be_bytes());
+            message.extend_from_slice(&RECORD_TTL.to_be_bytes());
+            message.extend_from_slice(&(PEER.octets().len() as u16).to_be_bytes());
+            message.extend_from_slice(&PEER.octets());
+        }
+        message
+    }
+
+    fn counts(message: &[u8]) -> [u16; SECTIONS] {
+        let mut counts = [0u16; SECTIONS];
+        for (section, count) in counts.iter_mut().enumerate() {
+            let at = COUNTS_AT + section * 2;
+            *count = u16::from_be_bytes([message[at], message[at + 1]]);
+        }
+        counts
+    }
+
+    /// Where a message ends by its own header, walked independently of the code
+    /// that wrote it: a header still claiming a record the truncated message no
+    /// longer carries runs off the end and answers None.
+    fn walked(message: &[u8]) -> Option<usize> {
+        let mut at = DNS_HEADER_LEN;
+        for (section, count) in counts(message).iter().enumerate() {
+            for _ in 0..*count {
+                at = name_end(message, at)?;
+                let (trailer, rdata) = if section == QUESTION_SECTION {
+                    (QUESTION_TRAILER, 0)
+                } else {
+                    let length = message.get(at + RDLENGTH_AT..at + RECORD_TRAILER)?;
+                    (RECORD_TRAILER, u16::from_be_bytes([length[0], length[1]]) as usize)
+                };
+                at += trailer + rdata;
+                if at > message.len() {
+                    return None;
+                }
+            }
+        }
+        Some(at)
+    }
+
+    fn name_end(message: &[u8], mut at: usize) -> Option<usize> {
+        loop {
+            let len = *message.get(at)? as usize;
+            if len == 0 {
+                return Some(at + 1);
+            }
+            if len & 0xc0 == 0xc0 {
+                return Some(at + 2);
+            }
+            at += 1 + len;
+        }
+    }
+
+    /// A resolver on IPv6 loopback, so the forwarding path is walked with a real
+    /// socket in the family an IPv6-only network would hand us.
+    fn ipv6_resolver() -> String {
+        let server = std::net::UdpSocket::bind(LOOPBACK_V6).expect("a loopback resolver");
+        let address = server.local_addr().expect("the resolver's address");
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1500];
+            if let Ok((n, from)) = server.recv_from(&mut buf) {
+                let mut reply = buf[..n].to_vec();
+                reply[2] |= QR;
+                let _ = server.send_to(&reply, from);
+            }
+        });
+        address.to_string()
+    }
+
+    fn forwarding(response: Vec<u8>, mtu: usize) -> PacketDns {
+        let upstream = Canned { response, seen: Arc::new(RwLock::new(Vec::new())) };
+        PacketDns::new(zone(&[("laptop", PEER)]), Some(Box::new(upstream)), mtu)
+    }
+
+    /// The OPT record a query needs to state the size it can be answered in,
+    /// written out by hand so the test reads the wire and not the code that
+    /// wrote it.
+    fn opt_stating(size: u16) -> Vec<u8> {
+        let mut record = vec![ROOT_NAME];
+        record.extend_from_slice(&OPT_TYPE.to_be_bytes());
+        record.extend_from_slice(&size.to_be_bytes());
+        record.extend_from_slice(&OPT_FLAGS.to_be_bytes());
+        record.extend_from_slice(&OPT_RDLENGTH.to_be_bytes());
+        record
+    }
+
+    #[test]
+    fn a_forwarded_query_asks_the_resolver_for_no_more_than_the_tunnel_carries() {
+        let asked = query("example.com", QTYPE_A);
+        let seen = Arc::new(RwLock::new(Vec::new()));
+        let upstream =
+            Canned { response: answers("example.com", ONE_ANSWER), seen: Arc::clone(&seen) };
+        let resolver = PacketDns::new(zone(&[("laptop", PEER)]), Some(Box::new(upstream)), MTU);
+
+        assert!(resolver.intercept(&request(dns::RESOLVER, &asked)));
+        awaited(&resolver);
+
+        let forwarded = seen.read().unwrap().first().cloned().expect("the resolver was asked");
+        assert_eq!(&forwarded[..COUNTS_AT], &asked[..COUNTS_AT], "the client's own id and flags");
+        assert_eq!(counts(&forwarded), [1, 0, 0, 1], "its question and an OPT record");
+        assert_eq!(&forwarded[DNS_HEADER_LEN..asked.len()], &asked[DNS_HEADER_LEN..]);
+        assert_eq!(&forwarded[asked.len()..], opt_stating(CAPACITY as u16));
+    }
+
+    #[test]
+    fn a_reply_too_big_for_the_path_is_truncated_rather_than_dropped() {
+        let whole = answers("example.com", MANY_ANSWERS);
+        assert!(whole.len() > CAPACITY, "the reply has to be the oversized case");
+        let resolver = forwarding(whole.clone(), MTU);
+
+        assert!(resolver.intercept(&request(dns::RESOLVER, &query("example.com", QTYPE_A))));
+
+        let response = reply_payload(&awaited(&resolver));
+        assert!(response.len() <= CAPACITY, "the answer fits the tunnel");
+        assert_eq!(response[2] & TC, TC, "the client is told to retry over TCP");
+        assert_eq!(walked(&response), Some(response.len()), "the header matches what is left");
+        let [questions, answered, authority, additional] = counts(&response);
+        assert_eq!(questions, 1, "the question survives");
+        assert!((1..MANY_ANSWERS).contains(&answered), "some answers survive, not all");
+        assert_eq!((authority, additional), (0, 0));
+        assert_eq!(&response[DNS_HEADER_LEN..], &whole[DNS_HEADER_LEN..response.len()]);
+    }
+
+    #[test]
+    fn a_path_with_room_for_only_the_header_still_answers() {
+        let whole = answers("example.com", MANY_ANSWERS);
+        let resolver = forwarding(whole, DNS_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN);
+
+        assert!(resolver.intercept(&request(dns::RESOLVER, &query("example.com", QTYPE_A))));
+
+        let response = reply_payload(&awaited(&resolver));
+        assert_eq!(response.len(), DNS_HEADER_LEN);
+        assert_eq!(response[2] & TC, TC);
+        assert_eq!(counts(&response), [0; SECTIONS], "a header claims nothing it dropped");
+    }
+
+    #[test]
+    fn a_reply_that_fills_the_path_exactly_is_passed_on_untouched() {
+        let whole = answers("example.com", MANY_ANSWERS);
+        let mtu = whole.len() + IPV4_HEADER_LEN + UDP_HEADER_LEN;
+        let resolver = forwarding(whole.clone(), mtu);
+
+        assert!(resolver.intercept(&request(dns::RESOLVER, &query("example.com", QTYPE_A))));
+
+        let response = reply_payload(&awaited(&resolver));
+        assert_eq!(response, whole);
+        assert_eq!(response[2] & TC, 0, "nothing was truncated");
+    }
+
+    #[test]
+    fn a_name_outside_the_mesh_is_forwarded_to_an_ipv6_resolver_over_a_real_socket() {
+        let upstream = dns::UdpUpstream::open(&ipv6_resolver()).expect("an IPv6 upstream");
+        let resolver = PacketDns::new(
+            zone(&[("laptop", PEER)]),
+            Some(Box::new(upstream) as Box<dyn Upstream>),
+            MTU,
+        );
+        let asked = query("example.com", QTYPE_A);
+
+        assert!(resolver.intercept(&request(dns::RESOLVER, &asked)));
+
+        let response = reply_payload(&awaited(&resolver));
+        assert_eq!(&response[..2], &asked[..2], "the query id is echoed");
+        assert_eq!(response[2] & QR, QR, "the reply is marked as an answer");
+        let forwarded = dns::clamp(&asked, CAPACITY);
+        assert_eq!(&response[DNS_HEADER_LEN..], &forwarded[DNS_HEADER_LEN..]);
     }
 }
