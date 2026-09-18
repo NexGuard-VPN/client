@@ -21,6 +21,106 @@ impl TunDevice {
     }
 }
 
+#[cfg(any(target_os = "ios", target_os = "android"))]
+const HOSTED_TUN_NAME: &str = "hosted";
+
+impl TunDevice {
+
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    pub fn from_fd(_fd: i32) -> Result<Self, String> {
+        Err("this platform creates its own tunnel".to_owned())
+    }
+
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    pub fn from_fd(fd: i32) -> Result<Self, String> {
+        if fd < 0 {
+            return Err("the host passed no tunnel descriptor".to_owned());
+        }
+        set_nonblocking(fd);
+        Ok(Self { fd, name: HOSTED_TUN_NAME.to_owned() })
+    }
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+mod platform {
+    use super::*;
+
+    const AF_INET: [u8; 4] = [0, 0, 0, 2];
+    const AF_INET6: [u8; 4] = [0, 0, 0, 30];
+    /// iOS hands a Network Extension a utun socket, which carries the address
+    /// family in four bytes before every packet. Android's VpnService
+    /// descriptor carries the IP packet on its own.
+    const PROTOCOL_HEADER: bool = cfg!(target_os = "ios");
+    const PROTOCOL_HEADER_LEN: usize = 4;
+    const FRAME_MAX: usize = 65539;
+
+    // Reading a packet through the header would otherwise zero a 64 KiB buffer
+    // every time, which on a phone is the difference between idle and warm.
+    thread_local! {
+        static FRAME: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(vec![0u8; FRAME_MAX]);
+    }
+
+    impl TunDevice {
+        pub fn create(_mtu: usize) -> Self {
+            panic!("the host owns the tunnel on this platform")
+        }
+
+        pub fn set_address(&self, _ip: Ipv4Addr, _prefix: u8) {}
+
+        pub fn set_up(&self) {}
+
+        pub fn read_packet(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !PROTOCOL_HEADER {
+                let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+                if n < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                return Ok(n as usize);
+            }
+            FRAME.with(|frame| {
+                let mut framed = frame.borrow_mut();
+                let len = (buf.len() + PROTOCOL_HEADER_LEN).min(framed.len());
+                let n = unsafe { libc::read(self.fd, framed.as_mut_ptr() as *mut _, len) };
+                if n < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let n = n as usize;
+                if n <= PROTOCOL_HEADER_LEN {
+                    return Ok(0);
+                }
+                let payload = (n - PROTOCOL_HEADER_LEN).min(buf.len());
+                buf[..payload].copy_from_slice(&framed[PROTOCOL_HEADER_LEN..PROTOCOL_HEADER_LEN + payload]);
+                Ok(payload)
+            })
+        }
+
+        pub fn write_packet(&self, buf: &[u8]) -> std::io::Result<usize> {
+            if !PROTOCOL_HEADER {
+                let n = unsafe { libc::write(self.fd, buf.as_ptr() as *const _, buf.len()) };
+                if n < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                return Ok(n as usize);
+            }
+            let af = if !buf.is_empty() && (buf[0] >> 4) == 6 { AF_INET6 } else { AF_INET };
+            FRAME.with(|frame| {
+                let mut framed = frame.borrow_mut();
+                let len = PROTOCOL_HEADER_LEN + buf.len();
+                if framed.len() < len {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "packet too large"));
+                }
+                framed[..PROTOCOL_HEADER_LEN].copy_from_slice(&af);
+                framed[PROTOCOL_HEADER_LEN..len].copy_from_slice(buf);
+                let n = unsafe { libc::write(self.fd, framed.as_ptr() as *const _, len) };
+                if n < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok((n as usize).saturating_sub(PROTOCOL_HEADER_LEN))
+            })
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;

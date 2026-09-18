@@ -1,7 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// The mobile hosts keep their files in a sandbox the app owns and hands us, so
+/// they name the directory instead of letting us look for a home.
+static HOSTED_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_config_dir(dir: PathBuf) {
+    let _ = HOSTED_DIR.set(dir);
+}
 
 pub fn config_dir() -> Option<PathBuf> {
+    if let Some(dir) = HOSTED_DIR.get() {
+        return Some(dir.clone());
+    }
     dirs_next()
 }
 

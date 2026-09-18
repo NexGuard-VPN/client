@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 
 pub const UNSUPPORTED_PLATFORM: &str = "exit node mode is not supported on this platform";
 
+const CHAIN_IN_V4: &str = "NEXGUARD-IN";
 const CHAIN_NAT_V4: &str = "NEXGUARD-EXIT-NAT";
 const CHAIN_FWD_V4: &str = "NEXGUARD-EXIT-FWD";
 const CHAIN_NAT_V6: &str = "NEXGUARD-EXIT-NAT6";
@@ -14,6 +15,7 @@ const CHAIN_FWD_V6: &str = "NEXGUARD-EXIT-FWD6";
 const IPTABLES_V4: &str = "iptables";
 const IPTABLES_V6: &str = "ip6tables";
 const TABLE_NAT: &str = "nat";
+const HOOK_IN: &str = "INPUT";
 const HOOK_NAT: &str = "POSTROUTING";
 const HOOK_FWD: &str = "FORWARD";
 const TARGET_MASQUERADE: &str = "MASQUERADE";
@@ -279,6 +281,31 @@ impl ExitPlan {
     }
 }
 
+/// The mesh lives inside 100.64.0.0/10, and a host may already filter that
+/// range on the way in: Tailscale drops everything from it that did not arrive
+/// on its own interface, which swallows every mesh packet without a trace.
+/// Accepting what reaches us through our own tunnel, from our own network, lets
+/// the two live side by side.
+pub fn input_plan(tun: &str, mesh_cidr: &str) -> Result<Vec<Vec<String>>, String> {
+    let tun = validate_iface(tun)?;
+    let cidr = parse_cidr(mesh_cidr, Family::V4)?;
+    let bin = Family::V4.iptables_binary();
+    Ok(vec![
+        argv(bin, &["-N", CHAIN_IN_V4]),
+        argv(bin, &["-I", HOOK_IN, "1", "-j", CHAIN_IN_V4]),
+        argv(bin, &["-A", CHAIN_IN_V4, "-i", &tun, "-s", &cidr, "-j", TARGET_ACCEPT]),
+    ])
+}
+
+pub fn input_teardown() -> Vec<Vec<String>> {
+    let bin = Family::V4.iptables_binary();
+    vec![
+        argv(bin, &["-D", HOOK_IN, "-j", CHAIN_IN_V4]),
+        argv(bin, &["-F", CHAIN_IN_V4]),
+        argv(bin, &["-X", CHAIN_IN_V4]),
+    ]
+}
+
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn iptables_teardown() -> Vec<Vec<String>> {
     [Family::V4, Family::V6]
@@ -439,6 +466,51 @@ pub fn parse_pf_token(output: &str) -> Option<String> {
         .map(str::trim)
         .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()))
         .map(str::to_owned)
+}
+
+/// Lives as long as the tunnel does, and takes its rule back down with it.
+pub struct MeshInput {
+    active: bool,
+}
+
+impl MeshInput {
+    #[cfg(target_os = "linux")]
+    pub fn install(tun_name: &str, mesh_cidr: &str) -> Self {
+        let plan = match input_plan(tun_name, mesh_cidr) {
+            Ok(plan) => plan,
+            Err(_) => return Self { active: false },
+        };
+        Self::purge();
+        let installed = plan.iter().all(|cmd| run(&cmd[0], &cmd[1..]).is_ok());
+        if !installed {
+            Self::purge();
+        }
+        Self { active: installed }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn install(_tun_name: &str, _mesh_cidr: &str) -> Self {
+        Self { active: false }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn purge() {
+        for cmd in input_teardown() {
+            run_ignore(&cmd[0], &cmd[1..]);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn purge() {}
+}
+
+impl Drop for MeshInput {
+    fn drop(&mut self) {
+        if self.active {
+            self.active = false;
+            Self::purge();
+        }
+    }
 }
 
 pub struct ExitNodeState {

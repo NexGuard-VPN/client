@@ -159,7 +159,7 @@ pub fn upgrade(
     let jitter = JITTER_FLOOR_MS + crate::rng::index(JITTER_SPREAD_MS) as u64;
     std::thread::sleep(Duration::from_millis(jitter));
 
-    let tcp = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
+    let tcp = crate::protect::connect_timeout(&address, CONNECT_TIMEOUT)
         .map_err(|e| format!("connect {}: {}", host, e))?;
     tcp.set_nodelay(true).ok();
 

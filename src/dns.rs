@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use crate::protect;
+
 const DNS_PORT: u16 = 53;
 const LOOPBACK: &str = "127.0.0.1";
 const BIND_ATTEMPTS: u32 = 10;
@@ -22,23 +24,114 @@ fn bind_with_retry(bind_ip: &str) -> Option<UdpSocket> {
 }
 const UPSTREAM_TIMEOUT_MS: u64 = 3000;
 pub const DEFAULT_DNS_SUFFIX: &str = "nexguard";
+pub const DEFAULT_UPSTREAM: &str = "1.1.1.1";
+/// The address the mesh answers names on when it cannot bind a socket the
+/// system will route to it. It sits outside the mesh CIDR so a host can point
+/// its tunnel at it without spending a mesh address on the resolver.
+pub const RESOLVER: Ipv4Addr = Ipv4Addr::new(100, 100, 100, 100);
 
-fn normalize_suffix(suffix: &str) -> String {
+/// The bare zone every peer name lives under, as the host should advertise it.
+pub fn zone_name(suffix: &str) -> String {
     let trimmed = suffix.trim().trim_matches('.');
     let base = if trimmed.is_empty() { DEFAULT_DNS_SUFFIX } else { trimmed };
-    format!(".{}", base.to_lowercase())
+    base.to_lowercase()
 }
 
+fn normalize_suffix(suffix: &str) -> String {
+    format!(".{}", zone_name(suffix))
+}
+
+const HEADER_LEN: usize = 12;
 const QTYPE_A: u16 = 1;
-const QTYPE_AAAA: u16 = 28;
-const QTYPE_PTR: u16 = 12;
 const QCLASS_IN: u16 = 1;
 
-pub struct DnsResolver {
+/// What a query deserves once the mesh has looked at it.
+pub enum Reply {
+    Ready(Vec<u8>),
+    Upstream,
+    Drop,
+}
+
+pub trait Upstream: Send + Sync {
+    fn exchange(&self, query: &[u8]) -> Option<Vec<u8>>;
+}
+
+pub struct UdpUpstream {
+    server: SocketAddr,
+}
+
+impl UdpUpstream {
+    pub fn open(server: &str) -> Option<Self> {
+        let server: SocketAddr = format!("{}:{}", server, DNS_PORT)
+            .parse()
+            .or_else(|_| format!("{}:{}", DEFAULT_UPSTREAM, DNS_PORT).parse())
+            .ok()?;
+        Some(Self { server })
+    }
+}
+
+impl Upstream for UdpUpstream {
+    /// A socket of its own per query: several queries are in flight at once
+    /// and answers must not cross between them. On Android the socket has to
+    /// be held out of our own tunnel or the query would come back to us.
+    fn exchange(&self, query: &[u8]) -> Option<Vec<u8>> {
+        let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+        protect::hold(&socket).ok()?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(UPSTREAM_TIMEOUT_MS)))
+            .ok()?;
+        socket.send_to(query, self.server).ok()?;
+        let mut buf = [0u8; 1500];
+        let (n, from) = socket.recv_from(&mut buf).ok()?;
+        (from == self.server).then(|| buf[..n].to_vec())
+    }
+}
+
+/// The names the mesh owns. It answers a query without caring how the query
+/// reached it, so the socket the desktop binds and the packets a phone hands us
+/// share one set of answers.
+pub struct Zone {
     peers: Arc<RwLock<HashMap<String, Ipv4Addr>>>,
-    socket: UdpSocket,
-    upstream: SocketAddr,
     suffix: String,
+}
+
+impl Zone {
+    pub fn new(suffix: &str, peers: Arc<RwLock<HashMap<String, Ipv4Addr>>>) -> Self {
+        Self { peers, suffix: normalize_suffix(suffix) }
+    }
+
+    pub fn answer(&self, query: &[u8]) -> Reply {
+        let question = match parse_question(query) {
+            Some(question) => question,
+            None => return Reply::Drop,
+        };
+
+        if question.qtype == QTYPE_A {
+            if let Some(ip) = self.resolve(&question.name) {
+                return Reply::Ready(build_a_response(query, question.end, ip));
+            }
+        }
+        // A name in the mesh zone is ours to answer or to deny, whatever was
+        // asked of it: it never reaches a resolver outside the tunnel.
+        if question.name.ends_with(&self.suffix) {
+            return Reply::Ready(build_nxdomain(query, question.end));
+        }
+
+        Reply::Upstream
+    }
+
+    fn resolve(&self, name: &str) -> Option<Ipv4Addr> {
+        let bare = name.strip_suffix(&self.suffix).unwrap_or(name);
+        let bare = bare.strip_suffix('.').unwrap_or(bare);
+        let peers = self.peers.read().ok()?;
+        peers.get(bare).copied()
+    }
+}
+
+pub struct DnsResolver {
+    zone: Zone,
+    socket: UdpSocket,
+    upstream: Option<UdpUpstream>,
     active: Arc<AtomicBool>,
 }
 
@@ -54,16 +147,10 @@ impl DnsResolver {
         socket.set_read_timeout(Some(Duration::from_millis(100))).ok();
         socket.set_nonblocking(true).ok();
 
-        let upstream_addr: SocketAddr = format!("{}:53", upstream)
-            .parse()
-            .or_else(|_| "1.1.1.1:53".parse())
-            .ok()?;
-
         Some(Self {
-            peers,
+            zone: Zone::new(suffix, peers),
             socket,
-            upstream: upstream_addr,
-            suffix: normalize_suffix(suffix),
+            upstream: UdpUpstream::open(upstream),
             active: Arc::new(AtomicBool::new(true)),
         })
     }
@@ -78,16 +165,19 @@ impl DnsResolver {
 
     fn run_loop(&self, shutdown: &AtomicBool) {
         let mut buf = [0u8; 1500];
-        let forward_sock = UdpSocket::bind("0.0.0.0:0").ok();
-        if let Some(ref s) = forward_sock {
-            s.set_read_timeout(Some(Duration::from_millis(UPSTREAM_TIMEOUT_MS))).ok();
-        }
 
         while self.active.load(Ordering::Relaxed) && !shutdown.load(Ordering::Relaxed) {
             match self.socket.recv_from(&mut buf) {
                 Ok((n, src)) => {
-                    if n < 12 { continue; }
-                    let response = self.handle_query(&buf[..n], forward_sock.as_ref());
+                    let response = match self.zone.answer(&buf[..n]) {
+                        Reply::Ready(response) => response,
+                        Reply::Upstream => self
+                            .upstream
+                            .as_ref()
+                            .and_then(|upstream| upstream.exchange(&buf[..n]))
+                            .unwrap_or_default(),
+                        Reply::Drop => Vec::new(),
+                    };
                     if !response.is_empty() {
                         let _ = self.socket.send_to(&response, src);
                     }
@@ -101,58 +191,22 @@ impl DnsResolver {
             }
         }
     }
+}
 
-    fn handle_query(&self, query: &[u8], forward_sock: Option<&UdpSocket>) -> Vec<u8> {
-        let qtype = u16::from_be_bytes([query[4], query[5]]);
+struct Question {
+    name: String,
+    qtype: u16,
+    end: usize,
+}
 
-        let name = match parse_qname(query, 12) {
-            Some(n) => n.to_lowercase(),
-            None => return Vec::new(),
-        };
-
-        match qtype {
-            QTYPE_A => {
-                if let Some(ip) = self.resolve(&name) {
-                    return build_a_response(query, ip);
-                }
-                if name.ends_with(&self.suffix) {
-                    return build_nxdomain(query);
-                }
-            }
-            QTYPE_AAAA => {
-                if name.ends_with(&self.suffix) {
-                    return build_nxdomain(query);
-                }
-            }
-            QTYPE_PTR => {
-                return Vec::new();
-            }
-            _ => {}
-        }
-
-        if let Some(sock) = forward_sock {
-            return self.forward(query, sock);
-        }
-        Vec::new()
+fn parse_question(query: &[u8]) -> Option<Question> {
+    if query.len() < HEADER_LEN {
+        return None;
     }
-
-    fn resolve(&self, name: &str) -> Option<Ipv4Addr> {
-        let bare = name.strip_suffix(&self.suffix).unwrap_or(name);
-        let bare = bare.strip_suffix('.').unwrap_or(bare);
-        let peers = self.peers.read().ok()?;
-        peers.get(bare).copied()
-    }
-
-    fn forward(&self, query: &[u8], sock: &UdpSocket) -> Vec<u8> {
-        if sock.send_to(query, self.upstream).is_err() {
-            return Vec::new();
-        }
-        let mut buf = [0u8; 1500];
-        match sock.recv_from(&mut buf) {
-            Ok((n, _)) => buf[..n].to_vec(),
-            Err(_) => Vec::new(),
-        }
-    }
+    let end = find_qname_end(query, HEADER_LEN).filter(|end| *end <= query.len())?;
+    let name = parse_qname(query, HEADER_LEN)?.to_lowercase();
+    let qtype = u16::from_be_bytes([query[end - 4], query[end - 3]]);
+    Some(Question { name, qtype, end })
 }
 
 fn parse_qname(data: &[u8], offset: usize) -> Option<String> {
@@ -183,16 +237,15 @@ fn parse_qname(data: &[u8], offset: usize) -> Option<String> {
     Some(name)
 }
 
-fn build_a_response(query: &[u8], ip: Ipv4Addr) -> Vec<u8> {
-    let qname_end = find_qname_end(query, 12).unwrap_or(query.len());
+fn build_a_response(query: &[u8], qname_end: usize, ip: Ipv4Addr) -> Vec<u8> {
     let mut resp = Vec::with_capacity(qname_end + 16);
-    resp.extend_from_slice(&query[..12]);
+    resp.extend_from_slice(&query[..HEADER_LEN]);
     resp[2] |= 0x80;
     resp[3] |= 0x80;
     resp[6..8].copy_from_slice(&1u16.to_be_bytes());
     resp[8..10].copy_from_slice(&0u16.to_be_bytes());
     resp[10..12].copy_from_slice(&0u16.to_be_bytes());
-    resp.extend_from_slice(&query[12..qname_end]);
+    resp.extend_from_slice(&query[HEADER_LEN..qname_end]);
 
     let ip_bytes = ip.octets();
     resp.extend_from_slice(&0xc00cu16.to_be_bytes());
@@ -204,17 +257,14 @@ fn build_a_response(query: &[u8], ip: Ipv4Addr) -> Vec<u8> {
     resp
 }
 
-fn build_nxdomain(query: &[u8]) -> Vec<u8> {
-    let qname_end = find_qname_end(query, 12).unwrap_or(query.len());
+fn build_nxdomain(query: &[u8], qname_end: usize) -> Vec<u8> {
     let mut resp = Vec::with_capacity(qname_end);
     resp.extend_from_slice(&query[..qname_end]);
-    if resp.len() >= 12 {
-        resp[2] |= 0x80;
-        resp[3] |= 0x83;
-        resp[6..8].copy_from_slice(&0u16.to_be_bytes());
-        resp[8..10].copy_from_slice(&0u16.to_be_bytes());
-        resp[10..12].copy_from_slice(&0u16.to_be_bytes());
-    }
+    resp[2] |= 0x80;
+    resp[3] |= 0x83;
+    resp[6..8].copy_from_slice(&0u16.to_be_bytes());
+    resp[8..10].copy_from_slice(&0u16.to_be_bytes());
+    resp[10..12].copy_from_slice(&0u16.to_be_bytes());
     resp
 }
 

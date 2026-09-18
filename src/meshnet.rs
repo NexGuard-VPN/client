@@ -11,7 +11,7 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 use crate::meshapi::{self, MeshIdentity, MeshPeer, NetMap};
 pub use crate::meshtypes::{MeshConfig, MeshPeerView, PeerPath};
 use crate::allowed::{self, Cidr};
-use crate::{derp, disco, dns, exitnode, route, stun, tun};
+use crate::{derp, disco, dns, dnspath, exitnode, protect, route, stun, tun};
 
 pub const BATCH: usize = 64;
 const IDLE_SLEEP: Duration = Duration::from_micros(50);
@@ -111,12 +111,27 @@ pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStat
     let (self_ip, prefix) = parse_cidr(&netmap.device.mesh_ip, &network.cidr)?;
     let (net_ip, net_prefix) = parse_network(&network.cidr)?;
 
-    let tun_dev = tun::TunDevice::try_create(config.mtu)?;
-    tun_dev.set_address(self_ip, prefix);
-    tun_dev.set_up();
+    // iOS and Android create the tunnel themselves, address it and route it
+    // with the tunnel settings; everything below that touches the system is the
+    // host's job there, not ours.
+    let hosted = config.hosted_tun.is_some();
+    let tun_dev = match config.hosted_tun {
+        Some(fd) => tun::TunDevice::from_fd(fd)?,
+        None => {
+            let device = tun::TunDevice::try_create(config.mtu)?;
+            device.set_address(self_ip, prefix);
+            device.set_up();
+            device
+        }
+    };
     let tun_name = tun_dev.name().to_string();
 
-    let _ = route::add_route(net_ip, net_prefix, &tun_name);
+    let mesh_input = if hosted {
+        None
+    } else {
+        let _ = route::add_route(net_ip, net_prefix, &tun_name);
+        Some(exitnode::MeshInput::install(&tun_name, &network.cidr))
+    };
 
     let udp = bind_mesh_socket(config.mesh_port)?;
     let local_port = udp.local_addr().map(|a| a.port()).unwrap_or(config.mesh_port);
@@ -142,11 +157,12 @@ pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStat
         .cloned();
 
     let exit_state = match exit_peer.as_ref() {
+        Some(_) if hosted => Some(route::ExitRouteState::hosted(&tun_name)),
         Some(peer) => Some(setup_exit_routes(peer, &relay_host, &tun_name)?),
         None => None,
     };
 
-    let serving = config.advertise_exit_node && exitnode::ExitNodeState::is_supported();
+    let serving = config.advertise_exit_node && !hosted && exitnode::ExitNodeState::is_supported();
     let exit_node_state = if serving {
         exitnode::ExitNodeState::activate(&tun_name, &network.cidr, None).ok()
     } else {
@@ -160,6 +176,16 @@ pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStat
     } else {
         None
     };
+    // A hosted tunnel keeps its resolver settings to itself and points them at
+    // `dns::RESOLVER`, so the names are answered where the packets are.
+    let magic_dns = hosted.then(|| {
+        dnspath::PacketDns::new(
+            dns::Zone::new(&network.dns_suffix, Arc::clone(&peer_names)),
+            dns::UdpUpstream::open(&upstream_server(&config))
+                .map(|upstream| Box::new(upstream) as Box<dyn dns::Upstream>),
+            config.mtu,
+        )
+    });
 
     let status = MeshStatus {
         tx: Arc::new(AtomicU64::new(0)),
@@ -191,6 +217,7 @@ pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStat
     let session = SessionHandles {
         status: status.clone(),
         peer_names,
+        magic_dns,
         pending,
         selected_exit: config.exit_node.clone(),
         self_key: PublicKey::from(&secret).to_bytes(),
@@ -199,12 +226,13 @@ pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStat
         local_port,
     };
 
-    let had_exit_route = exit_state.is_some();
+    let had_exit_route = exit_state.is_some() && !hosted;
     let stopped = Arc::clone(&status.stopped);
     std::thread::spawn(move || {
         {
             let _dns_guard = dns_guard;
             let _exit_node_state = exit_node_state;
+            let _mesh_input = mesh_input;
             run_session(
                 session,
                 private_key,
@@ -216,7 +244,7 @@ pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStat
             );
             if had_exit_route {
                 route::emergency_cleanup(&tun_name);
-            } else {
+            } else if !hosted {
                 route::cleanup_tun_routes(&tun_name);
             }
         }
@@ -229,6 +257,7 @@ pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStat
 struct SessionHandles {
     status: MeshStatus,
     peer_names: Arc<RwLock<HashMap<String, Ipv4Addr>>>,
+    magic_dns: Option<dnspath::PacketDns>,
     pending: Arc<Mutex<Option<NetMap>>>,
     selected_exit: Option<String>,
     self_key: [u8; 32],
@@ -286,6 +315,13 @@ fn run_session(
             match tun_dev.read_packet(&mut read_buf) {
                 Ok(n) if n >= IPV4_HEADER_MIN => {
                     busy = true;
+                    if handles
+                        .magic_dns
+                        .as_ref()
+                        .is_some_and(|resolver| resolver.intercept(&read_buf[..n]))
+                    {
+                        continue;
+                    }
                     let dst = u32::from_be_bytes([
                         read_buf[IPV4_DST_OFFSET],
                         read_buf[IPV4_DST_OFFSET + 1],
@@ -307,6 +343,18 @@ fn run_session(
                 }
                 Ok(_) => {}
                 Err(_) => break,
+            }
+        }
+
+        if let Some(resolver) = handles.magic_dns.as_ref() {
+            for _ in 0..BATCH {
+                match resolver.reply() {
+                    Some(reply) => {
+                        busy = true;
+                        let _ = tun_dev.write_packet(&reply);
+                    }
+                    None => break,
+                }
             }
         }
 
@@ -665,6 +713,14 @@ fn send_raw(
     relay.send(key, data)
 }
 
+fn write_to_tun(tun_dev: &tun::TunDevice, packet: &[u8], permitted: bool) -> u64 {
+    if !permitted {
+        return 0;
+    }
+    let _ = tun_dev.write_packet(packet);
+    packet.len() as u64
+}
+
 fn decapsulate_into_tun(
     peer: &mut Peer,
     data: &[u8],
@@ -678,12 +734,10 @@ fn decapsulate_into_tun(
     match peer.tunn.decapsulate(None, data, scratch) {
         TunnResult::Err(_) => return None,
         TunnResult::WriteToTunnelV4(packet, _) => {
-            received = packet.len() as u64;
-            let _ = tun_dev.write_packet(packet);
+            received = write_to_tun(tun_dev, packet, allowed::permits_v4(&peer.allowed, packet));
         }
         TunnResult::WriteToTunnelV6(packet, _) => {
-            received = packet.len() as u64;
-            let _ = tun_dev.write_packet(packet);
+            received = write_to_tun(tun_dev, packet, allowed::is_exit(&peer.allowed));
         }
         TunnResult::WriteToNetwork(reply) => {
             let len = reply.len() as u64;
@@ -699,8 +753,8 @@ fn decapsulate_into_tun(
                         }
                     }
                     TunnResult::WriteToTunnelV4(packet, _) => {
-                        received += packet.len() as u64;
-                        let _ = tun_dev.write_packet(packet);
+                        let ok = allowed::permits_v4(&peer.allowed, packet);
+                        received += write_to_tun(tun_dev, packet, ok);
                         break;
                     }
                     _ => break,
@@ -1010,6 +1064,14 @@ fn install_peer_routes(peers: &[MeshPeer], tun_name: &str, installed: &mut HashS
     }
 }
 
+fn upstream_server(config: &MeshConfig) -> String {
+    if config.dns_upstream.is_empty() {
+        std::env::var("NEXGUARD_DNS_UPSTREAM").unwrap_or_else(|_| dns::DEFAULT_UPSTREAM.to_string())
+    } else {
+        config.dns_upstream.clone()
+    }
+}
+
 fn start_dns(
     config: &MeshConfig,
     network: &meshapi::MeshNetwork,
@@ -1017,14 +1079,9 @@ fn start_dns(
     peer_names: &Arc<RwLock<HashMap<String, Ipv4Addr>>>,
     shutdown: &Arc<AtomicBool>,
 ) -> Option<route::DnsGuard> {
-    let upstream = if config.dns_upstream.is_empty() {
-        std::env::var("NEXGUARD_DNS_UPSTREAM").unwrap_or_else(|_| "1.1.1.1".to_string())
-    } else {
-        config.dns_upstream.clone()
-    };
     let resolver = dns::DnsResolver::try_start(
         &self_ip.to_string(),
-        &upstream,
+        &upstream_server(config),
         &network.dns_suffix,
         Arc::clone(peer_names),
     )?;
@@ -1048,6 +1105,7 @@ fn bind_mesh_socket(port: u16) -> Result<UdpSocket, String> {
     let socket = UdpSocket::bind(("0.0.0.0", port))
         .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
         .map_err(|e| format!("mesh socket: {}", e))?;
+    protect::hold(&socket).map_err(|e| format!("mesh socket: {}", e))?;
     socket
         .set_nonblocking(true)
         .map_err(|e| format!("mesh socket nonblocking: {}", e))?;
@@ -1057,6 +1115,7 @@ fn bind_mesh_socket(port: u16) -> Result<UdpSocket, String> {
 fn local_endpoints(port: u16) -> Vec<String> {
     UdpSocket::bind("0.0.0.0:0")
         .and_then(|s| {
+            protect::hold(&s)?;
             s.connect(PROBE_TARGET)?;
             s.local_addr()
         })
@@ -1109,4 +1168,44 @@ fn parse_cidr(address: &str, network: &str) -> Result<(Ipv4Addr, u8), String> {
         .map(|(_, p)| p)
         .ok_or_else(|| format!("mesh: invalid network {}", network))?;
     Ok((ip, prefix))
+}
+
+#[cfg(test)]
+mod protect_tests {
+    use super::{bind_mesh_socket, local_endpoints, protect};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const ANY_PORT: u16 = 0;
+
+    #[test]
+    fn every_socket_the_mesh_binds_is_offered_to_the_host() {
+        let _turn = protect::exclusive();
+        let offered = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&offered);
+        protect::install(Box::new(move |_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            true
+        }));
+
+        let socket = bind_mesh_socket(ANY_PORT);
+        let _ = local_endpoints(ANY_PORT);
+        protect::remove();
+
+        assert!(socket.is_ok());
+        assert_eq!(offered.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_refused_mesh_socket_fails_the_session_instead_of_looping() {
+        let _turn = protect::exclusive();
+        protect::install(Box::new(|_| false));
+
+        let socket = bind_mesh_socket(ANY_PORT);
+        let endpoints = local_endpoints(ANY_PORT);
+        protect::remove();
+
+        assert!(socket.is_err());
+        assert!(endpoints.is_empty());
+    }
 }

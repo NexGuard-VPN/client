@@ -3,8 +3,8 @@
 mod exitnode;
 
 use exitnode::{
-    iptables_teardown, parse_cidr, parse_pf_token, validate_iface, ExitNodeState, ExitPlan, Family,
-    PF_ANCHOR, UNSUPPORTED_PLATFORM,
+    input_plan, input_teardown, iptables_teardown, parse_cidr, parse_pf_token, validate_iface,
+    ExitNodeState, ExitPlan, Family, PF_ANCHOR, UNSUPPORTED_PLATFORM,
 };
 
 const TUN: &str = "utun7";
@@ -279,4 +279,39 @@ fn unsupported_platforms_refuse_to_activate() {
 #[test]
 fn the_unsupported_message_names_the_platform_limit() {
     assert!(UNSUPPORTED_PLATFORM.contains("not supported"));
+}
+
+#[test]
+fn inbound_mesh_traffic_is_accepted_on_our_own_tunnel() {
+    let plan: Vec<String> = input_plan(TUN, MESH_V4).unwrap().iter().map(|c| c.join(" ")).collect();
+    assert_eq!(plan[0], "iptables -N NEXGUARD-IN");
+    assert_eq!(plan[1], "iptables -I INPUT 1 -j NEXGUARD-IN");
+    assert_eq!(
+        plan[2],
+        format!("iptables -A NEXGUARD-IN -i {} -s {} -j ACCEPT", TUN, MESH_V4)
+    );
+}
+
+#[test]
+fn the_inbound_rule_goes_above_whatever_already_filters_the_range() {
+    let hook = input_plan(TUN, MESH_V4).unwrap().into_iter().find(|c| c.contains(&"INPUT".to_string()));
+    let hook = hook.expect("the chain is never reached without a hook in INPUT");
+    assert_eq!(hook.iter().position(|a| a == "-I").map(|i| &hook[i + 2]), Some(&"1".to_string()));
+}
+
+#[test]
+fn the_inbound_rule_refuses_junk_it_would_pass_to_iptables() {
+    assert!(input_plan("tun0; rm -rf /", MESH_V4).is_err());
+    assert!(input_plan(TUN, "not-a-network").is_err());
+    assert!(input_plan("", MESH_V4).is_err());
+}
+
+#[test]
+fn the_inbound_rule_is_taken_back_down_whole() {
+    let teardown: Vec<String> = input_teardown().iter().map(|c| c.join(" ")).collect();
+    assert_eq!(teardown, vec![
+        "iptables -D INPUT -j NEXGUARD-IN",
+        "iptables -F NEXGUARD-IN",
+        "iptables -X NEXGUARD-IN",
+    ]);
 }

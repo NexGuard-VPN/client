@@ -140,7 +140,7 @@ pub(crate) fn http_tls_request(host: &str, req: TlsRequest) -> Result<(u16, Stri
             .next()
             .ok_or_else(|| format!("resolve {}: no address", host))?
     };
-    let mut tcp = std::net::TcpStream::connect_timeout(&addr, TLS_CONNECT_TIMEOUT)
+    let mut tcp = crate::protect::connect_timeout(&addr, TLS_CONNECT_TIMEOUT)
         .map_err(|e| format!("connect {}: {}", host, e))?;
     tcp.set_read_timeout(Some(req.read_timeout)).ok();
 
@@ -360,7 +360,7 @@ fn download_tls(
             .map_err(|e| format!("resolve: {}", e))?
             .next().ok_or("no address")?
     };
-    let mut tcp = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(30))
+    let mut tcp = crate::protect::connect_timeout(&addr, std::time::Duration::from_secs(30))
         .map_err(|e| format!("connect: {}", e))?;
     tcp.set_read_timeout(Some(std::time::Duration::from_secs(60))).ok();
 

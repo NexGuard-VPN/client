@@ -10,6 +10,7 @@ const DNS_MACOS_CLEAR: &str = "empty";
 const DNS_WINDOWS_DHCP: &str = "dhcp";
 
 pub struct ExitRouteState {
+    hosted: bool,
     preserved_ips: Vec<String>,
     original_gateway: String,
     original_iface: String,
@@ -46,6 +47,7 @@ impl ExitRouteState {
         }
 
         Ok(Self {
+            hosted: false,
             preserved_ips: preserved,
             original_gateway: gw,
             original_iface: iface,
@@ -55,7 +57,25 @@ impl ExitRouteState {
         })
     }
 
+    /// iOS and Android hand the tunnel its routing table along with the tunnel
+    /// settings, so the exit node is live without this process touching a single
+    /// system route.
+    pub fn hosted(tun_name: &str) -> Self {
+        Self {
+            hosted: true,
+            preserved_ips: Vec::new(),
+            original_gateway: String::new(),
+            original_iface: String::new(),
+            tun_name: tun_name.to_owned(),
+            has_v6: false,
+            v6_blackhole: false,
+        }
+    }
+
     pub fn preserve(&mut self, ip: &str) -> bool {
+        if self.hosted {
+            return true;
+        }
         if self.preserved_ips.iter().any(|p| p == ip) {
             return true;
         }
@@ -744,3 +764,66 @@ fn detect_active_interface_windows() -> Option<String> {
     Some("Ethernet".to_string())
 }
 
+
+/// iOS and Android configure the tunnel's addresses, routes and resolvers
+/// themselves, from the settings the app applies before handing over the
+/// descriptor. Nothing here has a system to talk to.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+mod hosted {
+    use super::*;
+
+    const HOSTED: &str = "the host owns the routing table on this platform";
+
+    pub fn detect_default_gateway() -> Result<(String, String), String> {
+        Err(HOSTED.to_owned())
+    }
+
+    pub fn add_route_os(_net: Ipv4Addr, _prefix: u8, _tun: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    pub fn add_host_route(_ip: &str, _gw: &str, _iface: &str) -> Result<(), String> {
+        Err(HOSTED.to_owned())
+    }
+
+    pub fn remove_host_route(_ip: &str, _gw: &str, _iface: &str) {}
+
+    pub fn add_default_via_tun(_tun: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn remove_default_via_tun(_tun: &str) {}
+
+    pub fn add_default_v6_via_tun(_tun: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn remove_default_v6_via_tun(_tun: &str) {}
+
+    pub fn add_v6_blackhole(_tun: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn remove_v6_blackhole(_tun: &str) {}
+
+    pub fn setup_policy_routing(_gw: &str, _iface: &str) {}
+
+    pub fn cleanup_policy_routing() {}
+
+    pub fn dns_targets() -> Vec<String> {
+        Vec::new()
+    }
+
+    pub fn dns_capture(_iface: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    pub fn dns_apply(_iface: &str, _servers: &[String]) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn dns_flush() {}
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+use hosted::*;

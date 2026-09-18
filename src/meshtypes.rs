@@ -278,6 +278,10 @@ pub struct MeshConfig {
     pub advertise_routes: Vec<String>,
     pub dns_upstream: String,
     pub manage_dns: bool,
+    /// The descriptor iOS and Android hand over: on those platforms the host
+    /// creates the tunnel, addresses it and routes it, and this process only
+    /// moves packets.
+    pub hosted_tun: Option<i32>,
 }
 
 impl Default for MeshConfig {
@@ -295,6 +299,7 @@ impl Default for MeshConfig {
             advertise_routes: Vec::new(),
             dns_upstream: String::new(),
             manage_dns: false,
+            hosted_tun: None,
         }
     }
 }

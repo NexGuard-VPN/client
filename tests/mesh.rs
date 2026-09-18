@@ -693,3 +693,76 @@ fn slow_requests_get_a_longer_deadline_than_status_polls() {
     let connect = protocol::Request::Connect { config: Default::default() }.timeout();
     assert!(connect > status);
 }
+
+fn v4_packet(src: &str, dst: &str) -> Vec<u8> {
+    let mut packet = vec![0u8; 20];
+    packet[0] = 0x45;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&v4(src).to_be_bytes());
+    packet[16..20].copy_from_slice(&v4(dst).to_be_bytes());
+    packet
+}
+
+fn host(ip: &str) -> allowed::Cidr {
+    allowed::host(ip.parse().unwrap())
+}
+
+#[test]
+fn a_peer_may_send_from_its_own_mesh_address() {
+    let table = vec![host("100.64.0.3")];
+    assert!(allowed::permits_v4(&table, &v4_packet("100.64.0.3", "100.64.0.1")));
+}
+
+#[test]
+fn a_peer_may_not_speak_for_another_device() {
+    let table = vec![host("100.64.0.3")];
+    assert!(!allowed::permits_v4(&table, &v4_packet("100.64.0.4", "100.64.0.1")));
+    assert!(!allowed::permits_v4(&table, &v4_packet("8.8.8.8", "100.64.0.1")));
+}
+
+#[test]
+fn a_gateway_may_send_from_inside_its_advertised_subnet() {
+    let table = vec![host("100.64.0.5"), allowed::parse("192.168.50.0/24").unwrap()];
+    assert!(allowed::permits_v4(&table, &v4_packet("192.168.50.20", "100.64.0.1")));
+    assert!(!allowed::permits_v4(&table, &v4_packet("192.168.51.20", "100.64.0.1")));
+}
+
+#[test]
+fn an_exit_node_may_send_from_anywhere() {
+    let table = vec![host("100.64.0.4"), allowed::DEFAULT_ROUTE];
+    assert!(allowed::permits_v4(&table, &v4_packet("8.8.8.8", "100.64.0.1")));
+}
+
+#[test]
+fn unparseable_buffers_are_refused() {
+    let table = vec![allowed::DEFAULT_ROUTE];
+    let full = v4_packet("8.8.8.8", "100.64.0.1");
+    assert_eq!(allowed::source_v4(&full), Some(v4("8.8.8.8")));
+    assert_eq!(allowed::source_v4(&full[..19]), None);
+    assert_eq!(allowed::source_v4(&[]), None);
+    let mut v6 = full.clone();
+    v6[0] = 0x60;
+    assert_eq!(allowed::source_v4(&v6), None);
+    assert!(!allowed::permits_v4(&table, &full[..19]));
+    assert!(!allowed::permits_v4(&table, &v6));
+}
+
+#[test]
+fn only_the_default_route_marks_an_exit_peer() {
+    assert!(allowed::is_exit(&[host("100.64.0.4"), allowed::DEFAULT_ROUTE]));
+    assert!(!allowed::is_exit(&[host("100.64.0.3")]));
+    assert!(!allowed::is_exit(&[allowed::parse("192.168.50.0/24").unwrap()]));
+    assert!(!allowed::is_exit(&[]));
+}
+
+#[test]
+fn containment_agrees_with_the_longest_prefix_lookup() {
+    let table = vec![
+        allowed::parse("10.0.0.0/8").unwrap(),
+        allowed::parse("192.168.50.0/24").unwrap(),
+    ];
+    for probe in ["10.1.2.3", "192.168.50.1", "192.168.51.1", "8.8.8.8"] {
+        let ip = v4(probe);
+        assert_eq!(allowed::contains(&table, ip), allowed::best_prefix(&table, ip).is_some());
+    }
+}
