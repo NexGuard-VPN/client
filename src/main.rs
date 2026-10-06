@@ -16,6 +16,7 @@ mod disco;
 mod dns;
 mod dnspath;
 pub mod exitnode;
+mod idle;
 mod meshapi;
 mod meshtypes;
 pub mod meshnet;

@@ -11,6 +11,7 @@ mod disco;
 mod dns;
 mod dnspath;
 pub mod exitnode;
+pub mod idle;
 pub mod ffi;
 pub mod keys;
 mod meshapi;

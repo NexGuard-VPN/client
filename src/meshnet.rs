@@ -11,10 +11,12 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 use crate::meshapi::{self, MeshIdentity, MeshPeer, NetMap};
 pub use crate::meshtypes::{MeshConfig, MeshPeerView, PeerPath};
 use crate::allowed::{self, Cidr};
+use crate::idle::IdleBackoff;
 use crate::{derp, disco, dns, dnspath, exitnode, protect, route, stun, tun};
 
 pub const BATCH: usize = 64;
-const IDLE_SLEEP: Duration = Duration::from_micros(50);
+const IDLE_SLEEP_FLOOR: Duration = Duration::from_micros(50);
+const IDLE_SLEEP_CEILING: Duration = Duration::from_millis(1);
 const TIMER_TICK: Duration = Duration::from_millis(250);
 const DISCO_PING_FAST: Duration = Duration::from_secs(2);
 const DISCO_PING_SLOW: Duration = Duration::from_secs(15);
@@ -288,6 +290,7 @@ fn run_session(
     let mut last_timer = Instant::now();
     let mut last_stun = Instant::now() - STUN_INTERVAL;
     let mut last_publish = Instant::now();
+    let mut idle = IdleBackoff::new(IDLE_SLEEP_FLOOR, IDLE_SLEEP_CEILING);
 
     report_local_endpoints(&handles);
 
@@ -466,8 +469,10 @@ fn run_session(
             publish_peers(&peers, &handles);
         }
 
-        if !busy {
-            std::thread::sleep(IDLE_SLEEP);
+        if busy {
+            idle.reset();
+        } else {
+            std::thread::sleep(idle.next());
         }
     }
 
