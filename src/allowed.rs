@@ -45,9 +45,18 @@ pub fn source_v4(packet: &[u8]) -> Option<u32> {
 }
 
 /// Inbound cryptokey routing: a peer may only send from an address its own
-/// allowed table covers, so it cannot speak for another device.
-pub fn permits_v4(allowed: &[Cidr], packet: &[u8]) -> bool {
-    source_v4(packet).is_some_and(|src| contains(allowed, src))
+/// allowed table covers, and never from one that routes more specifically to
+/// someone else, so even the exit node, which covers everything, cannot speak
+/// for another device.
+pub fn permits_v4(own: &[Cidr], foreign: &[Cidr], packet: &[u8]) -> bool {
+    let Some(src) = source_v4(packet) else {
+        return false;
+    };
+    match (best_prefix(own, src), best_prefix(foreign, src)) {
+        (Some(mine), Some(theirs)) => mine >= theirs,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 /// Only the exit node this machine selected carries the default route, and it

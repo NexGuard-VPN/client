@@ -16,6 +16,8 @@ pub mod ffi;
 pub mod keys;
 mod meshapi;
 pub mod meshnet;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod meshssh;
 mod meshtypes;
 pub mod path;
 mod profiles;

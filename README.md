@@ -44,7 +44,7 @@ NexGuard gives your team a **dedicated VPN server** with a clean static IP that 
 ### Install
 
 ```bash
-curl -fsSL https://nexguard.sh/install | sudo bash
+curl -fsSL https://nexguard.sh/install | bash
 ```
 
 Or download directly: [macOS (DMG)](https://nexguard.sh/download) | [Linux](https://nexguard.sh/download) | [Windows](https://nexguard.sh/download)

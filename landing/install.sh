@@ -26,16 +26,32 @@ case "$OS" in
   *) echo "Unsupported OS: $OS"; exit 1 ;;
 esac
 
-echo "Downloading NexGuard for $OS/$ARCH..."
-curl -fsSL -o "$INSTALL_DIR/$BIN" "$URL"
-chmod +x "$INSTALL_DIR/$BIN"
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "Installing to $INSTALL_DIR needs root. Run this script as root."
+    exit 1
+  fi
+  SUDO="sudo"
+fi
 
-# Fix ownership for existing config
-REAL_USER=${SUDO_USER:-$USER}
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+
+echo "Downloading NexGuard for $OS/$ARCH..."
+curl -fsSL -o "$TMP" "$URL"
+
+if [ -n "$SUDO" ]; then
+  echo "Installing to $INSTALL_DIR — your password may be asked."
+fi
+$SUDO mkdir -p "$INSTALL_DIR"
+$SUDO install -m 755 "$TMP" "$INSTALL_DIR/$BIN"
+
+REAL_USER=${SUDO_USER:-$(id -un)}
 if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
-  REAL_HOME=$(eval echo ~$REAL_USER)
-  if [ -d "$REAL_HOME/.nexguard" ]; then
-    chown -R "$REAL_USER" "$REAL_HOME/.nexguard" 2>/dev/null
+  REAL_HOME=$(eval echo "~$REAL_USER")
+  if [ -d "$REAL_HOME/.nexguard" ] && [ -n "$(find "$REAL_HOME/.nexguard" ! -user "$REAL_USER" -print -quit 2>/dev/null)" ]; then
+    $SUDO chown -R "$REAL_USER" "$REAL_HOME/.nexguard" 2>/dev/null || true
   fi
 fi
 

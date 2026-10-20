@@ -1208,7 +1208,7 @@ impl VpnApp {
 
 const APP_NAME: &str = "NexGuard";
 const DOWNLOAD_URL: &str = "https://nexguard.sh/download";
-const INSTALL_COMMAND: &str = "curl -fsSL https://nexguard.sh/install | sudo bash";
+const INSTALL_COMMAND: &str = "curl -fsSL https://nexguard.sh/install | bash";
 const HTTP_MARKER: &str = "HTTP ";
 const PLACEHOLDER: &str = "{}";
 const CANCELLED_MARKER: &str = "cancelled";

@@ -20,6 +20,8 @@ mod idle;
 mod meshapi;
 mod meshtypes;
 pub mod meshnet;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod meshssh;
 pub mod path;
 pub mod allowed;
 pub mod rng;
@@ -62,6 +64,7 @@ fn print_help() {
     println!("  --exit-node DEVICE_ID     Route all traffic through that device");
     println!("  --share-internet          Let other devices exit through this one");
     println!("  --magic-dns               Resolve device names (changes system DNS)");
+    println!("  --ssh                     Let devices in the project SSH in, without sshd or keys");
     println!("  --advertise-routes CIDRS  Comma-separated subnets to share");
     println!("  --cleanup                 Remove stale routes from a crashed session");
     println!("  --daemon                  Wait for the app to ask for a tunnel (used by the boot service)");
@@ -277,6 +280,7 @@ fn mesh_config(argv: &[String], user_token: String, network_id: Option<String>) 
         exit_node: arg_value(argv, "--exit-node"),
         advertise_exit_node: argv.iter().any(|a| a == "--share-internet"),
         manage_dns: argv.iter().any(|a| a == "--magic-dns"),
+        ssh: argv.iter().any(|a| a == "--ssh"),
         advertise_routes: arg_value(argv, "--advertise-routes")
             .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
             .unwrap_or_default(),

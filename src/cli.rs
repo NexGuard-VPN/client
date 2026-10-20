@@ -3,7 +3,7 @@ pub const JOIN_TOKEN_FLAG: &str = "--join-token";
 pub const MESH_FLAG: &str = "--mesh";
 pub const DAEMON_FLAG: &str = "--daemon";
 
-const SERVICE_FLAGS: [&str; 2] = ["--share-internet", "--magic-dns"];
+const SERVICE_FLAGS: [&str; 3] = ["--share-internet", "--magic-dns", "--ssh"];
 const SERVICE_OPTIONS: [(&str, Option<&str>); 5] = [
     ("--network", None),
     ("--exit-node", None),

@@ -76,6 +76,7 @@ struct Peer {
     key_b64: String,
     ip: Ipv4Addr,
     allowed: Vec<Cidr>,
+    foreign: Vec<Cidr>,
     exit_node: bool,
     online: bool,
     tunn: Tunn,
@@ -111,7 +112,8 @@ pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStat
     };
 
     let (self_ip, prefix) = parse_cidr(&netmap.device.mesh_ip, &network.cidr)?;
-    let (net_ip, net_prefix) = parse_network(&network.cidr)?;
+    let mesh_network = parse_network(&network.cidr)?;
+    let (net_ip, net_prefix) = (Ipv4Addr::from(mesh_network.0), mesh_network.2);
 
     // iOS and Android create the tunnel themselves, address it and route it
     // with the tunnel settings; everything below that touches the system is the
@@ -226,6 +228,7 @@ pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStat
         disco_secret: decode_secret(&network.disco_secret),
         endpoints: spawn_endpoint_reporter(identity.token.clone(), Arc::clone(&shutdown)),
         local_port,
+        mesh_network,
     };
 
     let had_exit_route = exit_state.is_some() && !hosted;
@@ -266,6 +269,7 @@ struct SessionHandles {
     disco_secret: Vec<u8>,
     endpoints: SyncSender<Vec<String>>,
     local_port: u16,
+    mesh_network: Cidr,
 }
 
 fn run_session(
@@ -610,6 +614,7 @@ fn apply_netmap(
                     key_b64: entry.public_key.clone(),
                     ip,
                     allowed,
+                    foreign: Vec::new(),
                     exit_node: entry.exit_node,
                     online: entry.online,
                     tunn,
@@ -625,9 +630,28 @@ fn apply_netmap(
         }
     }
 
+    assign_foreign(peers, handles.mesh_network);
     install_peer_routes(&map.peers, tun_dev.name(), installed_routes);
     if let Some(state) = exit_state.as_mut() {
         preserve_exit_paths(peers, &handles.selected_exit, state);
+    }
+}
+
+/// What each peer may not send from: everything another peer is the route
+/// for, plus the rest of the mesh, which belongs to devices it is not.
+fn assign_foreign(peers: &mut [Peer], mesh: Cidr) {
+    let tables: Vec<Vec<Cidr>> = peers.iter().map(|p| p.allowed.clone()).collect();
+    for (idx, peer) in peers.iter_mut().enumerate() {
+        peer.foreign = std::iter::once(mesh)
+            .chain(
+                tables
+                    .iter()
+                    .enumerate()
+                    .filter(|&(other, _)| other != idx)
+                    .flat_map(|(_, table)| table.iter().copied())
+                    .filter(|&cidr| cidr != allowed::DEFAULT_ROUTE),
+            )
+            .collect();
     }
 }
 
@@ -739,7 +763,7 @@ fn decapsulate_into_tun(
     match peer.tunn.decapsulate(None, data, scratch) {
         TunnResult::Err(_) => return None,
         TunnResult::WriteToTunnelV4(packet, _) => {
-            received = write_to_tun(tun_dev, packet, allowed::permits_v4(&peer.allowed, packet));
+            received = write_to_tun(tun_dev, packet, allowed::permits_v4(&peer.allowed, &peer.foreign, packet));
         }
         TunnResult::WriteToTunnelV6(packet, _) => {
             received = write_to_tun(tun_dev, packet, allowed::is_exit(&peer.allowed));
@@ -758,7 +782,7 @@ fn decapsulate_into_tun(
                         }
                     }
                     TunnResult::WriteToTunnelV4(packet, _) => {
-                        let ok = allowed::permits_v4(&peer.allowed, packet);
+                        let ok = allowed::permits_v4(&peer.allowed, &peer.foreign, packet);
                         received += write_to_tun(tun_dev, packet, ok);
                         break;
                     }
@@ -1157,8 +1181,8 @@ fn decode_secret(value: &str) -> Vec<u8> {
         .unwrap_or_else(|_| value.as_bytes().to_vec())
 }
 
-fn parse_network(cidr: &str) -> Result<(Ipv4Addr, u8), String> {
-    allowed::network(cidr).ok_or_else(|| format!("mesh: invalid network {}", cidr))
+fn parse_network(cidr: &str) -> Result<Cidr, String> {
+    allowed::parse(cidr).ok_or_else(|| format!("mesh: invalid network {}", cidr))
 }
 
 fn parse_cidr(address: &str, network: &str) -> Result<(Ipv4Addr, u8), String> {

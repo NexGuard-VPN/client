@@ -63,13 +63,20 @@ impl Engine {
             inner.shutdown = Arc::new(AtomicBool::new(false));
             Arc::clone(&inner.shutdown)
         };
-        let result = meshnet::connect(config, shutdown);
+        let ssh = config.ssh;
+        let result = meshnet::connect(config, Arc::clone(&shutdown));
         let mut inner = self.inner.lock().unwrap();
         match result {
             Ok(status) => {
+                let serving = ssh.then(|| status.clone());
                 inner.status = Some(status);
                 inner.state = EngineState::Connected;
-                Ok(self.snapshot_of(&inner))
+                let snapshot = self.snapshot_of(&inner);
+                drop(inner);
+                if let Some(status) = serving {
+                    serve_ssh(&status, shutdown);
+                }
+                Ok(snapshot)
             }
             Err(message) => {
                 inner.status = None;
@@ -143,6 +150,26 @@ impl Engine {
             identity: meshapi::load_identity().map(redacted),
         }
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn serve_ssh(status: &MeshStatus, shutdown: Arc<AtomicBool>) {
+    let started = status
+        .address
+        .parse()
+        .map_err(|_| format!("ssh: bad mesh address {}", status.address))
+        .and_then(|address| {
+            crate::meshssh::start(address, &status.tun_name, Arc::clone(&status.peers), shutdown)
+        });
+    match started {
+        Ok(()) => eprintln!("[nexguard] ssh: serving on {}:22", status.address),
+        Err(e) => eprintln!("[nexguard] {}", e),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn serve_ssh(_: &MeshStatus, _: Arc<AtomicBool>) {
+    eprintln!("[nexguard] ssh: not supported on this platform");
 }
 
 /// The GUI never needs the device credential itself; every call that does is

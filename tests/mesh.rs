@@ -621,6 +621,13 @@ fn service_keeps_the_flags_it_was_installed_with() {
     );
 }
 
+#[test]
+fn a_service_installed_with_ssh_keeps_serving_it_after_a_reboot() {
+    let args = cli::service_args(&argv(&["join", "ngj_abc", "--install-service", "--ssh"]));
+    assert_eq!(args, vec!["--mesh", "--ssh"]);
+    assert_eq!(cli::service_args(&argv(&["--install-service", "--ssh"])), vec!["--daemon"]);
+}
+
 fn saved_identity() -> meshtypes::MeshIdentity {
     serde_json::from_str(r#"{"token":"tok","public_key":"pk","network":{"id":"n-1"}}"#).unwrap()
 }
@@ -755,27 +762,42 @@ fn host(ip: &str) -> allowed::Cidr {
 #[test]
 fn a_peer_may_send_from_its_own_mesh_address() {
     let table = vec![host("100.64.0.3")];
-    assert!(allowed::permits_v4(&table, &v4_packet("100.64.0.3", "100.64.0.1")));
+    assert!(allowed::permits_v4(&table, &[], &v4_packet("100.64.0.3", "100.64.0.1")));
 }
 
 #[test]
 fn a_peer_may_not_speak_for_another_device() {
     let table = vec![host("100.64.0.3")];
-    assert!(!allowed::permits_v4(&table, &v4_packet("100.64.0.4", "100.64.0.1")));
-    assert!(!allowed::permits_v4(&table, &v4_packet("8.8.8.8", "100.64.0.1")));
+    assert!(!allowed::permits_v4(&table, &[], &v4_packet("100.64.0.4", "100.64.0.1")));
+    assert!(!allowed::permits_v4(&table, &[], &v4_packet("8.8.8.8", "100.64.0.1")));
 }
 
 #[test]
 fn a_gateway_may_send_from_inside_its_advertised_subnet() {
     let table = vec![host("100.64.0.5"), allowed::parse("192.168.50.0/24").unwrap()];
-    assert!(allowed::permits_v4(&table, &v4_packet("192.168.50.20", "100.64.0.1")));
-    assert!(!allowed::permits_v4(&table, &v4_packet("192.168.51.20", "100.64.0.1")));
+    assert!(allowed::permits_v4(&table, &[], &v4_packet("192.168.50.20", "100.64.0.1")));
+    assert!(!allowed::permits_v4(&table, &[], &v4_packet("192.168.51.20", "100.64.0.1")));
 }
 
 #[test]
 fn an_exit_node_may_send_from_anywhere() {
     let table = vec![host("100.64.0.4"), allowed::DEFAULT_ROUTE];
-    assert!(allowed::permits_v4(&table, &v4_packet("8.8.8.8", "100.64.0.1")));
+    assert!(allowed::permits_v4(&table, &[], &v4_packet("8.8.8.8", "100.64.0.1")));
+}
+
+#[test]
+fn an_exit_node_may_not_speak_for_another_device() {
+    let exit = vec![host("100.64.0.4"), allowed::DEFAULT_ROUTE];
+    let foreign = vec![
+        allowed::parse("100.64.0.0/24").unwrap(),
+        host("100.64.0.3"),
+        allowed::parse("192.168.50.0/24").unwrap(),
+    ];
+    assert!(allowed::permits_v4(&exit, &foreign, &v4_packet("8.8.8.8", "100.64.0.1")));
+    assert!(allowed::permits_v4(&exit, &foreign, &v4_packet("100.64.0.4", "100.64.0.1")));
+    assert!(!allowed::permits_v4(&exit, &foreign, &v4_packet("100.64.0.3", "100.64.0.1")));
+    assert!(!allowed::permits_v4(&exit, &foreign, &v4_packet("100.64.0.9", "100.64.0.1")));
+    assert!(!allowed::permits_v4(&exit, &foreign, &v4_packet("192.168.50.20", "100.64.0.1")));
 }
 
 #[test]
@@ -788,8 +810,8 @@ fn unparseable_buffers_are_refused() {
     let mut v6 = full.clone();
     v6[0] = 0x60;
     assert_eq!(allowed::source_v4(&v6), None);
-    assert!(!allowed::permits_v4(&table, &full[..19]));
-    assert!(!allowed::permits_v4(&table, &v6));
+    assert!(!allowed::permits_v4(&table, &[], &full[..19]));
+    assert!(!allowed::permits_v4(&table, &[], &v6));
 }
 
 #[test]
