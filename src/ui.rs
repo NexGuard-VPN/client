@@ -271,17 +271,20 @@ impl VpnApp {
     }
 
     fn connect(&mut self) {
-        if !self.signed_in {
-            self.view = View::SignIn;
-            return;
-        }
-        if self.project_id.is_none() {
-            self.view = View::Home;
-            return;
-        }
-        if self.identity_is_foreign() {
-            self.mesh_identity = None;
-            self.backend.fire(Request::ClearIdentity);
+        let joined_network = self.joined_network().map(|identity| identity.network.id.clone());
+        if joined_network.is_none() {
+            if !self.signed_in {
+                self.view = View::SignIn;
+                return;
+            }
+            if self.project_id.is_none() {
+                self.view = View::Home;
+                return;
+            }
+            if self.identity_is_foreign() {
+                self.mesh_identity = None;
+                self.backend.fire(Request::ClearIdentity);
+            }
         }
         if self.request_in_flight.load(Ordering::Relaxed) {
             return;
@@ -292,8 +295,8 @@ impl VpnApp {
         self.exit_geo_at = None;
         let config = MeshConfig {
             user_token: account_token(),
-            network_id: self.mesh_network_id.clone(),
-            project_id: self.project_id.clone(),
+            project_id: if joined_network.is_some() { None } else { self.project_id.clone() },
+            network_id: joined_network.or_else(|| self.mesh_network_id.clone()),
             device_name: self.mesh_device_name.clone(),
             exit_node: self.mesh_exit_node.clone(),
             advertise_exit_node: self.share_internet,
@@ -446,7 +449,7 @@ impl VpnApp {
                 if self.modal.as_ref().is_some_and(|m| m.title == HELPER_TITLE) {
                     self.modal = None;
                 }
-                if self.signed_in && self.mesh_identity.is_some() && self.auto_reconnect {
+                if self.can_connect() && self.auto_reconnect {
                     self.connect();
                 }
             }
@@ -504,6 +507,16 @@ impl VpnApp {
         if self.mesh_identity.is_some() {
             self.backend.fire(Request::AdvertiseExit { enabled });
         }
+    }
+
+    fn joined_network(&self) -> Option<&MeshIdentity> {
+        let identity = self.mesh_identity.as_ref()?;
+        let projects = self.signed_in.then(|| self.projects.value.as_deref()).flatten();
+        joined_outside_account(self.signed_in, projects).then_some(identity)
+    }
+
+    fn can_connect(&self) -> bool {
+        self.mesh_identity.is_some() && (self.signed_in || self.joined_network().is_some())
     }
 
     fn project_list(&self) -> &[Project] {
@@ -645,16 +658,34 @@ impl VpnApp {
         if self.members.idle() && self.is_admin() {
             self.members.start(|| crate::meshapi::list_members(&account_token()));
         }
-        let routed = self.mesh_exit_node.is_some()
-            && matches!(*self.state.lock().unwrap(), ConnectionState::Connected);
-        let settled = self
-            .connected_frame_since
-            .is_some_and(|since| since.elapsed() >= GEO_SETTLE);
-        let stale = self.exit_geo_at.is_some_and(|at| at.elapsed() >= GEO_REFRESH);
-        if routed && settled && (self.exit_geo.idle() || stale) {
+    }
+
+    /// Where the internet sees this machine, refreshed whenever the route it
+    /// takes may have changed: a tunnel coming up or down, an exit picked, a
+    /// new network.
+    fn ensure_geo(&mut self, state: &ConnectionState) {
+        let level = self.protection(state);
+        if level == Protection::Busy {
+            return;
+        }
+        let settled = level == Protection::Off
+            || self.connected_frame_since.is_some_and(|since| since.elapsed() >= GEO_SETTLE);
+        let every = if level == Protection::Full { GEO_REFRESH } else { GEO_IDLE_REFRESH };
+        let stale = self.exit_geo_at.is_some_and(|at| at.elapsed() >= every);
+        if settled && (self.exit_geo.idle() || stale) {
             self.exit_geo.reset();
             self.exit_geo.start(crate::api::fetch_geo_self);
         }
+    }
+
+    fn protection(&self, state: &ConnectionState) -> Protection {
+        let routed = self
+            .mesh_status
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|session| session.exit_node.is_some());
+        protection(state, routed)
     }
 
     fn poll_remotes(&mut self) {
@@ -1260,12 +1291,18 @@ const COPY_FEEDBACK: std::time::Duration = std::time::Duration::from_secs(2);
 /// answer also changes when the exit node moves or the selection changes.
 const GEO_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
 const GEO_REFRESH: std::time::Duration = std::time::Duration::from_secs(20);
+const GEO_IDLE_REFRESH: std::time::Duration = std::time::Duration::from_secs(300);
+const STATUS_STRIP: f32 = 3.0;
+const HERO_TINT: f32 = 0.12;
+const HERO_EDGE: f32 = 0.45;
 const SIGNIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const SIGNIN_POLLS: u32 = 300;
 const BUSY_REPAINT: std::time::Duration = std::time::Duration::from_millis(200);
 const IDLE_REPAINT: std::time::Duration = std::time::Duration::from_millis(500);
 const ROAM_GRACE: u64 = 6;
 const WINDOW_SIZE: [f32; 2] = [430.0, 640.0];
+const SWITCH_WIDTH: f32 = 34.0;
+const SWITCH_HEIGHT: f32 = 20.0;
 const WINDOW_MIN: [f32; 2] = [400.0, 560.0];
 
 const ACTION_DISMISS: &str = "Dismiss";
@@ -1286,7 +1323,7 @@ const SIGNIN_BUTTON: &str = "Sign in";
 const SIGNIN_WAITING: &str = "Waiting for your browser...";
 const SIGNIN_HINT: &str = "Finish signing in the browser window that just opened.";
 const SIGNIN_LINK_LABEL: &str = "Browser did not open? Use this link:";
-const SIGNIN_ADVANCED: &str = "Control plane";
+const SIGNIN_ADVANCED: &str = "Use a custom server";
 const SIGNIN_ADVANCED_HINT: &str = "Leave empty to use NexGuard's own service.";
 
 const ERR_SIGNIN_TIMEOUT: &str = "The sign-in link expired. Try again.";
@@ -1322,16 +1359,22 @@ const WORD_DEVICES: &str = "devices";
 const WORD_PERSON: &str = "person";
 const WORD_PEOPLE: &str = "people";
 
-const THIS_DEVICE: &str = "Connection";
 const THIS_DEVICE_TAG: &str = "this device";
-const STATUS_CONNECTED: &str = "Connected";
 const STATUS_CONNECTING: &str = "Connecting...";
 const STATUS_DISCONNECTING: &str = "Disconnecting...";
 const STATUS_IDLE: &str = "Not connected";
+const HERO_OFF_BODY: &str = "Your traffic goes out as usual, unencrypted by NexGuard.";
+const HERO_MESH_TITLE: &str = "Connected to {}";
+const HERO_MESH_BODY: &str =
+    "Traffic between your devices is encrypted. Internet goes out directly; pick an exit below to encrypt it too.";
+const HERO_FULL_TITLE: &str = "Protected";
+const HERO_FULL_BODY: &str = "All your traffic is encrypted and leaves through {}.";
+const HERO_IP_LABEL: &str = "Your IP";
+const HERO_IP_CHECKING: &str = "checking...";
+const HERO_IP_UNKNOWN: &str = "unavailable";
 const RELAY_DOWN: &str = "Relay offline";
 const RELAY_DOWN_TIP: &str = "only devices reachable peer-to-peer are up right now";
 const COPY_IP_TIP: &str = "click to copy this address";
-const COPY_GLYPH: &str = "⧉";
 const EXIT_OFFERS: &str = "internet exit ·";
 const EXIT_IN_USE: &str = "your internet goes out here ·";
 const EXIT_USE: &str = "Use";
@@ -1346,12 +1389,11 @@ const CLIPBOARD_PASTE_BIN: &str = "/usr/bin/pbpaste";
 const CONSOLE_DEVICE: &str = "/dev/console";
 const MS_SUFFIX: &str = "ms";
 
-const EXIT_LABEL: &str = "Internet";
-const EXIT_DIRECT: &str = "Direct";
-const EXIT_DIRECT_HINT: &str = "This device reaches the internet on its own.";
-const EXIT_ROUTED_HINT: &str = "All internet traffic goes through {}.";
+const EXIT_LABEL: &str = "Internet via";
+const EXIT_DIRECT: &str = "This device";
+const EXIT_DIRECT_HINT: &str = "Websites see this device's own address.";
+const EXIT_ROUTED_HINT: &str = "Once connected, your internet traffic leaves through {}.";
 const EXIT_NONE_HINT: &str = "Turn on internet sharing on another device to route through it.";
-const EXIT_FROM: &str = "Seen from";
 const SHARE_INTERNET: &str = "Share this device's internet";
 const SHARE_INTERNET_TIP: &str =
     "let the other devices in this project route their internet traffic through this one";
@@ -1363,6 +1405,9 @@ const DEVICES_ONLINE: &str = " online";
 const DEVICES_EMPTY: &str = "Only this device so far.";
 const DEVICES_LOADING: &str = "Loading devices...";
 const DEVICE_ADD: &str = "+ Add a device";
+const JOINED_TITLE: &str = "Joined with a project token";
+const JOINED_SIGNIN_TIP: &str = "sign in to create projects or add devices of your own";
+const JOINED_DEVICES_HINT: &str = "Connect to see the other devices in this network.";
 const TAG_PROVISIONED: &str = "provisioned";
 const TAG_SHARES: &str = "shares internet";
 const PATH_DIRECT: &str = "direct";
@@ -1439,7 +1484,7 @@ const SETTINGS_AUTO_RECONNECT: &str = "Reconnect automatically after a drop";
 const SETTINGS_ADVANCED: &str = "Advanced";
 const SETTINGS_ROUTES_LABEL: &str = "Share these subnets (comma-separated CIDRs)";
 const SETTINGS_ROUTES_HINT: &str = "e.g. 192.168.1.0/24, 10.0.0.0/8";
-const SETTINGS_HOST_LABEL: &str = "Control plane host";
+const SETTINGS_HOST_LABEL: &str = "Server address";
 const SETTINGS_DEVICE_SECTION: &str = "This device";
 const MAGIC_DNS: &str = "Resolve device names (changes system DNS)";
 const MAGIC_DNS_TIP: &str =
@@ -1577,6 +1622,46 @@ fn exit_candidates(rows: &[DeviceRow]) -> Vec<&DeviceRow> {
     rows.iter().filter(|row| row.shares_internet && !row.is_self).collect()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Protection {
+    Off,
+    Busy,
+    Mesh,
+    Full,
+}
+
+/// Only an exit node carries the internet through the tunnel; without one the
+/// mesh encrypts device-to-device traffic and nothing else, and the screen
+/// must not claim more than that.
+fn protection(state: &ConnectionState, routed: bool) -> Protection {
+    match state {
+        ConnectionState::Connecting => Protection::Busy,
+        ConnectionState::Connected if routed => Protection::Full,
+        ConnectionState::Connected => Protection::Mesh,
+        _ => Protection::Off,
+    }
+}
+
+fn protection_color(level: Protection) -> egui::Color32 {
+    let t = theme();
+    match level {
+        Protection::Off => t.text_muted,
+        Protection::Busy => t.warning,
+        Protection::Mesh => t.info,
+        Protection::Full => t.success,
+    }
+}
+
+fn draw_status_strip(ctx: &egui::Context, level: Protection) {
+    if !matches!(level, Protection::Mesh | Protection::Full) {
+        return;
+    }
+    let screen = ctx.screen_rect();
+    let strip = egui::Rect::from_min_size(screen.min, egui::vec2(screen.width(), STATUS_STRIP));
+    ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("status_strip")))
+        .rect_filled(strip, 0.0, protection_color(level));
+}
+
 fn exit_label(selected: Option<&str>, rows: &[DeviceRow]) -> String {
     selected
         .and_then(|id| exit_candidates(rows).into_iter().find(|row| row.device_id == id))
@@ -1610,6 +1695,10 @@ fn details_line(row: &DeviceRow) -> String {
         parts.push(TAG_SHARES.to_string());
     }
     parts.join(SEPARATOR)
+}
+
+fn joined_outside_account(signed_in: bool, projects: Option<&[Project]>) -> bool {
+    !signed_in || projects.is_some_and(|list| list.is_empty())
 }
 
 fn identity_project(identity: &MeshIdentity) -> Option<&str> {
@@ -1802,6 +1891,7 @@ pub(crate) struct Theme {
     pub(crate) success: egui::Color32,
     pub(crate) danger: egui::Color32,
     pub(crate) warning: egui::Color32,
+    pub(crate) info: egui::Color32,
     pub(crate) input_bg: egui::Color32,
 }
 
@@ -1820,6 +1910,7 @@ fn dark_theme() -> Theme {
         success: egui::Color32::from_rgb(112, 212, 142),
         danger: egui::Color32::from_rgb(240, 96, 90),
         warning: egui::Color32::from_rgb(236, 184, 92),
+        info: egui::Color32::from_rgb(110, 168, 254),
         input_bg: egui::Color32::from_rgb(12, 12, 15),
     }
 }
@@ -1832,6 +1923,7 @@ pub(crate) fn theme() -> &'static Theme {
 
 fn setup_style(ctx: &egui::Context) {
     let t = theme();
+    ctx.set_theme(egui::ThemePreference::Dark);
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
@@ -1870,12 +1962,24 @@ fn setup_style(ctx: &egui::Context) {
 
 fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     let t = theme();
+    framed(ui, t.surface, t.border, add);
+}
+
+fn tinted_card(ui: &mut egui::Ui, color: egui::Color32, add: impl FnOnce(&mut egui::Ui)) {
+    let t = theme();
+    framed(ui, t.surface.lerp_to_gamma(color, HERO_TINT), t.border.lerp_to_gamma(color, HERO_EDGE), add);
+}
+
+fn framed(ui: &mut egui::Ui, fill: egui::Color32, edge: egui::Color32, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::default()
-        .fill(t.surface)
+        .fill(fill)
         .corner_radius(cr(12))
         .inner_margin(16.0)
-        .stroke(egui::Stroke::new(1.0_f32, t.border))
-        .show(ui, add);
+        .stroke(egui::Stroke::new(1.0_f32, edge))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            add(ui)
+        });
 }
 
 fn lbl(text: &str) -> egui::RichText {
@@ -1886,7 +1990,6 @@ fn title_text(text: &str, size: f32) -> egui::RichText {
     egui::RichText::new(text)
         .size(size)
         .strong()
-        .family(egui::FontFamily::Monospace)
         .color(theme().text)
 }
 
@@ -1939,22 +2042,54 @@ fn role_badge(ui: &mut egui::Ui, role: &str) {
     badge(ui, role, color, tip);
 }
 
+/// An on/off setting reads as a switch: a checkbox drawn with the app's round
+/// corners is a dot that does not look clickable.
+fn switch(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
+    let t = theme();
+    ui.horizontal(|ui| {
+        let size = egui::vec2(SWITCH_WIDTH, SWITCH_HEIGHT);
+        let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+        let label = ui.add(
+            egui::Label::new(egui::RichText::new(label).size(13.0).color(t.text_secondary))
+                .sense(egui::Sense::click()),
+        );
+        if response.clicked() || label.clicked() {
+            *on = !*on;
+            response.mark_changed();
+        }
+        let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
+        let radius = rect.height() / 2.0;
+        let track = if ui.is_enabled() {
+            t.border.lerp_to_gamma(t.accent, how_on)
+        } else {
+            t.surface_hover
+        };
+        ui.painter().rect_filled(rect, radius, track);
+        let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+        let knob = if *on { t.accent_ink } else { t.text };
+        ui.painter().circle_filled(egui::pos2(x, rect.center().y), radius - 3.0, knob);
+        response.union(label)
+    })
+    .inner
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn primary_button(ui: &mut egui::Ui, label: &str, width: f32) -> egui::Response {
     let t = theme();
-    ui.add(
+    ui.add_sized(
+        egui::vec2(width, 38.0),
         egui::Button::new(egui::RichText::new(label).size(14.0).strong().color(t.accent_ink))
-            .fill(t.accent)
-            .min_size(egui::vec2(width, 38.0)),
+            .fill(t.accent),
     )
     .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn ghost_button(ui: &mut egui::Ui, label: &str, color: egui::Color32, width: f32) -> egui::Response {
-    ui.add(
+    ui.add_sized(
+        egui::vec2(width, 30.0),
         egui::Button::new(egui::RichText::new(label).size(13.0).color(color))
             .fill(egui::Color32::TRANSPARENT)
-            .stroke(egui::Stroke::new(1.0_f32, color))
-            .min_size(egui::vec2(width, 30.0)),
+            .stroke(egui::Stroke::new(1.0_f32, color)),
     )
     .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -2128,12 +2263,15 @@ impl eframe::App for VpnApp {
                 if self.signed_in {
                     draw_app_bar(ui, self);
                     draw_view(ui, self, &state);
+                } else if self.joined_network().is_some() && !self.signin_in_progress {
+                    draw_joined(ui, self, &state);
                 } else {
                     draw_sign_in(ui, self);
                 }
                 draw_update_banner(ui, self);
             });
         });
+        draw_status_strip(ctx, self.protection(&state));
 
         if let ConnectionState::Error(ref msg) = state {
             if self.error_modal_for.as_deref() != Some(msg.as_str()) {
@@ -2154,6 +2292,7 @@ impl eframe::App for VpnApp {
         self.poll_sign_in();
         self.poll_remotes();
         self.ensure_loaded();
+        self.ensure_geo(&state);
 
         if let Some(action) = self.modal.as_ref().and_then(|m| m.draw(ctx)) {
             self.handle_modal_action(action);
@@ -2167,7 +2306,7 @@ impl eframe::App for VpnApp {
         }
 
         if self.connect_trigger.swap(false, Ordering::Relaxed) {
-            if !self.signed_in {
+            if !self.can_connect() && !self.signed_in {
                 self.view = View::SignIn;
                 show_window(ctx);
             } else {
@@ -2188,6 +2327,8 @@ impl eframe::App for VpnApp {
         let net_epoch = self.netmon.epoch();
         if net_epoch != self.last_net_epoch {
             self.last_net_epoch = net_epoch;
+            self.exit_geo.reset();
+            self.exit_geo_at = None;
             let grace_over = self
                 .connected_frame_since
                 .is_some_and(|t| t.elapsed().as_secs() >= ROAM_GRACE);
@@ -2410,6 +2551,9 @@ fn draw_home(ui: &mut egui::Ui, app: &mut VpnApp, state: &ConnectionState) {
                 centered_spinner(ui, PROJECTS_LOADING);
             }
         }
+        Some(list) if list.is_empty() && app.joined_network().is_some() => {
+            draw_network(ui, app, state, &mut action);
+        }
         Some(list) if list.is_empty() => {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
@@ -2441,6 +2585,51 @@ fn draw_home(ui: &mut egui::Ui, app: &mut VpnApp, state: &ConnectionState) {
     if let Some(action) = action {
         app.apply(action);
     }
+}
+
+/// A machine added with a project token is in that project's network even
+/// though no account on it lists the project; it still sees and uses it.
+fn draw_joined(ui: &mut egui::Ui, app: &mut VpnApp, state: &ConnectionState) {
+    let t = theme();
+    let mut action: Option<Action> = None;
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(JOINED_TITLE).size(13.0).color(t.text_muted));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if quiet_button(ui, SIGNIN_BUTTON, t.accent).on_hover_text(JOINED_SIGNIN_TIP).clicked() {
+                action = Some(Action::StartSignIn);
+            }
+        });
+    });
+    ui.add_space(8.0);
+    ui.separator();
+    draw_network(ui, app, state, &mut action);
+    if let Some(action) = action {
+        app.apply(action);
+    }
+}
+
+fn draw_network(
+    ui: &mut egui::Ui,
+    app: &VpnApp,
+    state: &ConnectionState,
+    action: &mut Option<Action>,
+) {
+    let t = theme();
+    let suffix = app
+        .joined_network()
+        .map(|identity| identity.network.dns_suffix.clone())
+        .unwrap_or_default();
+    ui.add_space(8.0);
+    if !suffix.is_empty() {
+        ui.label(egui::RichText::new(suffix).size(15.0).strong().color(t.text));
+        ui.add_space(10.0);
+    }
+    let rows = app.device_rows();
+    draw_this_device(ui, app, state, &rows, action);
+    ui.add_space(16.0);
+    draw_devices(ui, app, &rows, action);
+    ui.add_space(10.0);
 }
 
 fn draw_project_bar(
@@ -2531,39 +2720,81 @@ fn draw_this_device(
     let mesh = app.mesh_status.lock().unwrap().clone();
     let disconnecting = app.disconnecting.load(Ordering::Relaxed);
     let relay_down = mesh.as_ref().is_some_and(|status| !status.relay_connected);
-    let (status_label, status_color, status_filled) = match state {
-        ConnectionState::Connected => (STATUS_CONNECTED, t.success, true),
-        ConnectionState::Connecting if disconnecting => (STATUS_DISCONNECTING, t.warning, false),
-        ConnectionState::Connecting => (STATUS_CONNECTING, t.warning, false),
-        _ => (STATUS_IDLE, t.text_muted, false),
+    let level = app.protection(state);
+    let exit_name = mesh
+        .as_ref()
+        .and_then(|session| session.exit_node.as_deref())
+        .map(|id| rows.iter().find(|row| row.device_id == id).map_or(id, |row| row.name.as_str()))
+        .unwrap_or_default()
+        .to_string();
+    let network = mesh.as_ref().map(|session| session.dns_suffix.clone()).unwrap_or_default();
+    let (title, body) = match level {
+        Protection::Off => (STATUS_IDLE.to_string(), HERO_OFF_BODY.to_string()),
+        Protection::Busy if disconnecting => (STATUS_DISCONNECTING.to_string(), String::new()),
+        Protection::Busy => (STATUS_CONNECTING.to_string(), String::new()),
+        Protection::Mesh => (
+            HERO_MESH_TITLE.replace(PLACEHOLDER, &network),
+            HERO_MESH_BODY.to_string(),
+        ),
+        Protection::Full => (HERO_FULL_TITLE.to_string(), HERO_FULL_BODY.replace(PLACEHOLDER, &exit_name)),
     };
+    let color = protection_color(level);
     let connected = matches!(state, ConnectionState::Connected);
     let busy = matches!(state, ConnectionState::Connecting);
     let candidates = exit_candidates(rows);
-    let selected = app.mesh_exit_node.clone();
+    let selected = app
+        .mesh_exit_node
+        .clone()
+        .filter(|id| candidates.iter().any(|row| &row.device_id == id));
 
-    card(ui, |ui| {
+    tinted_card(ui, color, |ui| {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(THIS_DEVICE).size(14.0).strong().color(t.text));
+            if busy {
+                ui.spinner();
+            } else {
+                status_dot(ui, level != Protection::Off, color);
+            }
+            ui.label(egui::RichText::new(&title).size(17.0).strong().color(t.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(status_label).size(12.0).strong().color(status_color));
-                status_dot(ui, status_filled, status_color);
+                if let Some(session) = mesh.as_ref().filter(|_| connected) {
+                    ui.label(lbl(&fmt_uptime(session.uptime_secs)));
+                }
                 if relay_down {
                     badge(ui, RELAY_DOWN, t.warning, RELAY_DOWN_TIP);
                 }
             });
         });
-        ui.add_space(10.0);
-        if busy {
+        if !body.is_empty() {
+            ui.add_space(2.0);
+            ui.add(egui::Label::new(lbl(&body)).wrap());
+        }
+        if !busy {
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(lbl(status_label));
+                ui.label(lbl(HERO_IP_LABEL));
+                match app.exit_geo.value.as_ref() {
+                    Some(geo) => {
+                        ui.label(egui::RichText::new(&geo.ip).size(13.0).monospace().strong().color(t.text));
+                        let place = geo_place(geo);
+                        if !place.is_empty() {
+                            ui.label(lbl(&format!("{}{}", SEPARATOR, place)));
+                        }
+                    }
+                    None if app.exit_geo.error.is_some() => {
+                        ui.label(lbl(HERO_IP_UNKNOWN));
+                    }
+                    None => {
+                        ui.label(lbl(HERO_IP_CHECKING));
+                    }
+                }
             });
-        } else if connected {
-            if ghost_button(ui, ACTION_DISCONNECT, t.danger, 120.0).clicked() {
+        }
+        ui.add_space(12.0);
+        if connected {
+            if ghost_button(ui, ACTION_DISCONNECT, t.danger, ui.available_width()).clicked() {
                 *action = Some(Action::Disconnect);
             }
-        } else if primary_button(ui, ACTION_CONNECT, 120.0).clicked() {
+        } else if !busy && primary_button(ui, ACTION_CONNECT, ui.available_width()).clicked() {
             *action = Some(Action::Connect);
         }
 
@@ -2600,19 +2831,19 @@ fn draw_this_device(
         });
         ui.add_space(4.0);
         let hint = match selected.as_deref() {
-            Some(id) => EXIT_ROUTED_HINT.replace(PLACEHOLDER, &exit_label(Some(id), rows)),
-            None if candidates.is_empty() => EXIT_NONE_HINT.to_string(),
-            None => EXIT_DIRECT_HINT.to_string(),
+            None if candidates.is_empty() => Some(EXIT_NONE_HINT.to_string()),
+            _ if connected => None,
+            Some(id) => Some(EXIT_ROUTED_HINT.replace(PLACEHOLDER, &exit_label(Some(id), rows))),
+            None => Some(EXIT_DIRECT_HINT.to_string()),
         };
-        ui.label(lbl(&hint));
-        if let Some(geo) = app.exit_geo.value.as_ref().filter(|_| selected.is_some() && connected) {
-            ui.label(lbl(&format!("{} {}", EXIT_FROM, geo_summary(geo))));
+        if let Some(hint) = hint {
+            ui.label(lbl(&hint));
         }
 
         ui.add_space(10.0);
         let supported = crate::exitnode::ExitNodeState::is_supported();
         let mut sharing = app.share_internet;
-        let resp = ui.add_enabled(supported, egui::Checkbox::new(&mut sharing, SHARE_INTERNET));
+        let resp = ui.add_enabled_ui(supported, |ui| switch(ui, &mut sharing, SHARE_INTERNET)).inner;
         if supported {
             if resp.on_hover_text(SHARE_INTERNET_TIP).changed() {
                 *action = Some(Action::ShareInternet(sharing));
@@ -2631,7 +2862,7 @@ fn copyable_address(ui: &mut egui::Ui, app: &VpnApp, address: &str, action: &mut
     let (text, color) = match app.copy_result(address) {
         Some(true) => (COPY_DONE.to_string(), t.success),
         Some(false) => (COPY_FAILED.to_string(), t.danger),
-        None => (format!("{}  {}", address, COPY_GLYPH), t.text_secondary),
+        None => (address.to_string(), t.text_secondary),
     };
     let resp = ui
         .add(
@@ -2718,17 +2949,12 @@ fn pipe_into(mut cmd: std::process::Command, text: &str) -> bool {
     child.wait().map(|status| status.success()).unwrap_or(false)
 }
 
-fn geo_summary(geo: &crate::api::GeoInfo) -> String {
-    let place = if geo.city.is_empty() {
-        geo.country.clone()
-    } else {
-        format!("{}, {}", geo.city, geo.country)
-    };
-    if place.is_empty() {
-        geo.ip.clone()
-    } else {
-        format!("{}{}{}", geo.ip, SEPARATOR, place)
-    }
+fn geo_place(geo: &crate::api::GeoInfo) -> String {
+    [geo.city.as_str(), geo.country.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn draw_devices(
@@ -2760,6 +2986,8 @@ fn draw_devices(
     if rows.is_empty() {
         if app.devices.loading {
             ui.label(lbl(DEVICES_LOADING));
+        } else if app.joined_network().is_some() && app.mesh_status.lock().unwrap().is_none() {
+            ui.label(lbl(JOINED_DEVICES_HINT));
         } else {
             ui.label(lbl(DEVICES_EMPTY));
         }
@@ -2823,9 +3051,11 @@ fn draw_devices(
         ui.add_space(3.0);
     }
 
-    ui.add_space(4.0);
-    if quiet_button(ui, DEVICE_ADD, t.accent).clicked() {
-        *action = Some(Action::Open(View::AddDevice));
+    if app.joined_network().is_none() {
+        ui.add_space(4.0);
+        if quiet_button(ui, DEVICE_ADD, t.accent).clicked() {
+            *action = Some(Action::Open(View::AddDevice));
+        }
     }
 
     if pending > 0 {
@@ -3285,12 +3515,12 @@ fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
     card(ui, |ui| {
         ui.label(egui::RichText::new(SETTINGS_GENERAL).size(14.0).strong().color(t.text));
         ui.add_space(8.0);
-        if ui.checkbox(&mut app.settings_start_login, SETTINGS_START_LOGIN).changed()
+        if switch(ui, &mut app.settings_start_login, SETTINGS_START_LOGIN).changed()
             && crate::autostart::set_enabled(app.settings_start_login).is_err()
         {
             app.settings_start_login = crate::autostart::is_enabled();
         }
-        ui.checkbox(&mut app.auto_reconnect, SETTINGS_AUTO_RECONNECT);
+        switch(ui, &mut app.auto_reconnect, SETTINGS_AUTO_RECONNECT);
     });
 
     ui.add_space(8.0);
@@ -3298,7 +3528,7 @@ fn draw_settings(ui: &mut egui::Ui, app: &mut VpnApp) {
     card(ui, |ui| {
         ui.label(egui::RichText::new(SETTINGS_DEVICE_SECTION).size(14.0).strong().color(t.text));
         ui.add_space(8.0);
-        ui.checkbox(&mut app.settings_magic_dns, MAGIC_DNS).on_hover_text(MAGIC_DNS_TIP);
+        switch(ui, &mut app.settings_magic_dns, MAGIC_DNS).on_hover_text(MAGIC_DNS_TIP);
         ui.add_space(12.0);
         if ui
             .add_enabled(joined, {
@@ -3601,6 +3831,48 @@ mod tests {
     fn an_identity_from_another_project_is_not_reused() {
         let other = identity("net_9", "prj_9");
         assert!(!identity_serves(&other, &project("prj_1", Some("net_1"))));
+    }
+
+    #[test]
+    fn a_token_joined_machine_shows_its_network_until_an_account_lists_projects() {
+        let own = [project("prj_1", Some("net_1"))];
+        assert!(joined_outside_account(false, None));
+        assert!(joined_outside_account(true, Some(&[])));
+        assert!(!joined_outside_account(true, None));
+        assert!(!joined_outside_account(true, Some(&own)));
+    }
+
+    #[test]
+    fn a_light_system_appearance_keeps_the_dark_palette_readable() {
+        let ctx = egui::Context::default();
+        setup_style(&ctx);
+        let light = egui::RawInput { system_theme: Some(egui::Theme::Light), ..Default::default() };
+        let _ = ctx.run(light, |_| {});
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        assert_eq!(ctx.style().visuals.panel_fill, theme().bg);
+    }
+
+    #[test]
+    fn only_a_tunnel_through_an_exit_node_counts_as_fully_protected() {
+        assert_eq!(protection(&ConnectionState::Connected, true), Protection::Full);
+        assert_eq!(protection(&ConnectionState::Connected, false), Protection::Mesh);
+        assert_eq!(protection(&ConnectionState::Connecting, true), Protection::Busy);
+        assert_eq!(protection(&ConnectionState::Disconnected, true), Protection::Off);
+        assert_eq!(protection(&ConnectionState::Error("x".into()), false), Protection::Off);
+    }
+
+    #[test]
+    fn a_place_is_city_then_country_with_whatever_is_known() {
+        let geo = |city: &str, country: &str| crate::api::GeoInfo {
+            ip: "84.131.240.105".into(),
+            country: country.into(),
+            city: city.into(),
+            region: String::new(),
+            isp: String::new(),
+        };
+        assert_eq!(geo_place(&geo("Hamburg", "Germany")), "Hamburg, Germany");
+        assert_eq!(geo_place(&geo("", "Germany")), "Germany");
+        assert_eq!(geo_place(&geo("", "")), "");
     }
 
     #[test]

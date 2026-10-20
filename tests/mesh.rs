@@ -687,6 +687,51 @@ fn a_failed_reply_carries_its_error_and_a_good_one_its_snapshot() {
     assert_eq!(state, protocol::EngineState::Failed { message: "x".into() });
 }
 
+fn peer(name: &str, ip: &str, path: meshtypes::PeerPath, rtt_ms: Option<u32>, exit_node: bool) -> meshtypes::MeshPeerView {
+    meshtypes::MeshPeerView {
+        device_id: name.into(),
+        name: name.into(),
+        ip: ip.into(),
+        path,
+        rtt_ms,
+        exit_node,
+        online: path != meshtypes::PeerPath::Offline,
+        tx: 0,
+        rx: 0,
+    }
+}
+
+#[test]
+fn the_device_list_puts_this_machine_first_and_aligns_the_columns() {
+    let session = protocol::SessionView {
+        device_id: "me".into(),
+        name: "macbook".into(),
+        address: "100.64.0.2".into(),
+        network: "net_1".into(),
+        dns_suffix: "team.mesh".into(),
+        tun_name: "utun9".into(),
+        exit_node: None,
+        serving_exit: false,
+        advertising_exit: false,
+        relay_connected: true,
+        peers: vec![
+            peer("vps", "100.64.0.3", meshtypes::PeerPath::Direct, Some(23), true),
+            peer("home-pc", "100.64.0.10", meshtypes::PeerPath::Offline, None, false),
+        ],
+        tx: 0,
+        rx: 0,
+        uptime_secs: 0,
+    };
+    assert_eq!(
+        session.device_lines(),
+        vec![
+            "macbook  100.64.0.2   this device",
+            "home-pc  100.64.0.10  offline",
+            "vps      100.64.0.3   direct 23ms, exit node",
+        ]
+    );
+}
+
 #[test]
 fn slow_requests_get_a_longer_deadline_than_status_polls() {
     let status = protocol::Request::Status.timeout();

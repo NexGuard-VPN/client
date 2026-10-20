@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::meshtypes::{MeshConfig, MeshIdentity, MeshPeerView};
+use crate::meshtypes::{MeshConfig, MeshIdentity, MeshPeerView, PeerPath};
 
 const QUICK_TIMEOUT: Duration = Duration::from_secs(5);
 const LONG_TIMEOUT: Duration = Duration::from_secs(120);
@@ -33,6 +33,32 @@ pub struct SessionView {
     pub uptime_secs: u64,
 }
 
+impl SessionView {
+    /// The network as a terminal shows it: this device first, then every peer
+    /// with how it is reached.
+    pub fn device_lines(&self) -> Vec<String> {
+        let mut rows = vec![[self.name.clone(), self.address.clone(), "this device".to_string()]];
+        let mut peers: Vec<&MeshPeerView> = self.peers.iter().collect();
+        peers.sort_by(|a, b| a.name.cmp(&b.name));
+        rows.extend(peers.into_iter().map(|peer| {
+            let path = match (peer.path, peer.rtt_ms) {
+                (PeerPath::Offline, _) => "offline".to_string(),
+                (PeerPath::Relay, _) => "relay".to_string(),
+                (PeerPath::Direct, Some(rtt)) => format!("direct {}ms", rtt),
+                (PeerPath::Direct, None) => "direct".to_string(),
+            };
+            let exit = if peer.exit_node { ", exit node" } else { "" };
+            [peer.name.clone(), peer.ip.clone(), format!("{}{}", path, exit)]
+        }));
+        let name_width = rows.iter().map(|r| r[0].len()).max().unwrap_or(0);
+        let ip_width = rows.iter().map(|r| r[1].len()).max().unwrap_or(0);
+        rows.iter()
+            .map(|[name, ip, state]| {
+                format!("{:<nw$}  {:<iw$}  {}", name, ip, state, nw = name_width, iw = ip_width)
+            })
+            .collect()
+    }
+}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {

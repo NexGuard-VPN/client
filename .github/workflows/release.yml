@@ -35,7 +35,6 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: nexguard-macos-arm64
-            dmg: true
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: nexguard-macos-amd64
@@ -93,26 +92,11 @@ jobs:
             chmod +x ${{ matrix.artifact }}
           fi
 
-      - name: Build DMG (macOS ARM64)
-        if: matrix.dmg
-        shell: bash
-        run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          cp target/${{ matrix.target }}/release/nexguard target/release/nexguard
-          bash scripts/build-dmg.sh "$VERSION"
-
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
-
-      - name: Upload DMG
-        if: matrix.dmg
-        uses: actions/upload-artifact@v4
-        with:
-          name: NexGuard-macOS.dmg
-          path: NexGuard-*.dmg
 
       - name: Upload wintun.dll
         if: runner.os == 'Windows'
@@ -121,8 +105,36 @@ jobs:
           name: wintun.dll
           path: target/${{ matrix.target }}/release/wintun.dll
 
-  release:
+  # One universal app for every Mac: an arm64-only bundle does not start on
+  # Intel at all, and the bundle is signed as a whole so Gatekeeper reads it
+  # as unverified rather than damaged.
+  dmg:
     needs: [prepare, build]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nexguard-macos-*
+          path: mac
+          merge-multiple: true
+
+      - name: Build universal DMG
+        shell: bash
+        run: |
+          lipo -create -output mac/nexguard-universal mac/nexguard-macos-arm64 mac/nexguard-macos-amd64
+          lipo mac/nexguard-universal -verify_arch arm64 x86_64
+          chmod +x mac/nexguard-universal
+          NEXGUARD_BINARY=mac/nexguard-universal bash scripts/build-dmg.sh "${{ needs.prepare.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NexGuard-macOS.dmg
+          path: NexGuard-*.dmg
+
+  release:
+    needs: [prepare, build, dmg]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -145,7 +157,7 @@ jobs:
                 min_version: "1.9.34",
                 platforms: {
                   "macos-arm64": { url: ($base + "/nexguard-macos-" + $v), dmg: ($base + "/NexGuard-" + $v + ".dmg") },
-                  "macos-amd64": { url: ($base + "/nexguard-macos-intel-" + $v) },
+                  "macos-amd64": { url: ($base + "/nexguard-macos-intel-" + $v), dmg: ($base + "/NexGuard-" + $v + ".dmg") },
                   "linux-amd64": { url: ($base + "/nexguard-linux-" + $v) },
                   "linux-arm64": { url: ($base + "/nexguard-linux-arm64-" + $v) },
                   "windows-amd64": { url: ($base + "/nexguard-windows-" + $v + ".exe") }

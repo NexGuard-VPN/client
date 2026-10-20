@@ -2551,7 +2551,7 @@ dependencies = [
 
 [[package]]
 name = "nexguard"
-version = "1.19.8"
+version = "1.19.9"
 dependencies = [
  "arboard",
  "base64 0.22.1",

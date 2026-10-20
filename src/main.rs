@@ -66,6 +66,7 @@ fn print_help() {
     println!("  --cleanup                 Remove stale routes from a crashed session");
     println!("  --daemon                  Wait for the app to ask for a tunnel (used by the boot service)");
     println!("  --status                  Print what the running daemon is doing");
+    println!("  --devices                 List the devices in the network this machine is in");
     println!("  --install-service         Start automatically on boot (needs root)");
     println!("  --uninstall-service       Remove the boot service");
     println!("  -v, --version             Print version and exit");
@@ -104,6 +105,10 @@ fn main() {
     }
     if args.iter().any(|a| a == "--status") {
         print_status();
+        return;
+    }
+    if args.iter().any(|a| a == "--devices") {
+        print_devices();
         return;
     }
     if args.iter().any(|a| a == cli::DAEMON_FLAG) {
@@ -395,6 +400,31 @@ fn print_status() {
             std::process::exit(1);
         }
     }
+}
+
+#[cfg(unix)]
+fn print_devices() {
+    let snapshot = control::request(&control::Request::Status).unwrap_or_else(|e| {
+        eprintln!("[nexguard] {}", e);
+        std::process::exit(1);
+    });
+    match snapshot.session {
+        Some(session) => {
+            println!("{} ({})", session.dns_suffix, session.network);
+            for line in session.device_lines() {
+                println!("  {}", line);
+            }
+        }
+        None => {
+            eprintln!("[nexguard] not connected; run `sudo nexguard --mesh` or open the app");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn print_devices() {
+    eprintln!("[nexguard] --devices needs the daemon, which this platform does not run");
 }
 
 #[cfg(not(unix))]

@@ -6,7 +6,7 @@ APP_NAME="NexGuard"
 BUNDLE="${APP_NAME}.app"
 DMG_NAME="NexGuard-${VERSION}-macOS.dmg"
 BUILD_DIR="build/dmg"
-BINARY="target/release/nexguard"
+BINARY="${NEXGUARD_BINARY:-target/release/nexguard}"
 
 if [ ! -f "$BINARY" ]; then
     echo "Building release binary..."
@@ -82,6 +82,10 @@ if command -v python3 &>/dev/null; then
     iconutil -c icns "$ICONSET" -o "$BUILD_DIR/${BUNDLE}/Contents/Resources/AppIcon.icns"
     rm -rf "$ICON_DIR"
 fi
+
+echo "Signing app bundle..."
+codesign --force --deep --sign - "$BUILD_DIR/${BUNDLE}"
+codesign --verify --strict --verbose=2 "$BUILD_DIR/${BUNDLE}"
 
 echo "Creating DMG..."
 mkdir -p "$BUILD_DIR/dmg-content"
