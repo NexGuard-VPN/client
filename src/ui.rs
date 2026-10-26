@@ -580,11 +580,7 @@ impl VpnApp {
         let mut rows: Vec<DeviceRow> = match self.devices.value.as_ref() {
             Some(roster) => roster
                 .iter()
-                .filter(|device| {
-                    network.is_empty()
-                        || device.network_id.is_empty()
-                        || device.network_id == network
-                })
+                .filter(|device| device.belongs_to(&network))
                 .map(|device| {
                     let seen = live.iter().find(|p| p.device_id == device.device_id);
                     DeviceRow {

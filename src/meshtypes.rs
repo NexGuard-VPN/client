@@ -188,6 +188,12 @@ pub struct MeshDeviceView {
     pub last_seen: i64,
 }
 
+impl MeshDeviceView {
+    pub fn belongs_to(&self, network_id: &str) -> bool {
+        !network_id.is_empty() && self.network_id == network_id
+    }
+}
+
 #[derive(Clone, serde::Deserialize)]
 pub struct MeshMember {
     #[serde(default)]

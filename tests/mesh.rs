@@ -833,3 +833,20 @@ fn containment_agrees_with_the_longest_prefix_lookup() {
         assert_eq!(allowed::contains(&table, ip), allowed::best_prefix(&table, ip).is_some());
     }
 }
+
+fn roster_device(network_id: &str) -> meshtypes::MeshDeviceView {
+    serde_json::from_value(serde_json::json!({ "device_id": "d1", "network_id": network_id }))
+        .expect("device parses")
+}
+
+#[test]
+fn device_belongs_only_to_its_own_network() {
+    assert!(roster_device("net-a").belongs_to("net-a"));
+    assert!(!roster_device("net-a").belongs_to("net-b"));
+}
+
+#[test]
+fn project_without_network_shows_no_devices() {
+    assert!(!roster_device("net-a").belongs_to(""));
+    assert!(!roster_device("").belongs_to(""));
+}
