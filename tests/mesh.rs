@@ -850,3 +850,27 @@ fn project_without_network_shows_no_devices() {
     assert!(!roster_device("net-a").belongs_to(""));
     assert!(!roster_device("").belongs_to(""));
 }
+
+#[test]
+fn an_address_inside_the_mesh_is_never_an_underlay_endpoint() {
+    let mesh = allowed::parse("100.64.0.0/24").unwrap();
+    let inside: std::net::SocketAddr = "100.64.0.3:51821".parse().unwrap();
+    let public: std::net::SocketAddr = "188.245.161.55:51821".parse().unwrap();
+    let lan: std::net::SocketAddr = "192.168.1.107:51821".parse().unwrap();
+    let neighbour_mesh: std::net::SocketAddr = "100.64.1.9:51821".parse().unwrap();
+    let v6: std::net::SocketAddr = "[2003:e4::1]:51821".parse().unwrap();
+
+    assert!(!allowed::underlay(&inside, mesh));
+    assert!(allowed::underlay(&public, mesh));
+    assert!(allowed::underlay(&lan, mesh));
+    assert!(allowed::underlay(&neighbour_mesh, mesh));
+    assert!(allowed::underlay(&v6, mesh));
+}
+
+#[test]
+fn unspecified_and_loopback_are_not_underlay_endpoints() {
+    let mesh = allowed::parse("100.64.0.0/24").unwrap();
+    for raw in ["0.0.0.0:51821", "127.0.0.1:51821", "[::]:51821", "[::1]:51821"] {
+        assert!(!allowed::underlay(&raw.parse().unwrap(), mesh), "{}", raw);
+    }
+}

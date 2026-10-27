@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub type Cidr = (u32, u32, u8);
 
@@ -34,6 +34,16 @@ pub fn best_prefix(allowed: &[Cidr], dst: u32) -> Option<u8> {
 
 pub fn contains(allowed: &[Cidr], ip: u32) -> bool {
     best_prefix(allowed, ip).is_some()
+}
+
+/// Whether a peer can be reached at `addr` without going through the mesh
+/// itself. An address inside the mesh only answers through our own tunnel, so
+/// adopting one wraps the tunnel in itself and the path collapses under load.
+pub fn underlay(addr: &SocketAddr, mesh: Cidr) -> bool {
+    match addr.ip() {
+        IpAddr::V4(v4) => !v4.is_unspecified() && !v4.is_loopback() && !contains(&[mesh], u32::from(v4)),
+        IpAddr::V6(v6) => !v6.is_unspecified() && !v6.is_loopback(),
+    }
 }
 
 /// The source address of an IPv4 packet, or None for anything that is not one.

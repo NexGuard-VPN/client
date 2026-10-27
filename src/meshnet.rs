@@ -369,6 +369,9 @@ fn run_session(
             match udp.recv_from(&mut read_buf) {
                 Ok((n, from)) => {
                     busy = true;
+                    if !allowed::underlay(&from, handles.mesh_network) {
+                        continue;
+                    }
                     let data = &read_buf[..n];
                     if disco::is_disco(data) {
                         handle_disco(
@@ -596,7 +599,7 @@ fn apply_netmap(
                 peer.allowed = allowed;
                 peer.exit_node = entry.exit_node;
                 peer.online = entry.online;
-                merge_candidates(peer, &entry.endpoints);
+                merge_candidates(peer, &entry.endpoints, handles.mesh_network);
             }
             None => {
                 let tunn = Tunn::new(
@@ -624,7 +627,7 @@ fn apply_netmap(
                     tx_bytes: 0,
                     rx_bytes: 0,
                 };
-                merge_candidates(&mut peer, &entry.endpoints);
+                merge_candidates(&mut peer, &entry.endpoints, handles.mesh_network);
                 peers.push(peer);
             }
         }
@@ -668,10 +671,12 @@ fn build_allowed(entry: &MeshPeer, ip: Ipv4Addr, is_selected_exit: bool) -> Vec<
     table
 }
 
-fn merge_candidates(peer: &mut Peer, endpoints: &[String]) {
+fn merge_candidates(peer: &mut Peer, endpoints: &[String], mesh: Cidr) {
     for raw in endpoints {
         if let Ok(addr) = raw.parse::<SocketAddr>() {
-            add_candidate(peer, addr);
+            if allowed::underlay(&addr, mesh) {
+                add_candidate(peer, addr);
+            }
         }
     }
 }
@@ -913,7 +918,7 @@ fn spawn_endpoint_reporter(token: String, shutdown: Arc<AtomicBool>) -> SyncSend
 }
 
 fn report_local_endpoints(handles: &SessionHandles) {
-    let endpoints = local_endpoints(handles.local_port);
+    let endpoints = local_endpoints(handles.local_port, handles.mesh_network);
     if !endpoints.is_empty() {
         let _ = handles.endpoints.try_send(endpoints);
     }
@@ -924,13 +929,13 @@ fn publish_endpoint(
     public_endpoint: &mut Option<SocketAddr>,
     handles: &SessionHandles,
 ) {
-    if public_endpoint.as_ref() == Some(&addr) {
+    if public_endpoint.as_ref() == Some(&addr) || !allowed::underlay(&addr, handles.mesh_network) {
         return;
     }
     *public_endpoint = Some(addr);
 
     let mut endpoints: Vec<String> = vec![addr.to_string()];
-    endpoints.extend(local_endpoints(handles.local_port));
+    endpoints.extend(local_endpoints(handles.local_port, handles.mesh_network));
     endpoints.dedup();
     let _ = handles.endpoints.try_send(endpoints);
 }
@@ -1056,6 +1061,7 @@ fn setup_exit_routes(
     }
     preserve.extend(resolve_host_ips(relay_host));
     preserve.extend(resolve_host_ips(&crate::api::api_host()));
+    preserve.extend(stun::servers().iter().flat_map(|server| resolve_host_ips(server)));
     let refs: Vec<&str> = preserve.iter().map(|s| s.as_str()).collect();
     route::ExitRouteState::setup_dual(&refs, tun_name, false)
 }
@@ -1141,7 +1147,7 @@ fn bind_mesh_socket(port: u16) -> Result<UdpSocket, String> {
     Ok(socket)
 }
 
-fn local_endpoints(port: u16) -> Vec<String> {
+fn local_endpoints(port: u16, mesh: Cidr) -> Vec<String> {
     UdpSocket::bind("0.0.0.0:0")
         .and_then(|s| {
             protect::hold(&s)?;
@@ -1149,8 +1155,9 @@ fn local_endpoints(port: u16) -> Vec<String> {
             s.local_addr()
         })
         .ok()
-        .filter(|addr| !addr.ip().is_loopback() && !addr.ip().is_unspecified())
-        .map(|addr| vec![SocketAddr::new(addr.ip(), port).to_string()])
+        .map(|addr| SocketAddr::new(addr.ip(), port))
+        .filter(|addr| allowed::underlay(addr, mesh))
+        .map(|addr| vec![addr.to_string()])
         .unwrap_or_default()
 }
 
@@ -1206,6 +1213,7 @@ mod protect_tests {
     use std::sync::Arc;
 
     const ANY_PORT: u16 = 0;
+    const MESH: crate::allowed::Cidr = (0x6440_0000, 0xFFFF_FF00, 24);
 
     #[test]
     fn every_socket_the_mesh_binds_is_offered_to_the_host() {
@@ -1218,7 +1226,7 @@ mod protect_tests {
         }));
 
         let socket = bind_mesh_socket(ANY_PORT);
-        let _ = local_endpoints(ANY_PORT);
+        let _ = local_endpoints(ANY_PORT, MESH);
         protect::remove();
 
         assert!(socket.is_ok());
@@ -1231,7 +1239,7 @@ mod protect_tests {
         protect::install(Box::new(|_| false));
 
         let socket = bind_mesh_socket(ANY_PORT);
-        let endpoints = local_endpoints(ANY_PORT);
+        let endpoints = local_endpoints(ANY_PORT, MESH);
         protect::remove();
 
         assert!(socket.is_err());
