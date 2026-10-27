@@ -148,10 +148,13 @@ jobs:
 
       - name: Generate version.json
         run: |
+          { curl -fsS -A "nexguard-release" "${BASE_URL}/version.json" || echo '{}'; } | jq '.mobile // {}' > mobile.json
           jq -n \
             --arg v "${VERSION}" \
             --arg base "${BASE_URL}" \
+            --slurpfile mobile mobile.json \
             '{
+              mobile: $mobile[0],
               client: {
                 version: $v,
                 min_version: "1.9.34",
