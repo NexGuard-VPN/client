@@ -14,6 +14,78 @@ const ACTION_CONNECT: &str = "Connect";
 const ACTION_DISCONNECT: &str = "Disconnect";
 const MENU_SHOW: &str = "Show Window";
 const MENU_QUIT: &str = "Quit NexGuard";
+#[cfg(target_os = "linux")]
+const LINUX_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+
+#[derive(Default)]
+pub struct TrayRequests {
+    show: AtomicBool,
+    disconnect: AtomicBool,
+    quit: AtomicBool,
+}
+
+impl TrayRequests {
+    pub fn take_show(&self) -> bool {
+        self.show.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn take_disconnect(&self) -> bool {
+        self.disconnect.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn quit_requested(&self) -> bool {
+        self.quit.load(Ordering::Relaxed)
+    }
+}
+
+pub struct TrayHandle {
+    requests: Arc<TrayRequests>,
+    #[cfg(not(target_os = "linux"))]
+    tray: NexTray,
+}
+
+impl TrayHandle {
+    #[cfg(not(target_os = "linux"))]
+    pub fn start(channels: TrayChannels) -> Option<Self> {
+        let requests = Arc::new(TrayRequests::default());
+        let tray = NexTray::new(channels, Arc::clone(&requests))?;
+        Some(Self { requests, tray })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn start(channels: TrayChannels) -> Option<Self> {
+        let requests = Arc::new(TrayRequests::default());
+        let shared = Arc::clone(&requests);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if gtk::init().is_err() {
+                let _ = ready_tx.send(false);
+                return;
+            }
+            let Some(mut tray) = NexTray::new(channels, shared) else {
+                let _ = ready_tx.send(false);
+                return;
+            };
+            let _ = ready_tx.send(true);
+            gtk::glib::timeout_add_local(LINUX_TICK, move || {
+                tray.tick();
+                gtk::glib::ControlFlow::Continue
+            });
+            gtk::main();
+        });
+        ready_rx.recv().ok().filter(|ready| *ready)?;
+        Some(Self { requests })
+    }
+
+    pub fn tick(&mut self) {
+        #[cfg(not(target_os = "linux"))]
+        self.tray.tick();
+    }
+
+    pub fn requests(&self) -> &TrayRequests {
+        &self.requests
+    }
+}
 
 pub struct NexTray {
     _tray: TrayIcon,
@@ -30,9 +102,7 @@ pub struct NexTray {
     was_connected: bool,
     mesh_status: Arc<Mutex<Option<SessionView>>>,
     connect_trigger: Arc<AtomicBool>,
-    pub quit_requested: bool,
-    pub disconnect_requested: bool,
-    pub show_requested: bool,
+    requests: Arc<TrayRequests>,
 }
 
 pub struct TrayChannels {
@@ -50,7 +120,7 @@ struct TrayView {
 }
 
 impl NexTray {
-    pub fn new(channels: TrayChannels) -> Option<Self> {
+    fn new(channels: TrayChannels, requests: Arc<TrayRequests>) -> Option<Self> {
         let menu = Menu::new();
 
         let item_status = MenuItem::new(TITLE_IDLE, false, None);
@@ -101,26 +171,24 @@ impl NexTray {
             was_connected: false,
             mesh_status: channels.mesh_status,
             connect_trigger: channels.connect_trigger,
-            quit_requested: false,
-            disconnect_requested: false,
-            show_requested: false,
+            requests,
         })
     }
 
-    pub fn tick(&mut self) {
+    fn tick(&mut self) {
         let view = self.compose();
 
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == self.toggle_id {
                 if view.connected {
-                    self.disconnect_requested = true;
+                    self.requests.disconnect.store(true, Ordering::Relaxed);
                 } else {
                     self.connect_trigger.store(true, Ordering::Relaxed);
                 }
             } else if event.id == self.show_id {
-                self.show_requested = true;
+                self.requests.show.store(true, Ordering::Relaxed);
             } else if event.id == self.quit_id {
-                self.quit_requested = true;
+                self.requests.quit.store(true, Ordering::Relaxed);
             }
         }
 

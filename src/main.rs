@@ -1,5 +1,6 @@
 #![cfg_attr(not(feature = "gui"), allow(dead_code))]
 mod api;
+mod desktop;
 pub mod keys;
 pub mod cli;
 pub mod autostart;
@@ -139,12 +140,12 @@ fn main() {
     }
 
     #[cfg(feature = "gui")]
-    ui::run_gui();
-    #[cfg(not(feature = "gui"))]
-    {
-        eprintln!("[nexguard] this build has no interface; use --mesh");
-        print_help();
+    if desktop::session_has_display() {
+        ui::run_gui();
+        return;
     }
+    eprintln!("[nexguard] no window to open here; use join or --mesh");
+    print_help();
 }
 
 /// Before the daemon existed the app ran elevated but kept its key and

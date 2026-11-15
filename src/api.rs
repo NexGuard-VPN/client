@@ -447,7 +447,7 @@ fn detect_platform() -> String {
         else if cfg!(target_os = "windows") { "windows" }
         else { "linux" };
     let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
-    format!("{}-{}", os, arch)
+    crate::desktop::update_platform(os, arch, cfg!(feature = "gui"))
 }
 
 fn parse_url(url: &str) -> Result<(String, String), String> {

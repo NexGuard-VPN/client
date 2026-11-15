@@ -32,6 +32,10 @@ jobs:
             target: aarch64-unknown-linux-musl
             artifact: nexguard-linux-arm64
             cross: true
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: nexguard-linux-desktop-amd64
+            desktop: true
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: nexguard-macos-arm64
@@ -59,6 +63,15 @@ jobs:
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
+      - name: Install desktop libraries (Linux)
+        if: matrix.desktop
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libxdo-dev libayatana-appindicator3-dev libxkbcommon-dev libgl1-mesa-dev
+
+      # The desktop artifact is the same program with its window, built on the
+      # oldest supported runner so its glibc floor stays at 22.04; install.sh
+      # hands it only to machines that have a display.
       # The Linux artifact is headless on purpose: the desktop build links
       # libxdo and friends through the tray, so it cannot start on a server —
       # which is where Linux installs live. `--mesh` and `join` work either way.
@@ -163,6 +176,7 @@ jobs:
                   "macos-amd64": { url: ($base + "/nexguard-macos-intel-" + $v), dmg: ($base + "/NexGuard-" + $v + ".dmg") },
                   "linux-amd64": { url: ($base + "/nexguard-linux-" + $v) },
                   "linux-arm64": { url: ($base + "/nexguard-linux-arm64-" + $v) },
+                  "linux-desktop-amd64": { url: ($base + "/nexguard-linux-desktop-" + $v) },
                   "windows-amd64": { url: ($base + "/nexguard-windows-" + $v + ".exe") }
                 }
               }
@@ -176,6 +190,7 @@ jobs:
           [ -f nexguard-macos-amd64 ] && cp nexguard-macos-amd64 nexguard-macos-intel-${VERSION}
           [ -f nexguard-linux-amd64 ] && cp nexguard-linux-amd64 nexguard-linux-${VERSION}
           [ -f nexguard-linux-arm64 ] && cp nexguard-linux-arm64 nexguard-linux-arm64-${VERSION}
+          [ -f nexguard-linux-desktop-amd64 ] && cp nexguard-linux-desktop-amd64 nexguard-linux-desktop-${VERSION}
           [ -f nexguard-windows-amd64.exe ] && cp nexguard-windows-amd64.exe nexguard-windows-${VERSION}.exe
           for dmg in NexGuard-*-macOS.dmg; do
             [ -f "$dmg" ] && mv "$dmg" "NexGuard-${VERSION}.dmg"
@@ -199,6 +214,7 @@ jobs:
             nexguard-macos-intel-${VERSION} \
             nexguard-linux-${VERSION} \
             nexguard-linux-arm64-${VERSION} \
+            nexguard-linux-desktop-${VERSION} \
             nexguard-windows-${VERSION}.exe; do
             if [ -f "$f" ]; then
               openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$f" -out "$f.sig.bin"
@@ -220,6 +236,8 @@ jobs:
             artifacts/nexguard-linux-${{ env.VERSION }}.sig
             artifacts/nexguard-linux-arm64-${{ env.VERSION }}
             artifacts/nexguard-linux-arm64-${{ env.VERSION }}.sig
+            artifacts/nexguard-linux-desktop-${{ env.VERSION }}
+            artifacts/nexguard-linux-desktop-${{ env.VERSION }}.sig
             artifacts/nexguard-windows-${{ env.VERSION }}.exe
             artifacts/nexguard-windows-${{ env.VERSION }}.exe.sig
             artifacts/NexGuard-${{ env.VERSION }}.dmg
@@ -232,7 +250,7 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: root
           key: ${{ secrets.SSH_KEY }}
-          source: "artifacts/nexguard-macos-${{ env.VERSION }},artifacts/nexguard-macos-${{ env.VERSION }}.sig,artifacts/nexguard-macos-intel-${{ env.VERSION }},artifacts/nexguard-macos-intel-${{ env.VERSION }}.sig,artifacts/nexguard-linux-${{ env.VERSION }},artifacts/nexguard-linux-${{ env.VERSION }}.sig,artifacts/nexguard-linux-arm64-${{ env.VERSION }},artifacts/nexguard-linux-arm64-${{ env.VERSION }}.sig,artifacts/nexguard-windows-${{ env.VERSION }}.exe,artifacts/nexguard-windows-${{ env.VERSION }}.exe.sig,artifacts/NexGuard-${{ env.VERSION }}.dmg,artifacts/version.json"
+          source: "artifacts/nexguard-macos-${{ env.VERSION }},artifacts/nexguard-macos-${{ env.VERSION }}.sig,artifacts/nexguard-macos-intel-${{ env.VERSION }},artifacts/nexguard-macos-intel-${{ env.VERSION }}.sig,artifacts/nexguard-linux-${{ env.VERSION }},artifacts/nexguard-linux-${{ env.VERSION }}.sig,artifacts/nexguard-linux-arm64-${{ env.VERSION }},artifacts/nexguard-linux-arm64-${{ env.VERSION }}.sig,artifacts/nexguard-linux-desktop-${{ env.VERSION }},artifacts/nexguard-linux-desktop-${{ env.VERSION }}.sig,artifacts/nexguard-windows-${{ env.VERSION }}.exe,artifacts/nexguard-windows-${{ env.VERSION }}.exe.sig,artifacts/NexGuard-${{ env.VERSION }}.dmg,artifacts/version.json"
           target: /var/www/nexguard/download/
           strip_components: 1
           overwrite: true
@@ -245,14 +263,15 @@ jobs:
           key: ${{ secrets.SSH_KEY }}
           script: |
             cd /var/www/nexguard/download
-            chmod +x nexguard-macos-${{ env.VERSION }} nexguard-linux-${{ env.VERSION }} nexguard-linux-arm64-${{ env.VERSION }} 2>/dev/null
+            chmod +x nexguard-macos-${{ env.VERSION }} nexguard-linux-${{ env.VERSION }} nexguard-linux-arm64-${{ env.VERSION }} nexguard-linux-desktop-${{ env.VERSION }} 2>/dev/null
             ln -sf nexguard-macos-${{ env.VERSION }} macos
             ln -sf nexguard-macos-intel-${{ env.VERSION }} macos-intel
             ln -sf nexguard-linux-${{ env.VERSION }} linux
             ln -sf nexguard-linux-arm64-${{ env.VERSION }} linux-arm64
+            ln -sf nexguard-linux-desktop-${{ env.VERSION }} linux-desktop
             ln -sf nexguard-windows-${{ env.VERSION }}.exe windows.exe
             ln -sf NexGuard-${{ env.VERSION }}.dmg NexGuard.dmg
             ln -sf nexguard-macos-${{ env.VERSION }} NexGuard-macos
             ln -sf nexguard-linux-${{ env.VERSION }} NexGuard-linux
             ln -sf nexguard-windows-${{ env.VERSION }}.exe NexGuard.exe
-            ls -la macos macos-intel linux linux-arm64 windows.exe NexGuard.dmg version.json
+            ls -la macos macos-intel linux linux-arm64 linux-desktop windows.exe NexGuard.dmg version.json

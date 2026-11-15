@@ -3124,7 +3124,7 @@ dependencies = [
 
 [[package]]
 name = "nexguard"
-version = "1.20.1"
+version = "1.20.3"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -3132,6 +3132,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "eframe",
  "egui",
+ "gtk",
  "hex",
  "hmac 0.12.1",
  "image",

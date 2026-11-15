@@ -1,6 +1,6 @@
 [package]
 name = "nexguard"
-version = "1.20.1"
+version = "1.20.3"
 edition = "2021"
 
 [lib]
@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [features]
 default = ["gui"]
-gui = ["dep:eframe", "dep:egui", "dep:tray-icon", "dep:arboard", "dep:image", "dep:open"]
+gui = ["dep:eframe", "dep:egui", "dep:tray-icon", "dep:arboard", "dep:image", "dep:open", "dep:gtk"]
 
 [dependencies]
 boringtun = "0.7"
@@ -40,6 +40,9 @@ libc = "0.2"
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 russh = { version = "0.64", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["rt", "net", "io-util", "process", "fs", "sync", "time", "macros"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", default-features = false }

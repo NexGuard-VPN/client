@@ -160,12 +160,14 @@ pub fn prepare(config_json: &str) -> String {
 }
 
 /// Runs the mesh on a descriptor the host already created and routed. Performs
-/// network calls: never call it on a UI thread.
+/// network calls: never call it on a UI thread. Owns `tun_fd` from this call
+/// on, whether it succeeds or fails.
 pub fn start(tun_fd: i32, config_json: &str) -> i32 {
     stop();
     let host = match parse(config_json) {
         Ok(host) => host,
         Err(reason) => {
+            release_descriptor(tun_fd);
             remember_error(&reason);
             return -1;
         }
@@ -186,6 +188,16 @@ pub fn start(tun_fd: i32, config_json: &str) -> i32 {
         }
     }
 }
+
+#[cfg(unix)]
+fn release_descriptor(fd: i32) {
+    if fd >= 0 {
+        unsafe { libc::close(fd); }
+    }
+}
+
+#[cfg(not(unix))]
+fn release_descriptor(_fd: i32) {}
 
 fn path_name(path: &PeerPath) -> &'static str {
     match path {

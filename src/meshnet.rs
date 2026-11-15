@@ -96,6 +96,7 @@ pub fn enroll(config: &MeshConfig) -> Result<MeshIdentity, String> {
 }
 
 pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStatus, String> {
+    let hosted_dev = config.hosted_tun.map(tun::TunDevice::from_fd).transpose()?;
     let private_key = crate::load_or_generate_key();
     let secret = StaticSecret::from(private_key);
     let public_key_b64 = crate::b64_encode(PublicKey::from(&secret).as_bytes());
@@ -118,9 +119,9 @@ pub fn connect(config: MeshConfig, shutdown: Arc<AtomicBool>) -> Result<MeshStat
     // iOS and Android create the tunnel themselves, address it and route it
     // with the tunnel settings; everything below that touches the system is the
     // host's job there, not ours.
-    let hosted = config.hosted_tun.is_some();
-    let tun_dev = match config.hosted_tun {
-        Some(fd) => tun::TunDevice::from_fd(fd)?,
+    let hosted = hosted_dev.is_some();
+    let tun_dev = match hosted_dev {
+        Some(device) => device,
         None => {
             let device = tun::TunDevice::try_create(config.mtu)?;
             device.set_address(self_ip, prefix);
@@ -386,20 +387,9 @@ fn run_session(
                         );
                     } else if stun::is_binding_response(data) {
                         handle_stun(data, &mut stun_probes, &mut public_endpoint, &handles);
-                    } else if let Some(idx) = by_addr.get(&from).copied() {
-                        if let Some(received) = decapsulate_into_tun(
-                            &mut peers[idx],
-                            data,
-                            &mut scratch,
-                            &tun_dev,
-                            &udp,
-                            &derp_client,
-                            Some(from),
-                        ) {
-                            handles.status.rx.fetch_add(received, Ordering::Relaxed);
-                        }
                     } else {
-                        for idx in 0..peers.len() {
+                        let hint = by_addr.get(&from).copied();
+                        for idx in crate::path::trial_order(hint, peers.len()) {
                             if let Some(received) = decapsulate_into_tun(
                                 &mut peers[idx],
                                 data,
@@ -991,14 +981,23 @@ fn rebuild_index(
     by_addr: &mut HashMap<SocketAddr, usize>,
     by_key: &mut HashMap<[u8; 32], usize>,
 ) {
-    by_addr.clear();
     by_key.clear();
     for (idx, peer) in peers.iter().enumerate() {
         by_key.insert(peer.key, idx);
-        for cand in &peer.candidates {
-            by_addr.insert(cand.addr, idx);
-        }
     }
+    *by_addr = crate::path::owners(
+        peers
+            .iter()
+            .enumerate()
+            .flat_map(|(idx, peer)| {
+                peer.candidates.iter().map(move |cand| crate::path::AddressClaim {
+                    addr: cand.addr,
+                    owner: idx,
+                    seen: cand.last_data.max(cand.last_pong),
+                })
+            })
+            .collect(),
+    );
 }
 
 fn publish_peers(peers: &[Peer], handles: &SessionHandles) {

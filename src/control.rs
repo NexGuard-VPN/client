@@ -144,7 +144,7 @@ fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
 pub fn request(request: &Request) -> Result<Snapshot, String> {
     use std::os::unix::net::UnixStream;
     let path = socket_path();
-    let mut stream = UnixStream::connect(&path).map_err(|e| format!("{}: {}", DAEMON_UNREACHABLE, e))?;
+    let mut stream = UnixStream::connect(&path).map_err(|e| format!("{} ({}): {}", DAEMON_UNREACHABLE, e, DAEMON_START_HINT))?;
     let _ = stream.set_read_timeout(Some(request.timeout()));
     let _ = stream.set_write_timeout(Some(QUICK_TIMEOUT));
     stream.write_all(encode(request)?.as_bytes()).map_err(|e| format!("send: {}", e))?;
@@ -156,4 +156,5 @@ pub fn request(request: &Request) -> Result<Snapshot, String> {
     decode::<Response>(&line)?.into_result()
 }
 
-pub const DAEMON_UNREACHABLE: &str = "daemon unreachable";
+pub const DAEMON_UNREACHABLE: &str = "background service is not running";
+pub const DAEMON_START_HINT: &str = "start it once with: sudo nexguard --install-service";

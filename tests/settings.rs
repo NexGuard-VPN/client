@@ -73,3 +73,22 @@ fn home_directories_come_from_the_passwd_database() {
     assert_eq!(profiles::user_config_dir(0).unwrap(), std::path::PathBuf::from(root).join(".nexguard"));
     assert!(profiles::passwd_home("no-such-user-xyz").is_none());
 }
+
+#[test]
+fn settings_from_before_the_exit_toggle_keep_no_explicit_choice() {
+    let settings: AppSettings = serde_json::from_str(r#"{"mesh_exit_node":"dev_helsinki"}"#).unwrap();
+    assert_eq!(settings.mesh_exit_node, "dev_helsinki");
+    assert_eq!(settings.mesh_exit_enabled, None);
+}
+
+#[test]
+fn the_exit_toggle_round_trips_apart_from_the_chosen_device() {
+    let settings = AppSettings {
+        mesh_exit_node: "dev_helsinki".to_string(),
+        mesh_exit_enabled: Some(false),
+        ..AppSettings::default()
+    };
+    let back: AppSettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+    assert_eq!(back.mesh_exit_node, "dev_helsinki");
+    assert_eq!(back.mesh_exit_enabled, Some(false));
+}

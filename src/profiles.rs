@@ -84,6 +84,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub mesh_exit_node: String,
     #[serde(default)]
+    pub mesh_exit_enabled: Option<bool>,
+    #[serde(default)]
     pub mesh_advertise_exit_node: bool,
     #[serde(default)]
     pub mesh_network_id: String,
@@ -101,6 +103,7 @@ impl Default for AppSettings {
             advertise_routes: String::new(),
             auto_reconnect: true,
             mesh_exit_node: String::new(),
+            mesh_exit_enabled: None,
             mesh_advertise_exit_node: false,
             mesh_network_id: String::new(),
             project_id: String::new(),

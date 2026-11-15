@@ -3,6 +3,7 @@
 //! the same code, the apps through the C ABI in `ffi` or the JNI bindings in
 //! `android`.
 mod api;
+mod desktop;
 pub mod allowed;
 mod derp;
 mod derpframe;

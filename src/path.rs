@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -43,6 +44,31 @@ pub fn choose(samples: &[PathSample], now: Instant, fresh: Duration) -> Option<S
         .filter(|(_, seen)| now.duration_since(*seen) <= fresh)
         .max_by_key(|(_, seen)| *seen)
         .map(|(addr, _)| addr)
+}
+
+/// One peer's claim on an address, with when that address last proved it
+/// belongs to the peer.
+pub struct AddressClaim {
+    pub addr: SocketAddr,
+    pub owner: usize,
+    pub seen: Option<Instant>,
+}
+
+/// Which peer an address is believed to belong to. Peers behind one NAT share a
+/// public IP and the NAT hands their ports around, so an address can be claimed
+/// by more than one peer; the claim proven most recently wins.
+pub fn owners(mut claims: Vec<AddressClaim>) -> HashMap<SocketAddr, usize> {
+    claims.sort_by_key(|claim| claim.seen);
+    claims.into_iter().map(|claim| (claim.addr, claim.owner)).collect()
+}
+
+/// The order to try peers in for a packet that is not disco or STUN: the peer
+/// the address is believed to belong to first, then every other one, because
+/// that belief goes stale whenever a NAT reassigns the port.
+pub fn trial_order(hint: Option<usize>, count: usize) -> impl Iterator<Item = usize> {
+    hint.filter(|&idx| idx < count)
+        .into_iter()
+        .chain((0..count).filter(move |&idx| Some(idx) != hint))
 }
 
 /// The address a peer's traffic appears to come from. Endpoints also carry the

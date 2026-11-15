@@ -35,9 +35,10 @@ enum Action {
     OpenUrl(&'static str),
     Connect,
     Disconnect,
-    SelectExit(Option<String>),
+    SelectExit(String),
     ShareInternet(bool),
     SelectProject(String),
+    UseExit(bool),
     CreateProject,
     CreateJoinToken,
     AcceptInvite,
@@ -129,7 +130,7 @@ struct VpnApp {
     helper: HelperState,
     helper_task: Remote<()>,
     connect_trigger: Arc<AtomicBool>,
-    tray: Option<crate::tray::NexTray>,
+    tray: Option<crate::tray::TrayHandle>,
     update_info: Arc<Mutex<Option<crate::api::UpdateInfo>>>,
     updating: Arc<AtomicBool>,
     update_result: Arc<Mutex<Option<Result<(), String>>>>,
@@ -154,6 +155,7 @@ struct VpnApp {
     project_name: String,
     members: Remote<Vec<MeshMember>>,
     devices: Remote<Vec<MeshDeviceView>>,
+    roster_peers: Vec<String>,
     invite: Remote<crate::meshapi::MeshInvite>,
     accept: Remote<crate::meshapi::AcceptedInvite>,
     team_task: Remote<()>,
@@ -166,6 +168,7 @@ struct VpnApp {
     mesh_identity: Option<MeshIdentity>,
     mesh_device_name: String,
     mesh_exit_node: Option<String>,
+    mesh_exit_enabled: bool,
     mesh_network_id: Option<String>,
     share_internet: bool,
     settings_advertise_routes: String,
@@ -232,6 +235,7 @@ impl Default for VpnApp {
             project_name: String::new(),
             members: Remote::new(),
             devices: Remote::new(),
+            roster_peers: Vec::new(),
             invite: Remote::new(),
             accept: Remote::new(),
             team_task: Remote::new(),
@@ -244,6 +248,9 @@ impl Default for VpnApp {
             mesh_identity: None,
             mesh_device_name: crate::generate_client_name(),
             mesh_exit_node: optional(&settings.mesh_exit_node),
+            mesh_exit_enabled: settings
+                .mesh_exit_enabled
+                .unwrap_or(!settings.mesh_exit_node.trim().is_empty()),
             mesh_network_id: optional(&settings.mesh_network_id),
             share_internet: settings.mesh_advertise_exit_node,
             settings_advertise_routes: settings.advertise_routes.clone(),
@@ -298,7 +305,7 @@ impl VpnApp {
             project_id: if joined_network.is_some() { None } else { self.project_id.clone() },
             network_id: joined_network.or_else(|| self.mesh_network_id.clone()),
             device_name: self.mesh_device_name.clone(),
-            exit_node: self.mesh_exit_node.clone(),
+            exit_node: self.effective_exit(),
             advertise_exit_node: self.share_internet,
             manage_dns: self.settings_magic_dns,
             advertise_routes: self.advertise_routes(),
@@ -488,6 +495,7 @@ impl VpnApp {
             api_host: self.settings_api_host.trim().to_string(),
             auto_reconnect: self.auto_reconnect,
             mesh_exit_node: self.mesh_exit_node.clone().unwrap_or_default(),
+            mesh_exit_enabled: Some(self.mesh_exit_enabled),
             mesh_advertise_exit_node: self.share_internet,
             mesh_magic_dns: self.settings_magic_dns,
             mesh_network_id: self.mesh_network_id.clone().unwrap_or_default(),
@@ -562,6 +570,20 @@ impl VpnApp {
             .map(|status| status.device_id.clone())
             .or_else(|| self.mesh_identity.as_ref().map(|i| i.device_id.clone()))
             .filter(|id| !id.is_empty())
+    }
+
+    /// The netmap the session long-polls is the only thing that learns about a
+    /// device joining or leaving, so a change in the live peers is what tells the
+    /// roster to reload — no polling of the control plane.
+    fn live_peer_ids(&self) -> Vec<String> {
+        peer_ids(
+            self.mesh_status
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|status| status.peers.as_slice())
+                .unwrap_or_default(),
+        )
     }
 
     /// One roster for the whole screen. The control plane is the source of
@@ -648,7 +670,9 @@ impl VpnApp {
         if self.project_id.is_none() {
             return;
         }
-        if self.devices.idle() {
+        let live = self.live_peer_ids();
+        if self.devices.idle() || live != self.roster_peers {
+            self.roster_peers = live;
             self.devices.start(|| crate::meshapi::list_devices(&account_token()));
         }
         if self.members.idle() && self.is_admin() {
@@ -737,15 +761,15 @@ impl VpnApp {
     fn reconcile_exit_node(&mut self) {
         let Some(selected) = self.mesh_exit_node.clone() else { return };
         let rows = self.device_rows();
-        if exit_candidates(&rows).iter().any(|row| row.device_id == selected) {
+        if rows.iter().all(|row| row.is_self) || exit_candidates(&rows).iter().any(|row| row.device_id == selected) {
             return;
         }
+        let was_routed = self.effective_exit().is_some();
         self.mesh_exit_node = None;
-        self.exit_geo.reset();
-        self.exit_geo_at = None;
+        self.mesh_exit_enabled = false;
         self.persist_settings();
-        if self.busy() {
-            self.reconnect();
+        if was_routed {
+            self.apply_exit_change();
         }
     }
 
@@ -758,6 +782,7 @@ impl VpnApp {
             self.project_id = Some(project_id);
         }
         self.mesh_exit_node = None;
+        self.mesh_exit_enabled = false;
         self.projects.reset();
         self.refresh_team();
         self.persist_settings();
@@ -780,13 +805,71 @@ impl VpnApp {
         self.team_task.reset();
     }
 
+    fn effective_exit(&self) -> Option<String> {
+        effective_exit(self.mesh_exit_enabled, self.mesh_exit_node.as_deref())
+    }
+
+    fn apply_exit_change(&mut self) {
+        self.exit_geo.reset();
+        self.exit_geo_at = None;
+        if self.busy() {
+            self.reconnect();
+        }
+    }
+
+    fn set_exit(&mut self, enabled: bool, node: Option<String>) {
+        let before = self.effective_exit();
+        self.mesh_exit_enabled = enabled;
+        self.mesh_exit_node = node;
+        self.persist_settings();
+        if self.effective_exit() != before {
+            self.apply_exit_change();
+        }
+    }
+
+    fn use_exit(&mut self, enabled: bool) {
+        if !enabled {
+            self.set_exit(false, self.mesh_exit_node.clone());
+            return;
+        }
+        let rows = self.device_rows();
+        let ids: Vec<&str> = exit_candidates(&rows).iter().map(|row| row.device_id.as_str()).collect();
+        if let Some(node) = exit_to_enable(self.mesh_exit_node.as_deref(), &ids) {
+            self.set_exit(true, Some(node));
+        }
+    }
+
     fn select_project(&mut self, id: String) {
         if self.project_id.as_deref() == Some(id.as_str()) {
             return;
         }
+        if self.busy() {
+            use crate::modal::{ButtonStyle, Modal, ModalAction, ModalButton};
+            let current = self.current_project().map(|p| p.name.clone()).unwrap_or_default();
+            let target = self
+                .project_list()
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            self.modal = Some(Modal::confirm(
+                PROJECT_SWITCH_TITLE,
+                &PROJECT_SWITCH_BODY.replace(CURRENT_PLACEHOLDER, &current).replace(TARGET_PLACEHOLDER, &target),
+                vec![
+                    ModalButton::new(ACTION_CANCEL, ButtonStyle::Ghost, ModalAction::Dismiss),
+                    ModalButton::new(PROJECT_SWITCH_CONFIRM, ButtonStyle::Primary, ModalAction::SwitchProject(id)),
+                ],
+            ));
+            return;
+        }
+        self.switch_project(id);
+    }
+
+    fn switch_project(&mut self, id: String) {
         self.project_id = Some(id);
         self.mesh_network_id = None;
         self.mesh_exit_node = None;
+        self.mesh_exit_enabled = false;
         self.refresh_team();
         self.persist_settings();
         if self.busy() {
@@ -834,6 +917,7 @@ impl VpnApp {
             self.disconnect();
         }
         self.mesh_exit_node = None;
+        self.mesh_exit_enabled = false;
         self.mesh_network_id = None;
         self.share_internet = false;
         self.persist_settings();
@@ -1070,6 +1154,10 @@ impl VpnApp {
                 self.modal = None;
                 self.leave_project();
             }
+            SwitchProject(id) => {
+                self.modal = None;
+                self.switch_project(id);
+            }
             RevokeMember(id) => {
                 self.modal = None;
                 self.team_task
@@ -1097,17 +1185,8 @@ impl VpnApp {
                 self.reconnect_pending = false;
                 self.disconnect();
             }
-            Action::SelectExit(device_id) => {
-                if self.mesh_exit_node != device_id {
-                    self.mesh_exit_node = device_id;
-                    self.exit_geo.reset();
-                    self.exit_geo_at = None;
-                    self.persist_settings();
-                    if self.busy() {
-                        self.reconnect();
-                    }
-                }
-            }
+            Action::SelectExit(device_id) => self.set_exit(true, Some(device_id)),
+            Action::UseExit(enabled) => self.use_exit(enabled),
             Action::ShareInternet(enabled) => {
                 if self.share_internet != enabled {
                     self.share_internet = enabled;
@@ -1303,6 +1382,8 @@ const WINDOW_MIN: [f32; 2] = [400.0, 560.0];
 
 const ACTION_DISMISS: &str = "Dismiss";
 const ACTION_RETRY: &str = "Try again";
+const GHOST_BUTTON_HEIGHT: f32 = 30.0;
+const GHOST_BUTTON_MIN_WIDTH: f32 = 96.0;
 const ACTION_CANCEL: &str = "Cancel";
 const ACTION_LATER: &str = "Later";
 const ACTION_RESTART: &str = "Restart now";
@@ -1385,6 +1466,8 @@ const CLIPBOARD_PASTE_BIN: &str = "/usr/bin/pbpaste";
 const CONSOLE_DEVICE: &str = "/dev/console";
 const MS_SUFFIX: &str = "ms";
 
+const EXIT_TOGGLE: &str = "Use a device's internet";
+const EXIT_TOGGLE_TIP: &str = "route this device's internet traffic through another device in the project";
 const EXIT_LABEL: &str = "Internet via";
 const EXIT_DIRECT: &str = "This device";
 const EXIT_DIRECT_HINT: &str = "Websites see this device's own address.";
@@ -1485,6 +1568,12 @@ const SETTINGS_DEVICE_SECTION: &str = "This device";
 const MAGIC_DNS: &str = "Resolve device names (changes system DNS)";
 const MAGIC_DNS_TIP: &str =
     "Lets you reach devices by name. Takes over this machine's DNS, so leave it off if another mesh VPN such as Tailscale is running.";
+const PROJECT_SWITCH_TITLE: &str = "Switch project?";
+const PROJECT_SWITCH_BODY: &str =
+    "You are connected to {current}. Switching to {target} disconnects {current} first — a device is in one project at a time.";
+const PROJECT_SWITCH_CONFIRM: &str = "Disconnect and switch";
+const CURRENT_PLACEHOLDER: &str = "{current}";
+const TARGET_PLACEHOLDER: &str = "{target}";
 const LEAVE_PROJECT: &str = "Leave the project";
 const LEAVE_PROJECT_BODY: &str =
     "This device will be removed from the project and will lose its address.";
@@ -1656,6 +1745,17 @@ fn draw_status_strip(ctx: &egui::Context, level: Protection) {
     let strip = egui::Rect::from_min_size(screen.min, egui::vec2(screen.width(), STATUS_STRIP));
     ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("status_strip")))
         .rect_filled(strip, 0.0, protection_color(level));
+}
+
+fn effective_exit(enabled: bool, node: Option<&str>) -> Option<String> {
+    node.filter(|id| enabled && !id.is_empty()).map(str::to_string)
+}
+
+fn exit_to_enable(remembered: Option<&str>, candidates: &[&str]) -> Option<String> {
+    remembered
+        .filter(|id| candidates.contains(id))
+        .or_else(|| candidates.first().copied())
+        .map(str::to_string)
 }
 
 fn exit_label(selected: Option<&str>, rows: &[DeviceRow]) -> String {
@@ -1856,7 +1956,7 @@ pub fn run_gui() {
                 let _ = target.to_socket_addrs();
             });
 
-            app.tray = crate::tray::NexTray::new(crate::tray::TrayChannels {
+            app.tray = crate::tray::TrayHandle::start(crate::tray::TrayChannels {
                 mesh_status: Arc::clone(&app.mesh_status),
                 connect_trigger: Arc::clone(&app.connect_trigger),
             });
@@ -2081,13 +2181,16 @@ fn primary_button(ui: &mut egui::Ui, label: &str, width: f32) -> egui::Response 
 }
 
 fn ghost_button(ui: &mut egui::Ui, label: &str, color: egui::Color32, width: f32) -> egui::Response {
-    ui.add_sized(
-        egui::vec2(width, 30.0),
-        egui::Button::new(egui::RichText::new(label).size(13.0).color(color))
-            .fill(egui::Color32::TRANSPARENT)
-            .stroke(egui::Stroke::new(1.0_f32, color)),
-    )
-    .on_hover_cursor(egui::CursorIcon::PointingHand)
+    let button = egui::Button::new(egui::RichText::new(label).size(13.0).color(color))
+        .fill(egui::Color32::TRANSPARENT)
+        .stroke(egui::Stroke::new(1.0_f32, color))
+        .min_size(egui::vec2(GHOST_BUTTON_MIN_WIDTH, GHOST_BUTTON_HEIGHT));
+    let response = if width > 0.0 {
+        ui.add_sized(egui::vec2(width, GHOST_BUTTON_HEIGHT), button)
+    } else {
+        ui.add(button)
+    };
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn quiet_button(ui: &mut egui::Ui, label: &str, color: egui::Color32) -> egui::Response {
@@ -2208,12 +2311,10 @@ impl eframe::App for VpnApp {
         let mut tray_disconnect = false;
         if let Some(ref mut tray) = self.tray {
             tray.tick();
-            if tray.show_requested {
-                tray.show_requested = false;
+            if tray.requests().take_show() {
                 show_window(ctx);
             }
-            if tray.disconnect_requested {
-                tray.disconnect_requested = false;
+            if tray.requests().take_disconnect() {
                 tray_disconnect = true;
             }
         }
@@ -2226,7 +2327,7 @@ impl eframe::App for VpnApp {
             show_window(ctx);
         }
 
-        let quit = self.tray.as_ref().is_some_and(|t| t.quit_requested);
+        let quit = self.tray.as_ref().is_some_and(|t| t.requests().quit_requested());
         if quit && !self.quit_cleanup_done {
             self.quit_cleanup();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2795,42 +2896,44 @@ fn draw_this_device(
         }
 
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            ui.label(lbl(EXIT_LABEL));
-            egui::ComboBox::from_id_salt("exit_node")
-                .width(ui.available_width())
-                .selected_text(
-                    egui::RichText::new(exit_label(selected.as_deref(), rows))
-                        .size(13.0)
-                        .color(t.text),
-                )
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(
-                            selected.is_none(),
-                            egui::RichText::new(EXIT_DIRECT).size(13.0),
-                        )
-                        .clicked()
-                    {
-                        *action = Some(Action::SelectExit(None));
-                    }
-                    for row in &candidates {
-                        let picked = selected.as_deref() == Some(row.device_id.as_str());
-                        if ui
-                            .selectable_label(picked, egui::RichText::new(&row.name).size(13.0))
-                            .clicked()
-                        {
-                            *action = Some(Action::SelectExit(Some(row.device_id.clone())));
+        let mut routed = app.mesh_exit_enabled && selected.is_some();
+        let resp = ui
+            .add_enabled_ui(!candidates.is_empty() || routed, |ui| switch(ui, &mut routed, EXIT_TOGGLE))
+            .inner;
+        if resp.on_hover_text(EXIT_TOGGLE_TIP).changed() {
+            *action = Some(Action::UseExit(routed));
+        }
+        if routed {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(lbl(EXIT_LABEL));
+                egui::ComboBox::from_id_salt("exit_node")
+                    .width(ui.available_width())
+                    .selected_text(
+                        egui::RichText::new(exit_label(selected.as_deref(), rows))
+                            .size(13.0)
+                            .color(t.text),
+                    )
+                    .show_ui(ui, |ui| {
+                        for row in &candidates {
+                            let picked = selected.as_deref() == Some(row.device_id.as_str());
+                            if ui
+                                .selectable_label(picked, egui::RichText::new(&row.name).size(13.0))
+                                .clicked()
+                                && !picked
+                            {
+                                *action = Some(Action::SelectExit(row.device_id.clone()));
+                            }
                         }
-                    }
-                });
-        });
+                    });
+            });
+        }
         ui.add_space(4.0);
-        let hint = match selected.as_deref() {
+        let hint = match selected.as_deref().filter(|_| routed) {
             None if candidates.is_empty() => Some(EXIT_NONE_HINT.to_string()),
-            _ if connected => None,
-            Some(id) => Some(EXIT_ROUTED_HINT.replace(PLACEHOLDER, &exit_label(Some(id), rows))),
             None => Some(EXIT_DIRECT_HINT.to_string()),
+            Some(_) if connected => None,
+            Some(id) => Some(EXIT_ROUTED_HINT.replace(PLACEHOLDER, &exit_label(Some(id), rows))),
         };
         if let Some(hint) = hint {
             ui.label(lbl(&hint));
@@ -3022,7 +3125,8 @@ fn draw_devices(
                     }
                 });
                 if row.shares_internet && !row.is_self {
-                    let selected = app.mesh_exit_node.as_deref() == Some(row.device_id.as_str());
+                    let selected = app.mesh_exit_enabled
+                        && app.mesh_exit_node.as_deref() == Some(row.device_id.as_str());
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         let line = match (&row.exit_ip, selected) {
@@ -3036,9 +3140,11 @@ fn draw_devices(
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let label = if selected { EXIT_STOP } else { EXIT_USE };
                             if quiet_button(ui, label, t.accent).clicked() {
-                                *action = Some(Action::SelectExit(
-                                    (!selected).then(|| row.device_id.clone()),
-                                ));
+                                *action = Some(if selected {
+                                    Action::UseExit(false)
+                                } else {
+                                    Action::SelectExit(row.device_id.clone())
+                                });
                             }
                         });
                     });
@@ -3658,9 +3764,106 @@ fn generate_app_icon() -> egui::IconData {
     egui::IconData { width: img.width(), height: img.height(), rgba: img.into_raw() }
 }
 
+fn peer_ids(peers: &[MeshPeerView]) -> Vec<String> {
+    let mut ids: Vec<String> = peers.iter().map(|peer| peer.device_id.clone()).collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ghost_rect(width: f32) -> egui::Rect {
+        let ctx = egui::Context::default();
+        let mut rect = egui::Rect::NOTHING;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 600.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                card(ui, |ui| {
+                    rect = ghost_button(ui, ACTION_RETRY, egui::Color32::WHITE, width).rect;
+                });
+            });
+        });
+        rect
+    }
+
+    #[test]
+    fn auto_width_ghost_button_keeps_label_on_one_line() {
+        let rect = ghost_rect(0.0);
+        assert!(rect.width() >= GHOST_BUTTON_MIN_WIDTH);
+        assert_eq!(rect.height(), GHOST_BUTTON_HEIGHT);
+    }
+
+    #[test]
+    fn fixed_width_ghost_button_uses_given_width() {
+        assert_eq!(ghost_rect(180.0).width(), 180.0);
+    }
+
+    fn peer(device_id: &str) -> MeshPeerView {
+        MeshPeerView {
+            device_id: device_id.to_string(),
+            name: String::new(),
+            ip: String::new(),
+            path: PeerPath::Direct,
+            rtt_ms: None,
+            exit_node: false,
+            online: true,
+            tx: 0,
+            rx: 0,
+        }
+    }
+
+    #[test]
+    fn the_internet_toggle_off_keeps_traffic_direct_whatever_is_chosen() {
+        assert_eq!(effective_exit(false, Some("dev_helsinki")), None);
+        assert_eq!(effective_exit(true, Some("dev_helsinki")), Some("dev_helsinki".to_string()));
+        assert_eq!(effective_exit(true, None), None);
+        assert_eq!(effective_exit(true, Some("")), None);
+    }
+
+    #[test]
+    fn turning_the_internet_on_reuses_the_remembered_device() {
+        let candidates = ["dev_frankfurt", "dev_helsinki"];
+        assert_eq!(exit_to_enable(Some("dev_helsinki"), &candidates), Some("dev_helsinki".to_string()));
+    }
+
+    #[test]
+    fn turning_the_internet_on_falls_back_to_the_first_sharing_device() {
+        let candidates = ["dev_frankfurt", "dev_helsinki"];
+        assert_eq!(exit_to_enable(Some("dev_gone"), &candidates), Some("dev_frankfurt".to_string()));
+        assert_eq!(exit_to_enable(None, &candidates), Some("dev_frankfurt".to_string()));
+    }
+
+    #[test]
+    fn the_internet_cannot_turn_on_without_a_sharing_device() {
+        assert_eq!(exit_to_enable(Some("dev_helsinki"), &[]), None);
+    }
+
+    #[test]
+    fn a_device_joining_changes_the_peer_set() {
+        let before = peer_ids(&[peer("a"), peer("b")]);
+        let after = peer_ids(&[peer("a"), peer("b"), peer("c")]);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn a_device_leaving_changes_the_peer_set() {
+        assert_ne!(peer_ids(&[peer("a"), peer("b")]), peer_ids(&[peer("a")]));
+    }
+
+    #[test]
+    fn traffic_and_reordering_leave_the_peer_set_alone() {
+        let mut busy = peer("b");
+        busy.tx = 9_000;
+        busy.rtt_ms = Some(40);
+        busy.path = PeerPath::Relay;
+        assert_eq!(peer_ids(&[peer("a"), peer("b")]), peer_ids(&[busy, peer("a")]));
+    }
 
     const RAW_FAILURES: [&str; 8] = [
         "list projects: HTTP 404 — 404 page not found",

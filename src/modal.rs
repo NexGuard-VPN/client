@@ -21,6 +21,7 @@ pub enum ModalAction {
     InstallHelper,
     LeaveMesh,
     RevokeMember(String),
+    SwitchProject(String),
     SignOut,
 }
 
