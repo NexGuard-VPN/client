@@ -216,29 +216,31 @@ jobs:
             artifacts/version.json
           generate_release_notes: true
 
-      - name: Deploy to server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: root
-          key: ${{ secrets.SSH_KEY }}
-          source: "artifacts/nexguard-macos-${{ env.VERSION }},artifacts/nexguard-macos-${{ env.VERSION }}.sig,artifacts/nexguard-macos-intel-${{ env.VERSION }},artifacts/nexguard-macos-intel-${{ env.VERSION }}.sig,artifacts/nexguard-linux-${{ env.VERSION }},artifacts/nexguard-linux-${{ env.VERSION }}.sig,artifacts/nexguard-linux-arm64-${{ env.VERSION }},artifacts/nexguard-linux-arm64-${{ env.VERSION }}.sig,artifacts/nexguard-windows-${{ env.VERSION }}.exe,artifacts/nexguard-windows-${{ env.VERSION }}.exe.sig,artifacts/NexGuard-${{ env.VERSION }}.dmg,artifacts/version.json"
-          target: /var/www/nexguard/download/
-          strip_components: 1
-          overwrite: true
+      - name: Stage the download bundle
+        run: |
+          mkdir -p bundle
+          for f in nexguard-macos-${VERSION} nexguard-macos-intel-${VERSION} nexguard-linux-${VERSION} nexguard-linux-arm64-${VERSION} nexguard-windows-${VERSION}.exe NexGuard-${VERSION}.dmg; do
+            [ -f "artifacts/$f" ] && cp "artifacts/$f" bundle/
+            [ -f "artifacts/$f.sig" ] && cp "artifacts/$f.sig" bundle/
+          done
+          cp artifacts/version.json bundle/
+          ls -la bundle
 
-      - name: Update symlinks
-        uses: appleboy/ssh-action@v1.0.3
+      - uses: actions/upload-artifact@v4
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: root
-          key: ${{ secrets.SSH_KEY }}
-          script: |
-            cd /var/www/nexguard/download
-            chmod +x nexguard-macos-${{ env.VERSION }} nexguard-linux-${{ env.VERSION }} nexguard-linux-arm64-${{ env.VERSION }} 2>/dev/null
-            ln -sf nexguard-macos-${{ env.VERSION }} macos
-            ln -sf nexguard-macos-intel-${{ env.VERSION }} macos-intel
-            ln -sf nexguard-linux-${{ env.VERSION }} linux
-            ln -sf nexguard-linux-arm64-${{ env.VERSION }} linux-arm64
-            ln -sf nexguard-windows-${{ env.VERSION }}.exe windows.exe
-            ls -la macos linux linux-arm64 windows.exe version.json
+          name: download-bundle
+          path: bundle/
+          retention-days: 3
+
+  publish:
+    needs: [release]
+    runs-on: [self-hosted, aral-sites]
+    concurrency:
+      group: nexguard-download
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: download-bundle
+          path: bundle
+      - run: tar -czf - -C bundle . | site-ci deploy nexguard-client
